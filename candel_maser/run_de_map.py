@@ -1,0 +1,135 @@
+# Copyright (C) 2026 Richard Stiskalek
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
+# Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+"""Run DE MAP optimization for a maser disk galaxy and save results to TOML.
+
+Usage:
+    python run_de_map.py <galaxy_name> [--seed 42]
+"""
+import os
+import sys
+
+import tomli
+
+with open(os.path.join(os.path.dirname(__file__), "../../local_config.toml"), "rb") as f:
+    _lcfg = tomli.load(f)
+ld = os.environ.get("LD_LIBRARY_PATH", "")
+needed = [p for p in _lcfg.get("gpu_ld_library_path", []) if p not in ld]
+if needed:
+    os.environ["LD_LIBRARY_PATH"] = ":".join(needed) + (f":{ld}" if ld else "")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+import argparse
+import tempfile
+import time
+
+import tomli
+
+# Check per-galaxy use_float64 before importing JAX
+with open("scripts/megamaser/config_maser.toml", "rb") as _f:
+    _pre_cfg = tomli.load(_f)
+_galaxy_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+_gal_cfg = _pre_cfg.get("model", {}).get("galaxies", {}).get(_galaxy_arg, {})
+if _gal_cfg.get("use_float64", False):
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    print(f"float64 enabled for {_galaxy_arg}", flush=True)
+
+import jax
+import numpy as np
+import tomli_w
+
+from candel.inference.optimise import find_MAP
+from candel.model.model_H0_maser import MaserDiskModel
+from candel.pvdata.megamaser_data import load_megamaser_spots
+from candel.util import fprint, fsection
+
+_devs = jax.devices()
+_dev_names = ", ".join(d.device_kind for d in _devs)
+_precision = "float64" if jax.config.jax_enable_x64 else "float32"
+print(f"JAX platform: {jax.default_backend()}, devices: {_devs} "
+      f"({_dev_names}), precision: {_precision}", flush=True)
+
+# ---- Load master config ----
+with open("scripts/megamaser/config_maser.toml", "rb") as f:
+    master_cfg = tomli.load(f)
+
+# ---- Parse args ----
+parser = argparse.ArgumentParser()
+parser.add_argument("galaxy", type=str)
+parser.add_argument("--seed", type=int, default=42)
+args = parser.parse_args()
+
+galaxy = args.galaxy
+seed = args.seed
+
+# ---- Validate galaxy ----
+galaxies = master_cfg["model"]["galaxies"]
+if galaxy not in galaxies:
+    print(f"Unknown galaxy '{galaxy}'. "
+          f"Available: {list(galaxies.keys())}", flush=True)
+    sys.exit(1)
+
+gcfg = galaxies[galaxy]
+v_sys_obs = gcfg["v_sys_obs"]
+
+# ---- Load data ----
+fsection(f"Loading {galaxy} data")
+_mcfg = master_cfg["model"]
+data = load_megamaser_spots("data/Megamaser", galaxy, v_sys_obs=v_sys_obs)
+
+if "D_lo" in gcfg and "D_hi" in gcfg:
+    data["D_lo"] = float(gcfg["D_lo"])
+    data["D_hi"] = float(gcfg["D_hi"])
+
+# ---- Build model ----
+config = {
+    "inference": master_cfg["inference"],
+    "model": master_cfg["model"],
+    "io": master_cfg["io"],
+    "optimise": master_cfg.get("optimise", {}),
+}
+
+tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False)
+tomli_w.dump(config, tmp)
+tmp.close()
+model = MaserDiskModel(tmp.name, data)
+os.unlink(tmp.name)
+
+# ---- Run DE MAP ----
+fsection(f"DE MAP optimization ({galaxy}, {data['n_spots']} spots)")
+t0 = time.time()
+init_params = find_MAP(model, model_kwargs={}, seed=seed)
+dt = time.time() - t0
+
+# ---- Print results ----
+fsection(f"MAP results ({galaxy}, {dt:.0f}s)")
+for k, v in sorted(init_params.items()):
+    v = np.asarray(v)
+    if v.ndim == 0:
+        fprint(f"  {k:20s} = {float(v):12.4f}")
+    else:
+        fprint(f"  {k:20s} = [{len(v)} values]")
+
+# ---- Print init values as TOML snippet (do NOT write back to config) ----
+lines = [f"\n[model.galaxies.{galaxy}.init]"]
+for k, v in sorted(init_params.items()):
+    v = np.asarray(v)
+    if v.ndim == 0:
+        lines.append(f"{k} = {round(float(v), 4)}")
+    else:
+        vals = ", ".join(str(round(float(x), 4)) for x in v)
+        lines.append(f"{k} = [{vals}]")
+fprint("MAP init (copy into config_maser.toml manually if desired):")
+print("\n".join(lines))

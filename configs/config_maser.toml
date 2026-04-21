@@ -1,0 +1,470 @@
+[inference]
+sampler = "nss"
+seed = 42
+num_warmup = 2000
+num_samples = 2000
+num_chains = 1
+dense_mass_blocks = [
+    [
+        "H0",
+        "D_c",
+        "eta",
+        "dv_sys",
+        "i0",
+        "di_dr",
+        "Omega0",
+        "dOmega_dr",
+        "x0",
+        "y0",
+    ],
+    [
+        "sigma_v_sys",
+        "sigma_y_floor",
+        "sigma_a_floor",
+        "sigma_x_floor",
+    ],
+]
+init_maxiter = 0
+init_method = "config"
+max_tree_depth = 10
+n_live = 5000
+num_mcmc_steps = 0
+num_delete = 25
+termination = -3
+
+[model]
+Om = 0.315
+use_selection = false
+mode = "mode2"
+sigma_v_default = 0.25
+D_c_prior = "uniform"
+R_phys_lo = 0.01
+R_phys_hi = 2.0
+
+# Unified phi grid knobs (identical in Mode 1 and Mode 2).
+# HV (red/blue): 3 uniform sub-ranges centred on the peak:
+#   [peak-outer, peak-inner]  (n_phi_hv_low points)
+#   [peak-inner, peak+inner]  (n_phi_hv_high points, dense)
+#   [peak+inner, peak+outer]  (n_phi_hv_low points)
+# Reid convention: red peak at phi=+pi/2, blue peak at phi=-pi/2.
+# Values chosen from the 2026-04-18 convergence tests: |Δ|<0.25 nats
+# vs 200001-pt full-2π ref across all 5 MCP galaxies (Mode 2) and
+# Mode 1 at r_ang_scale=1.
+phi_hv_inner_deg = 45.0
+phi_hv_outer_deg = 90.0
+n_phi_hv_high = 1001
+n_phi_hv_low = 301
+
+# Systemic: explicit list of disjoint sub-ranges around phi=0 and
+# phi=pi (Reid convention). Each sub-range is uniform, n_phi_sys
+# points, trapezoidal.
+phi_sys_ranges_deg = [[-45, 45], [135, 225]]
+n_phi_sys = 3001
+
+# Mode 1 (marginalise_r = false) uses a denser phi grid — per-spot
+# likelihood peaks are narrower than under the r-marginal in Mode 2.
+# NGC4258's per-galaxy block overrides these further.
+n_phi_hv_high_mode1 = 2001
+n_phi_hv_low_mode1 = 501
+n_phi_sys_mode1 = 3001
+
+# Mode 2 r-grid knobs.
+#   n_r_local: sinh-spaced per-spot grid for HV and sys+accel.
+#              Value chosen so CGCG074-064 and NGC5765b (which are
+#              r-bottlenecked in Mode 2) converge to |Δ|<0.1 nats.
+#   n_r_brute: log-uniform grid for sys-without-accel (many points,
+#              since r is unconstrained for these).
+#   K_sigma:   half-width (in multiples of the physics-based σ_r) for
+#              the sinh transform.
+n_r_local = 251
+n_r_brute = 501
+K_sigma = 5.0
+
+[model.priors.H0]
+dist = "uniform"
+low = 10.0
+high = 200.0
+
+[model.priors.sigma_pec]
+dist = "delta"
+value = 300
+
+[model.priors.eta]
+dist = "uniform"
+low = 3.0
+high = 9.0
+
+[model.priors.dv_sys]
+dist = "normal"
+loc = 0.0
+scale = 300.0
+
+[model.priors.x0]
+dist = "normal"
+loc = 0.0
+scale = 500.0
+
+[model.priors.y0]
+dist = "normal"
+loc = 0.0
+scale = 500.0
+
+[model.priors.i0]
+dist = "sine_angle"
+low = 60.0
+high = 110.0
+
+[model.priors.Omega0]
+dist = "uniform"
+low = 0.0
+high = 360.0
+
+[model.priors.dOmega_dr]
+dist = "uniform"
+low = -30.0
+high = 30.0
+
+[model.priors.di_dr]
+dist = "uniform"
+low = -30.0
+high = 30.0
+
+[model.priors.d2i_dr2]
+dist = "uniform"
+low = -30.0
+high = 30.0
+
+[model.priors.d2Omega_dr2]
+dist = "uniform"
+low = -30.0
+high = 30.0
+
+[model.priors.sigma_x_floor]
+dist = "truncated_normal"
+mean = 10.0
+scale = 5.0
+low = 0.0
+high = 100.0
+
+[model.priors.sigma_y_floor]
+dist = "truncated_normal"
+mean = 10.0
+scale = 5.0
+low = 0.0
+high = 100.0
+
+[model.priors.sigma_v_sys]
+dist = "truncated_normal"
+mean = 2.0
+scale = 1.0
+low = 0.0
+high = 100.0
+
+[model.priors.sigma_v_hv]
+dist = "truncated_normal"
+mean = 2.0
+scale = 1.0
+low = 0.0
+high = 100.0
+
+[model.priors.sigma_a_floor]
+dist = "truncated_normal"
+mean = 0.3
+scale = 0.15
+low = 0.0
+high = 0.75
+
+[model.priors.ecc]
+dist = "uniform"
+low = 0.0
+high = 0.05
+
+[model.priors.periapsis]
+dist = "uniform"
+low = 0.0
+high = 360.0
+
+[model.priors.e_x]
+dist = "uniform"
+low = -0.05
+high = 0.05
+
+[model.priors.e_y]
+dist = "uniform"
+low = -0.05
+high = 0.05
+
+[model.priors.dperiapsis_dr]
+dist = "uniform"
+low = -180.0
+high = 180.0
+
+[model.priors.D_lim]
+dist = "uniform"
+low = 50.0
+high = 300.0
+
+[model.priors.D_width]
+dist = "uniform"
+low = 5.0
+high = 100.0
+
+[model.galaxies.CGCG074-064]
+ra = 210.768491
+dec = 8.947582
+v_sys_obs = 7175
+D_lo = 66.0
+D_hi = 150.0
+
+[model.galaxies.CGCG074-064.init]
+H0 = 79.8946
+D_c = 89.2701
+eta = 5.4411
+x0 = 1.3965
+y0 = 6.4031
+i0 = 90.6023
+Omega0 = 101.468
+dOmega_dr = 4.7988
+di_dr = -1.8697
+sigma_x_floor = 0.35
+sigma_y_floor = 14.2729
+sigma_v_sys = 1.8223
+sigma_v_hv = 2.0683
+sigma_a_floor = 0.2378
+dv_sys = -265.5389
+
+[model.galaxies.NGC4258]
+ra = 184.74009
+dec = 47.30372
+v_sys_obs = 667
+D_lo = 4.0
+D_hi = 10.0
+use_ecc = true
+ecc_cartesian = true
+use_quadratic_warp = true
+use_float64 = true
+mode = "mode1"
+forbid_marginalise_r = true
+# Denser phi grids for NGC4258 (position errors ~3 μas → narrow phi peaks).
+n_phi_hv_high = 20001
+n_phi_hv_low = 4001
+n_phi_sys = 20001
+r_ang_ref_i = 6.1
+r_ang_ref_Omega = 6.1
+r_ang_ref_periapsis = 0.0
+dense_mass_globals = true
+target_accept_prob = 0.9
+
+[model.galaxies.NGC4258.init]
+D_c = 7.593
+eta = 6.72
+x0 = -152.0
+y0 = 556.0
+i0 = 87.05
+di_dr = 2.59
+d2i_dr2 = 0.041
+Omega0 = 88.43
+dOmega_dr = 2.21
+d2Omega_dr2 = -0.13
+e_x = 0.00468400
+e_y = 0.00520200
+dperiapsis_dr = 123.0
+sigma_x_floor = 1.6
+sigma_y_floor = 4.1
+sigma_v_sys = 0.31
+sigma_v_hv = 2.25
+sigma_a_floor = 0.46
+dv_sys = -193.7
+
+[model.galaxies.NGC5765b]
+ra = 222.71461
+dec = 5.11449
+v_sys_obs = 8465
+D_lo = 85.0
+D_hi = 200.0
+
+[model.galaxies.NGC5765b.init]
+H0 = 68.1294
+D_c = 123.4795
+eta = 5.5729
+x0 = -44.8896
+y0 = -99.1145
+i0 = 84.9224
+Omega0 = 146.83
+dOmega_dr = -3.2848
+di_dr = 11.6208
+sigma_x_floor = 10.1172
+sigma_y_floor = 3.4971
+sigma_v_sys = 1.8661
+sigma_v_hv = 2.8261
+sigma_a_floor = 0.0798
+dv_sys = -131.1467
+
+[model.galaxies.NGC6264]
+ra = 254.3172
+dec = 27.8496
+v_sys_obs = 10145
+D_lo = 70.0
+D_hi = 250.0
+
+[model.galaxies.NGC6264.init]
+H0 = 62.6426
+D_c = 160.7498
+eta = 5.3226
+x0 = 4.166
+y0 = 6.9749
+i0 = 90.3963
+Omega0 = 94.2117
+dOmega_dr = 18.4692
+di_dr = -1.2975
+sigma_x_floor = 0.6085
+sigma_y_floor = 5.4471
+sigma_v_sys = 1.6202
+sigma_v_hv = 2.9953
+sigma_a_floor = 0.1373
+dv_sys = 66.4503
+
+[model.galaxies.NGC6323]
+ra = 258.32519
+dec = 43.78244
+v_sys_obs = 7662
+D_lo = 60.0
+D_hi = 350.0
+
+[model.galaxies.NGC6323.init]
+H0 = 50.4354
+D_c = 151.1639
+eta = 4.9678
+x0 = 14.5012
+y0 = 3.3823
+i0 = 91.8349
+Omega0 = 189.5905
+dOmega_dr = 13.8031
+di_dr = -1.1693
+sigma_x_floor = 3.978
+sigma_y_floor = 2.4919
+sigma_v_sys = 1.8041
+sigma_v_hv = 1.698
+sigma_a_floor = 0.1486
+dv_sys = 190.3925
+
+[model.galaxies.UGC3789]
+ra = 109.87872
+dec = 59.35513
+v_sys_obs = 3245
+D_lo = 10.0
+D_hi = 100.0
+
+[model.galaxies.UGC3789.init]
+H0 = 64.5287
+D_c = 50.7209
+eta = 5.3635
+x0 = -402.2705
+y0 = -461.1638
+i0 = 85.6441
+Omega0 = 222.9669
+dOmega_dr = -3.2655
+di_dr = 8.1005
+sigma_x_floor = 4.6195
+sigma_y_floor = 7.5683
+sigma_v_sys = 0.0175
+sigma_v_hv = 2.0618
+sigma_a_floor = 0.279
+dv_sys = 15.2498
+
+[optimise]
+H0_for_D_estimate = 70.0
+D_sobol_sigma_v = 500.0
+D_sobol_n_sigma = 5
+max_generations = 5000
+eval_chunk = 25
+
+# CPU+MPI mode2 runner defaults — consumed by scripts/megamaser/run_mode2_mpi.py
+# and scripts/megamaser/submit_mode2_mpi.sh. The submit script derives the
+# rank count from the data file (optionally capped by `--max-spots`); the
+# per-galaxy blocks here only carry grid sizes. These override the [model]
+# defaults when the mode2-MPI runner is used.
+[mode2_mpi]
+queue = "redwood"
+memory_gb_per_cpu = 5
+# Grid sizes are specified PER GALAXY below. Currently all six galaxies
+# share the same settings (NGC4258 sets the ceiling: position errors
+# ~3 μas → narrow φ peaks). Per-spot memory at these sizes:
+#   sys-no-accel: n_r_brute × 2·n_phi_sys float64       ≈ 320 MB
+#   HV / sys-accel: n_r_local × (n_phi_hv_high + 2·n_phi_hv_low) ≈ 56 MB
+# Both fit well within 5 GB per CPU. Edit a per-galaxy block to tune
+# just that galaxy without touching the others.
+
+[mode2_mpi.galaxies.CGCG074-064]
+n_phi_hv_high = 10001
+n_phi_hv_low = 2001
+n_phi_sys = 10001
+n_r_local = 501
+n_r_brute = 2001
+
+[mode2_mpi.galaxies.NGC4258]
+n_phi_hv_high = 10001
+n_phi_hv_low = 2001
+n_phi_sys = 10001
+n_r_local = 501
+n_r_brute = 2001
+
+[mode2_mpi.galaxies.NGC5765b]
+n_phi_hv_high = 10001
+n_phi_hv_low = 2001
+n_phi_sys = 10001
+n_r_local = 501
+n_r_brute = 2001
+
+[mode2_mpi.galaxies.NGC6264]
+n_phi_hv_high = 10001
+n_phi_hv_low = 2001
+n_phi_sys = 10001
+n_r_local = 501
+n_r_brute = 2001
+
+[mode2_mpi.galaxies.NGC6323]
+n_phi_hv_high = 10001
+n_phi_hv_low = 2001
+n_phi_sys = 10001
+n_r_local = 501
+n_r_brute = 2001
+
+[mode2_mpi.galaxies.UGC3789]
+n_phi_hv_high = 10001
+n_phi_hv_low = 2001
+n_phi_sys = 10001
+n_r_local = 501
+n_r_brute = 2001
+
+[joint.priors.sigma_pec]
+dist = "maxwell"
+scale = 156.7
+
+[io]
+root_output = "results/Megamaser"
+
+[io.maser_data]
+root = "data/Megamaser"
+
+[convergence]
+# Auto-run after NUTS/NSS finishes. Compares the production phi/r marginal
+# against a dense brute-force reference at `n_draws` posterior samples.
+auto_check = true
+n_draws = 8
+seed = 0
+save_json = true
+
+[convergence.mode2_reference]
+# Full-2pi phi x log-r brute force. dtype="float32" keeps memory down.
+n_r = 50000
+n_phi = 50001
+r_chunk = 2000
+spot_batch = 1
+dtype = "float32"
+
+[convergence.mode1_reference]
+# Per-type full-2pi phi brute force at the sampled r_ang.
+n_phi = 200001
+spot_batch = 200
+dtype = "float64"
