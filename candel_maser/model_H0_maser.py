@@ -129,9 +129,10 @@ def predict_velocity_los(r_ang, phi, D, M_BH, v_sys, i, ecc=0.0, omega=0.0):
     gamma = 1.0 / jnp.sqrt(1.0 - beta_e2)
 
     one_plus_z_D = gamma * (1.0 + v_z / SPEED_OF_LIGHT)
-    # Floor prevents 1/sqrt(0)=inf for sub-Schwarzschild radii; the resulting
-    # large velocity residual drives chi2 → ∞, correctly down-weighting the spot.
-    one_plus_z_g = 1.0 / jnp.sqrt(jnp.maximum(1.0 - C_g * M_BH / (r_ang * D), 1e-6))
+    # Floor prevents 1/sqrt(0)=inf for sub-Schwarzschild radii; the
+    # resulting large velocity residual drives chi2 → ∞, down-weighting.
+    one_plus_z_g = 1.0 / jnp.sqrt(
+        jnp.maximum(1.0 - C_g * M_BH / (r_ang * D), 1e-6))
     z_0 = v_sys / SPEED_OF_LIGHT
 
     return SPEED_OF_LIGHT * (one_plus_z_D * one_plus_z_g * (1.0 + z_0) - 1.0)
@@ -628,9 +629,7 @@ class MaserDiskModel(ModelBase):
         self._r_ang_lo = self._R_phys_lo / (D_A_est * PC_PER_MAS_MPC)
         self._r_ang_hi = self._R_phys_hi / (D_A_est * PC_PER_MAS_MPC)
 
-
     # ---- summary ----
-
     def _print_summary(self):
         mode_desc = {
             "mode0": "sample r, sample φ",
@@ -1049,7 +1048,8 @@ class MaserDiskModel(ModelBase):
                     w2d = (lwr_b[None, :, None]
                            + pc["log_w_phi"][None, None, :])
                     lnorm_b = r_pre["lnorm"] + r_pre["lnorm_a"]
-                    ps_b = lnorm_b + logsumexp(neg_half_chi2 + w2d, axis=(-2, -1))
+                    ps_b = lnorm_b + logsumexp(
+                        neg_half_chi2 + w2d, axis=(-2, -1))
                 else:
                     r_b = r_ang[sl]
                     lwr_b = None if log_w_r is None else log_w_r[sl]
@@ -1317,28 +1317,30 @@ def remap_warp_to_r0(samples, r_ang_ref_i, r_ang_ref_Omega):
     dict with keys ``i0_r0``, ``Omega0_r0``, ``di_dr_r0``, ``dOmega_dr_r0``
     (same units as input).
     """
-    i0        = _np.asarray(samples["i0"])
-    di_dr     = _np.asarray(samples["di_dr"])
-    Om0       = _np.asarray(samples["Omega0"])
-    dOm_dr    = _np.asarray(samples["dOmega_dr"])
+    i0 = _np.asarray(samples["i0"])
+    di_dr = _np.asarray(samples["di_dr"])
+    Om0 = _np.asarray(samples["Omega0"])
+    dOm_dr = _np.asarray(samples["dOmega_dr"])
 
-    d2i       = _np.asarray(samples["d2i_dr2"])     if "d2i_dr2"     in samples else None
-    d2Om      = _np.asarray(samples["d2Omega_dr2"]) if "d2Omega_dr2" in samples else None
+    d2i = (_np.asarray(samples["d2i_dr2"])
+           if "d2i_dr2" in samples else None)
+    d2Om = (_np.asarray(samples["d2Omega_dr2"])
+            if "d2Omega_dr2" in samples else None)
 
     ri, rO = float(r_ang_ref_i), float(r_ang_ref_Omega)
 
     if d2i is not None:
-        i0_r0    = i0  - di_dr  * ri + d2i  * ri**2
-        di_dr_r0 = di_dr  - 2.0 * d2i  * ri
+        i0_r0 = i0 - di_dr * ri + d2i * ri**2
+        di_dr_r0 = di_dr - 2.0 * d2i * ri
     else:
-        i0_r0    = i0  - di_dr  * ri
+        i0_r0 = i0 - di_dr * ri
         di_dr_r0 = di_dr
 
     if d2Om is not None:
-        Om0_r0    = Om0 - dOm_dr * rO + d2Om * rO**2
+        Om0_r0 = Om0 - dOm_dr * rO + d2Om * rO**2
         dOm_dr_r0 = dOm_dr - 2.0 * d2Om * rO
     else:
-        Om0_r0    = Om0 - dOm_dr * rO
+        Om0_r0 = Om0 - dOm_dr * rO
         dOm_dr_r0 = dOm_dr
 
     return dict(i0_r0=i0_r0, Omega0_r0=Om0_r0,

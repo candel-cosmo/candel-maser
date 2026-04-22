@@ -32,7 +32,7 @@ _GALAXY_VELOCITY_FRAME = {
     "NGC6264":     "lsr",         # Kuo+2013, footnote a
     "NGC6323":     "lsr",         # Kuo+2015, footnote a
     "UGC3789":     "lsr",         # Reid+2009/2013, column header
-    "CGCG074-064": "barycentric", # Pesce+2020 MRT header
+    "CGCG074-064": "barycentric",  # Pesce+2020 MRT header
     "NGC5765b":    "unknown",     # Gao+2016: not stated
     "NGC4258":     "lsr",         # Argon+2007
 }
@@ -66,19 +66,19 @@ def v_sys_to_cmb(v_sys_km_s, frame, ra_deg, dec_deg):
     if frame == "unknown":
         return None
 
-    from astropy.coordinates import SkyCoord
     import astropy.units as u
+    from astropy.coordinates import SkyCoord
 
     target = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    l = float(target.galactic.l.rad)
+    lon = float(target.galactic.l.rad)
     b = float(target.galactic.b.rad)
 
     # LSR → heliocentric: subtract solar motion projected onto LOS
     if frame == "lsr":
         U, V, W = _SOLAR_LSR_UVW
         v_helio = (v_sys_km_s
-                   - (U * np.cos(b) * np.cos(l)
-                      + V * np.cos(b) * np.sin(l)
+                   - (U * np.cos(b) * np.cos(lon)
+                      + V * np.cos(b) * np.sin(lon)
                       + W * np.sin(b)))
     else:  # barycentric ≈ heliocentric (sub-km/s difference)
         v_helio = v_sys_km_s
@@ -87,8 +87,9 @@ def v_sys_to_cmb(v_sys_km_s, frame, ra_deg, dec_deg):
     l_cmb = np.deg2rad(_CMB_DIPOLE_L)
     b_cmb = np.deg2rad(_CMB_DIPOLE_B)
     cos_theta = (np.sin(b) * np.sin(b_cmb)
-                 + np.cos(b) * np.cos(b_cmb) * np.cos(l - l_cmb))
+                 + np.cos(b) * np.cos(b_cmb) * np.cos(lon - l_cmb))
     return v_helio + _CMB_DIPOLE_V * cos_theta
+
 
 # Column byte ranges (1-indexed, inclusive) from the MRT header.
 _MRT_COLUMNS = {
