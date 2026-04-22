@@ -33,8 +33,9 @@ All settings (priors, sampler, grid sizes, per-galaxy overrides) live in
 
 ## Shell submission scripts
 
-All submit through `addqueue` on glamdring. GPU jobs use
-`venv_gpu_candel`; CPU/MPI jobs use `venv_candel`.
+All submit through `addqueue` on glamdring. Both GPU and CPU/MPI jobs
+use the single `venv_candel` (JAX with CUDA, CPU fallback when no GPU
+is visible).
 
 ### `submit_all.sh` — MCP five (NSS or NUTS)
 

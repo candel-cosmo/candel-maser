@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PYTHON="$ROOT_DIR/venv_gpu_candel/bin/python"
+PYTHON="$ROOT_DIR/venv_candel/bin/python"
 
 # Default: test all six galaxies, including NGC4258 (Mode 1 production case).
 # Override by passing --galaxies ... on the command line.
