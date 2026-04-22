@@ -53,7 +53,7 @@ import tomli_w
 from candel.inference.optimise import find_MAP
 from candel.model.model_H0_maser import MaserDiskModel
 from candel.pvdata.megamaser_data import load_megamaser_spots
-from candel.util import fprint, fsection
+from candel.util import data_path, fprint, fsection
 
 _devs = jax.devices()
 _dev_names = ", ".join(d.device_kind for d in _devs)
@@ -87,7 +87,8 @@ v_sys_obs = gcfg["v_sys_obs"]
 # ---- Load data ----
 fsection(f"Loading {galaxy} data")
 _mcfg = master_cfg["model"]
-data = load_megamaser_spots("data/Megamaser", galaxy, v_sys_obs=v_sys_obs)
+data = load_megamaser_spots(
+    data_path("data", "Megamaser"), galaxy, v_sys_obs=v_sys_obs)
 
 if "D_lo" in gcfg and "D_hi" in gcfg:
     data["D_lo"] = float(gcfg["D_lo"])
