@@ -29,7 +29,6 @@ import time
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 from numpyro import handlers
 from numpyro.infer.initialization import init_to_median
 from numpyro.infer.util import (constrain_fn, log_density, potential_energy,
@@ -401,6 +400,15 @@ def _run_adam(z0, neg_U_fn, n_steps, lr, lr_end, n_restarts, seed,
     adaptive state from suppressing the Jacobian restoring force in
     the logit-transformed space.
     """
+    try:
+        import optax
+    except ImportError as e:
+        raise ImportError(
+            "Adam optimisation in CANDEL requires the optional `optax` "
+            "package, which is not installed. Install it with "
+            "`pip install optax`."
+        ) from e
+
     neg_U_batch = jax.jit(jax.vmap(neg_U_fn))
     steps_per_cycle = n_steps // n_restarts
 
@@ -735,7 +743,14 @@ def de_optimize(model, model_args=(), model_kwargs=None,
     all_results : dict
         Contains 'names', 'sizes', 'lo_sobol', 'hi_sobol'.
     """
-    from evosax.algorithms import DifferentialEvolution
+    try:
+        from evosax.algorithms import DifferentialEvolution
+    except ImportError as e:
+        raise ImportError(
+            "Differential-evolution MAP search in CANDEL requires the "
+            "optional `evosax` package, which is not installed. Install "
+            "it with `pip install evosax`."
+        ) from e
 
     if not getattr(model, "marginalise_r", False):
         raise ValueError(
