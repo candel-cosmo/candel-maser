@@ -39,7 +39,7 @@ mode = "mode2"
 sigma_v_default = 0.25
 D_c_prior = "uniform"
 R_phys_lo = 0.01
-R_phys_hi = 2.0
+R_phys_hi = 1.0
 
 # Unified phi grid knobs (identical in Mode 1 and Mode 2).
 # HV (red/blue): 3 uniform sub-ranges centred on the peak:
@@ -52,14 +52,14 @@ R_phys_hi = 2.0
 # Mode 1 at r_ang_scale=1.
 phi_hv_inner_deg = 45.0
 phi_hv_outer_deg = 90.0
-n_phi_hv_high = 1001
-n_phi_hv_low = 301
+n_phi_hv_high = 4001
+n_phi_hv_low = 751
 
 # Systemic: explicit list of disjoint sub-ranges around phi=0 and
 # phi=pi (Reid convention). Each sub-range is uniform, n_phi_sys
 # points, trapezoidal.
 phi_sys_ranges_deg = [[-45, 45], [135, 225]]
-n_phi_sys = 3001
+n_phi_sys = 4001
 
 # Mode 1 (marginalise_r = false) uses a denser phi grid — per-spot
 # likelihood peaks are narrower than under the r-marginal in Mode 2.
@@ -76,7 +76,7 @@ n_phi_sys_mode1 = 3001
 #              since r is unconstrained for these).
 #   K_sigma:   half-width (in multiples of the physics-based σ_r) for
 #              the sinh transform.
-n_r_local = 251
+n_r_local = 301
 n_r_brute = 501
 K_sigma = 5.0
 
