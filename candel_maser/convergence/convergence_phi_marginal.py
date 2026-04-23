@@ -138,10 +138,13 @@ def main():
                                 sigma_a_floor2, i0, var_v_hv)
         print(f"  D_A={D_A:.2f} Mpc, n_spots={model.n_spots}")
 
+        # Physical r_ang range at this D_A; mirrors the Mode 1 sample
+        # prior bounds inside the model.
+        _r_ang_lo, _r_ang_hi = model.r_ang_range(D_A)
+
         for scale in R_SCALES:
             r_ang = jnp.clip(
-                jnp.asarray(r_est * scale),
-                model._r_ang_lo, model._r_ang_hi)
+                jnp.asarray(r_est * scale), _r_ang_lo, _r_ang_hi)
             med_r = float(jnp.median(r_ang))
             print(f"\n  r_ang scale = {scale:.2f}x  "
                   f"(median r = {med_r:.4f} mas)")
@@ -166,13 +169,16 @@ def main():
                 spot_groups = []
                 if m_t._n_sys > 0:
                     spot_groups.append(
-                        ("sys", m_t._idx_sys, r_ang[m_t._idx_sys], None))
+                        ("sys", m_t._idx_sys,
+                         r_ang[m_t._idx_sys], None, False))
                 if m_t._n_red > 0:
                     spot_groups.append(
-                        ("red", m_t._idx_red, r_ang[m_t._idx_red], None))
+                        ("red", m_t._idx_red,
+                         r_ang[m_t._idx_red], None, False))
                 if m_t._n_blue > 0:
                     spot_groups.append(
-                        ("blue", m_t._idx_blue, r_ang[m_t._idx_blue], None))
+                        ("blue", m_t._idx_blue,
+                         r_ang[m_t._idx_blue], None, False))
                 ll = m_t._eval_phi_marginal(
                     spot_groups, phys_args, phys_kw,
                     spot_batch=int(ref_cfg["spot_batch"]))

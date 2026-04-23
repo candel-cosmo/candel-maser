@@ -259,14 +259,12 @@ def _load_kuo_table2(root, fname, galaxy_label, v_sys_obs=None):
             accels.append(float(fields[5].strip()))
             sigma_accels.append(float(fields[6].strip()))
             has_accel.append(True)
-        elif len(fields) >= 6 and not _is_missing(fields[5]):
-            # Acceleration present but no uncertainty -> skip
-            accels.append(0.0)
-            sigma_accels.append(999.0)
-            has_accel.append(False)
         else:
+            # A or σ_a missing: flag has_accel=False. σ_a = 1e4 is a
+            # large placeholder so the model's var_a stays positive;
+            # the has_accel mask zeroes the contribution.
             accels.append(0.0)
-            sigma_accels.append(999.0)
+            sigma_accels.append(1e4)
             has_accel.append(False)
 
     n = len(velocities)
@@ -395,8 +393,11 @@ def load_NGC4258_spots(root, v_sys_obs=472.0):
                 sigma_a_vals.append(e_acc)
                 has_accel.append(True)
             else:
+                # No measurement: σ_a = 1e4 placeholder (kept positive
+                # so the model's var_a is finite); has_accel masks
+                # the contribution.
                 a_vals.append(0.0)
-                sigma_a_vals.append(999.0)
+                sigma_a_vals.append(1e4)
                 has_accel.append(False)
 
     n = len(velocity)

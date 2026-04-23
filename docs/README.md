@@ -48,7 +48,7 @@ bash scripts/megamaser/submit_all.sh --sampler nuts --num-chains 4 # NUTS, 4 vec
 bash scripts/megamaser/submit_all.sh --sampler nss --galaxy NGC5765b
 ```
 
-Options: `--mode {mode0|mode1|mode2}` (NSS requires mode2),
+Options: `--mode {mode1|mode2}` (NSS requires mode2),
 `--f-grid F` (grid-density scaling), `--init-method {config|median|sample}`,
 `-q QUEUE` (default `gpulong`).
 
