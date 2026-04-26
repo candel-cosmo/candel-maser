@@ -95,6 +95,93 @@ transport flags).
 
 ## Convergence tests
 
+Quick stability / integration checks for the refined Mode 2 path live in
+`convergence/test_mode2_stability.py`. This is the first test to run
+after changing the Mode 2 likelihood. It uses intentionally reduced
+grids by default, checks both `refine_r_center=false` and `true`,
+verifies finite log-likelihood gradients with `jax.value_and_grad`, and
+confirms refinement cannot silently run without the physical context
+used by the likelihood.
+
+```bash
+/mnt/users/rstiskalek/CANDEL/venv_candel/bin/python \
+    scripts/megamaser/convergence/test_mode2_stability.py
+```
+
+Submit the recommended two-galaxy GPU check on glamdring with:
+
+```bash
+bash scripts/megamaser/convergence/test_mode2_stability.sh
+```
+
+Optional finite-difference diagnostics are useful after changing the
+adaptive grid logic. These are diagnostics, not pass/fail convergence
+criteria: coarse grids can show AD/FD mismatch because AD treats the
+quadrature nodes as fixed while finite differences see the re-meshed
+value.
+
+```bash
+/mnt/users/rstiskalek/CANDEL/venv_candel/bin/python \
+    scripts/megamaser/convergence/test_mode2_stability.py --fd
+```
+
+On a GPU, disable JAX preallocation for this quick test so `nvidia-smi`
+does not report an artificial ~75% memory reservation:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+JAX_PLATFORMS=gpu \
+/mnt/users/rstiskalek/CANDEL/venv_candel/bin/python \
+    scripts/megamaser/convergence/test_mode2_stability.py
+```
+
+Default quick-test grids are deliberately smoke-test sized:
+
+```text
+n_r_local = 15
+n_phi_hv  = 41 + 2*9 = 59
+n_phi_sys = 2*41 = 82
+spot_batch = 8
+```
+
+The largest reduced-grid block is `8 * 15 * 82 = 9840` float64 elements.
+Measured CPU RSS was ~1.6 GB for the default test and ~2.7 GB with
+`--fd`; a 12 GB GPU is adequate. This test checks wiring,
+gradient-finiteness, and batching. It does not establish quadrature
+accuracy.
+
+Production Mode 2 settings in `config_maser.toml` are:
+
+```text
+n_r_local = 301
+n_phi_hv  = 4001 + 2*751 = 5503
+n_phi_sys = 2*4001 = 8002
+mode2_spot_batch = 8
+```
+
+The largest production likelihood block is therefore
+`8 * 301 * 8002 = 19,268,816` float64 elements, about 147 MiB for one
+array. `_phi_eval` and reverse-mode AD hold several arrays/temporaries
+of this shape, so real peak memory is several times larger, but this is
+far below the old unbatched whole-group tensors.
+
+Refined centering does not materially change the dominant likelihood
+memory relative to fixed grids of the same `(spot_batch, n_r, n_phi)`
+size. The refinement adds a per-spot Newton solve whose natural
+intermediates scale like `(N_group, n_phi)`, much smaller than the main
+likelihood block. Its cost is mainly compile/runtime, not peak memory.
+
+Before trusting production NumPyro NUTS with the refined Mode 2 path:
+
+- Run `test_mode2_stability.py` for at least UGC3789 and NGC5765b.
+- Run the optional `--fd` diagnostic and inspect large AD/FD mismatches.
+- Re-run `convergence/convergence_grids.py` with refinement enabled and
+  production grid sizes for the MCP five.
+- Run one short GPU NUTS warmup with `mode2_spot_batch = 8`; check peak
+  memory, divergences, and whether step-size adaptation completes.
+- Only then run long NUTS jobs; leave `mode2_spot_batch` explicit unless
+  profiling shows whole-group tensors fit comfortably.
+
 Shared-grid settings in `config_maser.toml` have been validated against
 brute-force references. Scripts live in `convergence/`
 (`convergence_grids.py`, `convergence_phi_marginal.py`, …). Summary:

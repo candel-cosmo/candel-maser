@@ -50,7 +50,7 @@ R_phys_hi = 1.0
 # Values chosen from the 2026-04-18 convergence tests: |Δ|<0.25 nats
 # vs 200001-pt full-2π ref across all 5 MCP galaxies (Mode 2) and
 # Mode 1 at r_ang_scale=1.
-phi_hv_inner_deg = 45.0
+phi_hv_inner_deg = 30.0
 phi_hv_outer_deg = 90.0
 n_phi_hv_high = 4001
 n_phi_hv_low = 751
@@ -63,22 +63,56 @@ n_phi_sys = 4001
 
 # Mode 1 (marginalise_r = false) uses a denser phi grid — per-spot
 # likelihood peaks are narrower than under the r-marginal in Mode 2.
-# NGC4258's per-galaxy block overrides these further.
-n_phi_hv_high_mode1 = 2001
-n_phi_hv_low_mode1 = 501
-n_phi_sys_mode1 = 3001
+# NGC4258 and UGC3789 carry per-galaxy overrides; these defaults apply
+# to the four other MCP galaxies (CGCG074-064, NGC5765b, NGC6264,
+# NGC6323). Picked from the 2026-04-26 phi-marginal convergence sweep.
+n_phi_hv_high_mode1 = 5001
+n_phi_hv_low_mode1 = 2501
+n_phi_sys_mode1 = 5001
 
 # Mode 2 r-grid knobs.
-#   n_r_local: sinh-spaced per-spot grid for HV and sys+accel.
-#              Value chosen so CGCG074-064 and NGC5765b (which are
-#              r-bottlenecked in Mode 2) converge to |Δ|<0.1 nats.
-#   n_r_brute: log-uniform grid for sys-without-accel (many points,
-#              since r is unconstrained for these).
-#   K_sigma:   half-width (in multiples of the physics-based σ_r) for
-#              the sinh transform.
-n_r_local = 301
-n_r_brute = 501
-K_sigma = 5.0
+#   n_r_local:  sinh-spaced per-spot grid centred on the posterior
+#               peak (seed → Newton refine → shift-template).
+#   n_r_global: shared log-uniform grid spanning [r_min, r_max];
+#               appended to every spot's local grid and sorted, so
+#               global tails/secondary modes are always covered.
+#   n_r_scan:   coarse log-uniform scan used to seed the Newton
+#               refinement for sys-without-accel spots (no
+#               closed-form Kepler/accel inversion available).
+#   K_sigma:    half-width (in multiples of the per-spot σ_r) for
+#               the local sinh transform.
+# Defaults set from the 2026-04-26 NGC5765b convergence sweep against
+# a float64 brute-force reference: (501, 301, K=10) lies between
+# (401, 201) → Δll=+0.11 and (601, 301) → Δll=+0.018, comfortably under
+# 0.1 nat. K_sigma=15 was tested and made convergence worse — at fixed
+# n_r_local, widening the per-spot sinh trades peak resolution for
+# tail coverage that nothing useful lives in.
+n_r_local = 501
+n_r_global = 301
+n_r_scan = 48
+K_sigma = 10.0
+
+# Per-spot sinh grid centre refinement (HV + sys+accel only; sys-no-
+# accel uses the shared brute grid regardless). When true, replaces
+# the physics-based r_est with the argmin of the φ-marginalised NLL
+# in log(r) found by a fixed-iteration damped-Newton loop. The sinh
+# half-width is capped per-spot so the grid always fits within
+# [r_min, r_max]. Non-finite Newton output falls back to r_est.
+refine_r_center = true
+n_refine_steps = 10
+refine_step_max = 0.5
+refine_hess_floor = 1e-3
+
+# Spot-axis chunking for the NumPyro likelihood evaluation
+# (`_eval_phi_marginal`). Disabled by default — the per-group forward
+# intermediate `O(N_group · [n_r ·] n_phi)` fits comfortably for the
+# four small-MCP galaxies (≤80 spots/group) at the current grids, and
+# unbatched is fastest (single XLA op, no per-chunk Python overhead,
+# no per-residual recompile). Set this to a positive int only when
+# the live intermediate or AD tape (Mode 1 NUTS on a large galaxy)
+# would not fit on the target GPU; chunking then runs as
+# `jax.lax.scan` over `ceil(N_group / mode2_spot_batch)` chunks.
+# mode2_spot_batch = 16
 
 [model.priors.H0]
 dist = "uniform"
@@ -247,7 +281,7 @@ mode = "mode1"
 forbid_marginalise_r = true
 # Denser phi grids for NGC4258 (position errors ~3 μas → narrow phi peaks).
 n_phi_hv_high = 20001
-n_phi_hv_low = 4001
+n_phi_hv_low = 5001
 n_phi_sys = 20001
 r_ang_ref_i = 6.1
 r_ang_ref_Omega = 6.1
@@ -354,6 +388,13 @@ dec = 59.35513
 v_sys_obs = 3245
 D_lo = 10.0
 D_hi = 100.0
+# Denser HV-inner phi grid than the other MCP galaxies — sigma_x_floor
+# gradient fails 1e-3 tolerance at 5001/2501/5001 in the 2026-04-26
+# Mode 1 convergence sweep. NOTE: per-galaxy keys are unsuffixed and
+# also apply to Mode 2 if this galaxy is ever run there.
+n_phi_hv_high = 10001
+n_phi_hv_low = 2501
+n_phi_sys = 5001
 
 [model.galaxies.UGC3789.init]
 H0 = 64.5287
@@ -398,15 +439,35 @@ seed = 0
 save_json = true
 
 [convergence.mode2_reference]
-# Full-2pi phi x log-r brute force. dtype="float32" keeps memory down.
+# Full-2pi phi x log-r brute force. The reference is the gold standard
+# the convergence sweep is measured against, so it uses float64 — a
+# float32 reference's own ~10⁻⁷ rounding accumulated over n_r × n_phi
+# ≈ 2.5×10⁹ logsumexp terms can leave a sub-nat systematic that
+# every test row inherits.
+# spot_batch trades dispatch overhead for live memory. The kernel
+# holds ~6 simultaneous (spot_batch, r_chunk, n_phi) × dtype arrays
+# (X, Y, V, A from predict_* plus the running chi2 tally), so the
+# peak request is ~6 × spot_batch × r_chunk × n_phi × 8B. With the
+# defaults below that is ~6 × 4 × 1000 × 50001 × 8B ≈ 9.6 GB —
+# safe on a 16 GB GPU. Push higher via --ref-spot-batch on bigger
+# cards (24 GB → ~8, 40 GB → ~16).
 n_r = 50000
 n_phi = 50001
-r_chunk = 2000
-spot_batch = 1
-dtype = "float32"
+r_chunk = 1000
+spot_batch = 4
+dtype = "float64"
 
 [convergence.mode1_reference]
 # Per-type full-2pi phi brute force at the sampled r_ang.
+n_phi = 200001
+spot_batch = 200
+dtype = "float64"
+
+[convergence.mode1_gradient_reference]
+# Full-2pi phi reference at sampled r_ang, used for the AD gradient
+# check in convergence_phi_marginal.py. Shares n_phi / spot_batch
+# with [convergence.mode1_reference] but lists them here explicitly
+# so the two tests can diverge if needed.
 n_phi = 200001
 spot_batch = 200
 dtype = "float64"

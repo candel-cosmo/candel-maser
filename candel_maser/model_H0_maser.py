@@ -29,11 +29,21 @@ Phi integration (identical for Mode 1 and Mode 2):
     n_phi_hv_high, n_phi_hv_low, phi_sys_ranges_deg, n_phi_sys.
 
 R integration (Mode 2 only):
-  - HV and systemic-with-accel-measurement: per-spot sinh-spaced grid in
-    log-r centred on a physics-based r estimate; N_r_local points.
-  - Systemic-without-accel-measurement: log-uniform r grid spanning the
-    full [R_phys_lo, R_phys_hi] range with N_r_brute points.
-  Knobs: n_r_local, n_r_brute, K_sigma.
+  Every spot gets a per-spot grid that is the sorted union of
+    (a) a high-resolution LOCAL sinh-spaced grid of N_r_local points,
+        centred on the posterior peak and rescaled by the Hessian-
+        derived log-r width; and
+    (b) a shared low-resolution GLOBAL log-uniform grid of N_r_global
+        points over [R_phys_lo, R_phys_hi] (caches tails and any
+        multimodal mass outside the local window).
+  Seeds: HV spots use the closed-form Kepler inversion (r_vel);
+    systemic-with-accel-measurement spots use the centripetal
+    inversion (r_acc); systemic-without-accel-measurement spots use
+    the argmax of a coarse log-uniform scan of the phi-marginalised
+    log-likelihood (N_r_scan points) since no closed form exists.
+  Refinement: fixed-iteration damped-Newton on log(r) applied uniformly
+    to all spot classes (see refine_r_center knobs).
+  Knobs: n_r_local, n_r_global, n_r_scan, K_sigma.
 
 Phi convention (Reid+2019): phi=+pi/2 at the redshifted HV locus,
 phi=-pi/2 at the blueshifted HV locus, phi=0 and phi=pi at systemic
@@ -56,6 +66,7 @@ from numpyro.distributions import constraints as dist_constraints
 from ..util import SPEED_OF_LIGHT, fprint, fsection, get_nested
 from .base_model import ModelBase
 from .integration import ln_trapz_precomputed, trapz_log_weights
+from .optim1d import damped_newton_1d
 from .pv_utils import rsample
 from .utils import normal_logpdf_var
 
@@ -186,8 +197,25 @@ def predict_velocity_los(r_ang, sin_phi, cos_phi, D, M_BH, v_sys, sin_i,
         (1 + z_obs) = (1 + z_D)(1 + z_grav)(1 + v_sys / c).
     ``sin_om, cos_om`` are sin/cos of the argument of periapsis (Reid
     convention). Defaults yield the circular case.
+
+    Fast circular path: when ``ecc`` is the Python literal ``0.0`` (the
+    default, i.e. callers that omit it), the eccentric expansions all
+    collapse to constants and the SR factor reduces to
+    ``lorentz_factor(beta_c2)`` — which depends only on r and is no
+    longer broadcast across the φ axis. The eccentric branch is
+    unchanged.
     """
     v_kep = keplerian_speed(r_ang, D, M_BH)
+    one_plus_z_g = gravitational_redshift_factor(r_ang, D, M_BH)
+    beta_c2 = (v_kep / SPEED_OF_LIGHT) ** 2
+    z_0 = v_sys / SPEED_OF_LIGHT
+
+    if isinstance(ecc, (int, float)) and ecc == 0.0:
+        v_z = sin_i * v_kep * sin_phi
+        one_plus_z_D = lorentz_factor(beta_c2) * (
+            1.0 + v_z / SPEED_OF_LIGHT)
+        return SPEED_OF_LIGHT * (
+            one_plus_z_D * one_plus_z_g * (1.0 + z_0) - 1.0)
 
     # phi - omega via angle-subtraction formulas.
     cos_d = cos_phi * cos_om + sin_phi * sin_om
@@ -199,11 +227,8 @@ def predict_velocity_los(r_ang, sin_phi, cos_phi, D, M_BH, v_sys, sin_i,
     v_t = v_kep * E
     v_z = sin_i * (v_t * sin_phi - v_r * cos_phi)
 
-    beta_c2 = (v_kep / SPEED_OF_LIGHT) ** 2
     beta_e2 = beta_c2 * (1.0 + ecc ** 2 + 2.0 * ecc * cos_d) / denom
     one_plus_z_D = lorentz_factor(beta_e2) * (1.0 + v_z / SPEED_OF_LIGHT)
-    one_plus_z_g = gravitational_redshift_factor(r_ang, D, M_BH)
-    z_0 = v_sys / SPEED_OF_LIGHT
 
     return SPEED_OF_LIGHT * (one_plus_z_D * one_plus_z_g * (1.0 + z_0) - 1.0)
 
@@ -302,10 +327,13 @@ class MaserDiskModel(ModelBase):
 
     Mode 1 (marginalise_r=False): sample per-spot r_ang; marginalise φ
       with uniform trapezoidal grids per sub-range.
-    Mode 2 (marginalise_r=True): marginalise both r and φ. HV and
-      sys-with-accel spots use sinh r-grids of n_r_local points; sys
-      spots without accel measurement use a log-uniform r-grid of
-      n_r_brute points.
+    Mode 2 (marginalise_r=True): marginalise both r and φ. Every spot
+      integrates on the sorted union of a per-spot LOCAL sinh grid
+      (n_r_local points, centred on the posterior peak from
+      seed→refine) and a shared GLOBAL log-uniform grid (n_r_global
+      points over [r_min, r_max]). Seeds are closed-form
+      (Kepler/accel) where possible, coarse grid-scan argmax
+      (n_r_scan points) for sys-without-accel spots.
     The φ grid structure (sub-ranges and point counts) is identical
     between the two modes — only the r step differs.
     """
@@ -342,6 +370,7 @@ class MaserDiskModel(ModelBase):
         gal_cfg = self._configure_galaxy(data)
         self._build_phi_subranges(gal_cfg)
         self._build_r_config(data, gal_cfg)
+        self._precompute_sinh_template(data)
         self._print_summary()
 
     # ---- priors / per-galaxy ----
@@ -400,11 +429,9 @@ class MaserDiskModel(ModelBase):
         # zero contribution never enters the JIT-compiled kernel.
         #   - sys (Mode 1 combines cons+uncons): any sys spot w/ accel
         #   - sys_cons: True by construction (accel_measured=True)
-        #   - sys_uncons: False by construction
         self._group_has_accel = {
             "sys": bool((is_sys_np & accel_meas).any()),
             "sys_cons": True if self._n_sys_cons > 0 else False,
-            "sys_uncons": False,
             "red": bool((is_red_np & accel_meas).any()),
             "blue": bool((is_blue_np & accel_meas).any()),
         }
@@ -615,11 +642,21 @@ class MaserDiskModel(ModelBase):
         self._R_phys_hi = _R_hi
 
         # Mode 2 r-grid knobs.
-        self._n_r_local = int(_get("n_r_local", 101))
-        self._n_r_brute = int(_get("n_r_brute", 501))
+        #   n_r_local: per-spot sinh grid around the posterior peak.
+        #   n_r_global: shared log-uniform grid spanning [r_min, r_max]
+        #              — appended to every spot's local nodes and
+        #              sorted to give the union grid the integrator
+        #              runs on.
+        #   n_r_scan:  coarse log-uniform grid used to seed the Newton
+        #              refinement for sys-without-accel spots (no
+        #              closed-form Kepler/accel seed exists there).
+        self._n_r_local = int(_get("n_r_local", 151))
+        self._n_r_global = int(_get("n_r_global", 101))
+        self._n_r_scan = int(_get("n_r_scan", 48))
         self._K_sigma = float(_get("K_sigma", 5.0))
-        if self._n_r_local < 3 or self._n_r_brute < 3:
-            raise ValueError("n_r_local and n_r_brute must be >= 3.")
+        if min(self._n_r_local, self._n_r_global, self._n_r_scan) < 3:
+            raise ValueError(
+                "n_r_local, n_r_global and n_r_scan must be >= 3.")
 
         # Selection function grid (same for all modes/galaxies).
         D_min = float(get_nested(self.config, "model/priors/D/low", 10.0))
@@ -629,6 +666,41 @@ class MaserDiskModel(ModelBase):
         self._sel_lp_vol = 2.0 * jnp.log(self._sel_D_grid)
         self.use_selection = get_nested(
             self.config, "model/use_selection", False)
+
+        # Per-spot sinh grid centre refinement (Mode 2): 1-D damped-
+        # Newton on the phi-marginalised log-likelihood in log(r). When
+        # enabled, callers must pass the same phys_args / phys_kw used
+        # by the likelihood so refinement cannot be silently skipped.
+        # Non-finite Newton output falls back to `r_est` per-spot.
+        self._refine_r_center = bool(_get("refine_r_center", True))
+        self._n_refine_steps = int(_get("n_refine_steps", 10))
+        self._refine_step_max = float(_get("refine_step_max", 0.5))
+        self._refine_hess_floor = float(_get("refine_hess_floor", 1e-3))
+
+        # Mode 2 spot-axis chunking for _eval_phi_marginal. This caps
+        # the largest (N_batch, n_r_local, n_phi) intermediate. Leave as
+        # None only for explicit convergence experiments on known-safe
+        # hardware.
+        sb = _get("mode2_spot_batch", None)
+        self._mode2_spot_batch = int(sb) if sb is not None else None
+
+    def _precompute_sinh_template(self, data):
+        """Cache the fixed sinh quadrature template used by Mode 2.
+
+        The template nodes `sinh(t)` depend only on `K_sigma` and
+        `n_r_local` (config-time constants). The per-spot log-r scale
+        `s` is recomputed live each call from the current θ inside
+        `_estimate_adaptive_r` so the grid width tracks the sampled
+        velocity / acceleration noise rather than the init block.
+
+        No-op for Mode 1 (r_ang is sampled directly; no grid).
+        """
+        if not self.marginalise_r:
+            return
+        # sinh(T_max) = K_sigma → half-width in log r of K_sigma * s.
+        T_max = float(_np.arcsinh(self._K_sigma))
+        t = _np.linspace(-T_max, T_max, self._n_r_local)
+        self._sinh_t_frozen = jnp.asarray(_np.sinh(t))
 
     # ---- summary ----
     def _print_summary(self):
@@ -647,10 +719,13 @@ class MaserDiskModel(ModelBase):
             for lo, hi in self._phi_sys_ranges_deg)
         fprint(f"φ sys: {rng_str}, n={self._n_phi_sys} per sub-range")
         if self.marginalise_r:
+            refine_str = "on" if self._refine_r_center else "off"
             fprint(
-                f"r grid: n_r_local={self._n_r_local} (sinh), "
-                f"n_r_brute={self._n_r_brute} (log-uniform, "
-                f"{self._n_sys_uncons} sys-no-accel spots), "
+                f"r grid: n_r_local={self._n_r_local} (per-spot sinh, "
+                f"refinement={refine_str}) ∪ "
+                f"n_r_global={self._n_r_global} (shared log-uniform), "
+                f"n_r_scan={self._n_r_scan} "
+                f"({self._n_sys_uncons} sys-no-accel spots), "
                 f"K={self._K_sigma}")
         else:
             fprint(
@@ -670,14 +745,16 @@ class MaserDiskModel(ModelBase):
 
     # ---- r estimation (per-spot physics-based centre + scale) ----
 
-    def _estimate_adaptive_r(self, D_A, M_BH, v_sys, sigma_a_floor2,
-                             i0, var_v_hv):
-        """Per-spot r_ang centre and sinh-grid scale.
+    def _closed_form_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2,
+                           i0, var_v_hv):
+        """Closed-form seed + propagated-noise width for every spot.
 
         HV:    velocity → r_vel = M·(C_v·sin_i)² / (D·Δv²)
         sys+a: acceleration → r_acc = √(C_a·M·sin_i / (D²·|a|))
-        sys-a: (unused here — sys-without-accel go through the brute grid)
-        Returns (r_est, scale) with broadcasting to all spots.
+        sys-a: placeholder — `r_acc` sentinel value and a loose
+               propagated-noise width; overwritten by the scan-based
+               seed in `_compute_seeds` for sys-no-accel spots.
+        Returns (r_est, s_prop, r_min, r_max) — all shape (n_spots,).
         """
         r_min, r_max = self.r_ang_range(D_A)
 
@@ -692,85 +769,376 @@ class MaserDiskModel(ModelBase):
             jnp.abs(self._all_a) + R_EST_EPS, sin_i, D_A, M_BH)
         r_acc = jnp.clip(r_acc, r_min, r_max)
 
-        # Centering: HV → r_vel, sys → r_acc (only sys+accel goes through
-        # this path; sys-no-accel uses the brute-force log-uniform grid).
         r_est = jnp.where(self.is_highvel, r_vel, r_acc)
         r_est = jnp.clip(r_est, r_min * 1.01, r_max * 0.99)
 
-        # Scale: set half-width in log-r to the propagated measurement
-        # error, floored to avoid pathologically narrow grids.
         sigma_v_eff = jnp.sqrt(var_v_hv)
         sigma_a_eff = jnp.sqrt(sigma_a_floor2)
-        sigma_log_vel = 2.0 * sigma_v_eff / (jnp.abs(dv) + R_EST_EPS)
-        sigma_log_acc = sigma_a_eff / (
-            2.0 * jnp.abs(self._all_a) + R_EST_EPS)
-        scale = jnp.where(
+        s_vel = 2.0 * sigma_v_eff / (jnp.abs(dv) + R_EST_EPS)
+        s_acc = sigma_a_eff / (2.0 * jnp.abs(self._all_a) + R_EST_EPS)
+        s_prop = jnp.where(
             self.is_highvel,
-            jnp.maximum(sigma_log_vel, 0.05),
-            jnp.maximum(sigma_log_acc, 0.1))
-        return r_est, scale, r_min, r_max
+            jnp.maximum(s_vel, 0.05),
+            jnp.maximum(s_acc, 0.1))
+        return r_est, s_prop, r_min, r_max
+
+    def _scan_seeds_sys_uncons(self, r_min, r_max,
+                               phys_args, phys_kw):
+        """Seed sys-no-accel spots from a coarse φ-marginal argmax.
+
+        Builds a shared log-uniform scan grid of ``n_r_scan`` points,
+        runs the φ-marginal at every (spot, r) node for the sys-no-accel
+        group, and returns the per-spot argmax. Also returns a loose
+        fallback width set to a few scan-grid bins — Newton's Hessian
+        normally tightens this downstream, but the fallback prevents a
+        pathological Hessian from shrinking the local grid to a point.
+        Returns (r_seed, s_fallback) of shape (n_sys_uncons,), or
+        (None, None) if there are no sys-no-accel spots.
+        """
+        if self._n_sys_uncons == 0:
+            return None, None
+        r_scan = jnp.exp(jnp.linspace(
+            jnp.log(r_min), jnp.log(r_max), self._n_r_scan))
+        pc = self._phi_concat["sys"]
+        r_pre = self._r_precompute(
+            r_scan, self._idx_sys_uncons, *phys_args, **phys_kw,
+            has_any_accel=False)
+        neg_half_chi2 = self._phi_eval_shared_r(
+            r_pre, pc["sin_phi"], pc["cos_phi"])
+        log_w_phi = pc["log_w_phi"]
+        ll_scan = logsumexp(
+            neg_half_chi2 + log_w_phi[None, None, :], axis=-1)
+        best = jnp.argmax(ll_scan, axis=-1)
+        r_seed = jnp.clip(r_scan[best], r_min * 1.01, r_max * 0.99)
+        # Fallback width: a few scan-grid bins' worth in log-r so Newton
+        # has room to refine without the s_cap locking it down.
+        log_bin = (jnp.log(r_max) - jnp.log(r_min)) / (self._n_r_scan - 1)
+        s_fallback = jnp.full(
+            (self._n_sys_uncons,), 3.0 * log_bin, dtype=r_seed.dtype)
+        return r_seed, s_fallback
+
+    def _compute_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2,
+                       i0, var_v_hv, phys_args, phys_kw):
+        """Per-spot seed + fallback width for every spot.
+
+        Combines `_closed_form_seeds` with a φ-marginal scan argmax
+        for sys-no-accel spots (see `_scan_seeds_sys_uncons`). The
+        output feeds the per-group damped-Newton refiner.
+        """
+        r_est, s_prop, r_min, r_max = self._closed_form_seeds(
+            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+        r_scan, s_scan = self._scan_seeds_sys_uncons(
+            r_min, r_max, phys_args, phys_kw)
+        if r_scan is not None:
+            r_est = r_est.at[self._idx_sys_uncons].set(r_scan)
+            s_prop = s_prop.at[self._idx_sys_uncons].set(s_scan)
+        return r_est, s_prop, r_min, r_max
 
     # ---- r grids for Mode 2 ----
 
     def _build_r_grids_mode2(self, D_A, M_BH, v_sys, sigma_a_floor2,
-                             i0, var_v_hv):
-        """Return list of ``(type_key, idx, r_ang, log_w_r, shared_r)``
-        5-tuples for all non-empty spot groups.
+                             i0, var_v_hv,
+                             phys_args=None, phys_kw=None):
+        """Build the Mode 2 per-spot union r-grids.
 
-        Constrained spots (HV, sys+accel) get per-spot sinh grids with
-        ``n_r_local`` points centred on their physics-based r_est
-        (``shared_r=False``); systemic spots without an accel measurement
-        share a log-uniform r-grid with ``n_r_brute`` points spanning
-        the full ``[R_phys_lo, R_phys_hi]`` range (``shared_r=True``).
+        Per spot: r_union_i = sort(r_local_i ∪ r_global), where
+          * r_local_i: n_r_local sinh-spaced nodes centred on the
+            posterior peak `r_c_i`. Seeds are closed-form (Kepler for
+            HV, centripetal for sys-accel) or a φ-marginal scan
+            argmax (sys-no-accel), then refined by damped-Newton on
+            log(r) (see `_refine_r_center_group`). Half-width
+            `K_sigma · s_i` with `s_i = max(s_hess, s_fallback)`;
+            capped per-spot so the local grid fits inside
+            [r_min, r_max].
+          * r_global: a shared log-uniform grid of n_r_global nodes
+            over [r_min, r_max]. Same for every spot. Broadcast in.
+
+        Trapezoidal log-weights are recomputed on the sorted union so
+        the integration is correct without any overlap bookkeeping.
+
+        Returns a list of (type_key, idx, r_union, log_w_union) tuples,
+        grouped by spot class (sys / red / blue). All grid positions
+        and weights wrapped in stop_gradient: HMC gradients flow
+        through the integrand at fixed nodes, not through the
+        seed/Newton/sort chain.
         """
-        r_est, scale, r_min, r_max = self._estimate_adaptive_r(
-            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+        have_phys = phys_args is not None and phys_kw is not None
+        needs_phys = (self._refine_r_center
+                      or self._n_sys_uncons > 0)
+        if needs_phys and not have_phys:
+            reason = []
+            if self._refine_r_center:
+                reason.append("refine_r_center=True")
+            if self._n_sys_uncons > 0:
+                reason.append(
+                    f"n_sys_uncons={self._n_sys_uncons} > 0 (scan seeding)")
+            raise ValueError(
+                "_build_r_grids_mode2 requires phys_args and phys_kw "
+                "(" + ", ".join(reason) + "); pass the same values used "
+                "by _eval_phi_marginal.")
+        if phys_kw is None:
+            phys_kw = {}
+        r_est, s_fallback, r_min, r_max = self._compute_seeds(
+            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+            phys_args, phys_kw)
 
-        def _sinh_grid(idx, n_r):
-            r_c = r_est[idx]
-            s = scale[idx]
-            logr_c = jnp.log(r_c)
-            logr_lo = jnp.log(r_min)
-            logr_hi = jnp.log(r_max)
-            t_lo = jnp.arcsinh((logr_lo - logr_c) / s)
-            t_hi = jnp.arcsinh((logr_hi - logr_c) / s)
-            u = jnp.linspace(0.0, 1.0, n_r)
-            t = t_lo[:, None] + (t_hi - t_lo)[:, None] * u[None, :]
-            r = jnp.exp(logr_c[:, None] + jnp.sinh(t) * s[:, None])
-            return r, _trapz_log_w_per_spot(r)
+        r_global, log_w_global = self._build_global_r_grid(r_min, r_max)
 
-        def _loguniform_grid_shared(n_r):
-            # Shared across all spots in the group: no broadcast to (N, n_r).
-            logr = jnp.linspace(jnp.log(r_min), jnp.log(r_max), n_r)
-            r1 = jnp.exp(logr)
-            w1 = trapz_log_weights(r1)
-            return r1, w1
+        def _refine(type_key, idx):
+            r0 = r_est[idx]
+            s0 = s_fallback[idx]
+            if not self._refine_r_center:
+                return r0, s0
+            return self._refine_r_center_group(
+                type_key, idx, r0, s0, r_min, r_max,
+                phys_args, phys_kw)
 
-        # Grid positions are a numerical quadrature tool, not part of the
-        # model — stop_gradient prevents NaN gradients from flowing back
-        # through the adaptive grid construction (r_acc path overflows in
-        # float32 for spots with a=0).  Integrand gradients are unaffected.
-        def _sg(r, lw):
-            return jax.lax.stop_gradient(r), jax.lax.stop_gradient(lw)
+        def _group(type_key, idx, n):
+            if n == 0:
+                return None
+            r_c, s_spot = _refine(type_key, idx)
+            r_local, _ = self._build_local_sinh(
+                r_c, s_spot, r_min, r_max)
+            r_union, log_w_union = self._build_union(
+                r_local, r_global)
+            return (type_key, idx,
+                    jax.lax.stop_gradient(r_union),
+                    jax.lax.stop_gradient(log_w_union))
 
         groups = []
-        # Systemic with accel → sinh centred on r_acc (per-spot).
-        if self._n_sys_cons > 0:
-            r, lw = _sg(*_sinh_grid(self._idx_sys_cons, self._n_r_local))
-            groups.append(("sys", self._idx_sys_cons, r, lw, False))
-        # Systemic without accel → log-uniform brute (shared r).
-        if self._n_sys_uncons > 0:
-            r1, w1 = _sg(*_loguniform_grid_shared(self._n_r_brute))
-            groups.append(("sys", self._idx_sys_uncons, r1, w1, True))
-        # Red HV → sinh centred on r_vel (per-spot).
-        if self._n_red > 0:
-            r, lw = _sg(*_sinh_grid(self._idx_red, self._n_r_local))
-            groups.append(("red", self._idx_red, r, lw, False))
-        # Blue HV → sinh centred on r_vel (per-spot).
-        if self._n_blue > 0:
-            r, lw = _sg(*_sinh_grid(self._idx_blue, self._n_r_local))
-            groups.append(("blue", self._idx_blue, r, lw, False))
+        for entry in (
+                _group("sys", self._idx_sys, self._n_sys),
+                _group("red", self._idx_red, self._n_red),
+                _group("blue", self._idx_blue, self._n_blue)):
+            if entry is not None:
+                groups.append(entry)
         return groups
+
+    # ---- r-grid builders (local sinh, global log-uniform, union) ----
+
+    def _build_local_sinh(self, r_c, s, r_min, r_max):
+        """Per-spot sinh grid of shape (N, n_r_local).
+
+        Half-width `K_sigma * s` is capped per-spot at the distance in
+        log r from the centre to the nearest of {log r_min, log r_max}
+        so the grid fits without clipping-induced node pile-up.
+        Returns (r_local, log_w_local). Weights are a convenience for
+        callers that want to integrate on the local grid alone; the
+        union path recomputes them on the sorted union.
+        """
+        log_r_min = jnp.log(r_min)
+        log_r_max = jnp.log(r_max)
+        log_r_c = jnp.log(r_c)
+        s_cap = (jnp.minimum(log_r_c - log_r_min,
+                             log_r_max - log_r_c) / self._K_sigma)
+        s = jnp.minimum(s, s_cap)
+        log_r = (log_r_c[:, None]
+                 + self._sinh_t_frozen[None, :] * s[:, None])
+        r = jnp.clip(jnp.exp(log_r), r_min, r_max)
+        return r, _trapz_log_w_per_spot(r)
+
+    def _build_global_r_grid(self, r_min, r_max):
+        """Shared log-uniform grid of shape (n_r_global,).
+
+        Returns (r_global, log_w_global). Weights are not used by the
+        union path (recomputed after sort) but are exposed for
+        standalone diagnostic use.
+        """
+        log_r = jnp.linspace(
+            jnp.log(r_min), jnp.log(r_max), self._n_r_global)
+        r = jnp.exp(log_r)
+        return r, trapz_log_weights(r)
+
+    def _build_union(self, r_local, r_global):
+        """Sorted per-spot union of local and global nodes.
+
+        r_local: (N, n_r_local). r_global: (n_r_global,).
+        Returns (r_union, log_w_union) of shape
+        (N, n_r_local + n_r_global), sorted along the r-axis with
+        trapezoidal log-weights recomputed on the sorted union.
+        """
+        N = r_local.shape[0]
+        r_global_b = jnp.broadcast_to(
+            r_global[None, :], (N, r_global.shape[0]))
+        r_union = jnp.concatenate([r_local, r_global_b], axis=-1)
+        r_sorted = jnp.sort(r_union, axis=-1)
+        return r_sorted, _trapz_log_w_per_spot(r_sorted)
+
+    # ---- diagnostic helper used by r_ang_posteriors.py ----
+
+    def get_mode2_centres(self, phys_args, phys_kw=None):
+        """Return per-group (r_c, s, r_min, r_max) from the full recipe.
+
+        Runs the same seed → scan → Newton chain as the production
+        Mode 2 r-grid builder but stops short of assembling the local
+        or union grids. Consumed by visualisation code that needs the
+        per-spot centre and Hessian-derived width to overlay on 1D
+        r posteriors.
+
+        Parameters mirror `_build_r_grids_mode2`'s calling convention:
+        `phys_args` is the tuple of physical scalars, `phys_kw` the
+        kwargs for ecc / quadratic warp.
+        """
+        if phys_kw is None:
+            phys_kw = {}
+        D_A = phys_args[2]
+        M_BH = phys_args[3]
+        v_sys = phys_args[4]
+        i0 = phys_args[8]
+        var_v_hv = phys_args[15]
+        sigma_a_floor2 = phys_args[16]
+        r_est, s_fallback, r_min, r_max = self._compute_seeds(
+            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+            phys_args, phys_kw)
+
+        def _one(type_key, idx, n):
+            if n == 0:
+                return None
+            r0 = r_est[idx]
+            s0 = s_fallback[idx]
+            if self._refine_r_center:
+                r_c, s = self._refine_r_center_group(
+                    type_key, idx, r0, s0, r_min, r_max,
+                    phys_args, phys_kw)
+            else:
+                r_c, s = r0, s0
+            return dict(r_c=r_c, s=s)
+
+        return dict(
+            r_min=r_min, r_max=r_max,
+            sys=_one("sys", self._idx_sys, self._n_sys),
+            red=_one("red", self._idx_red, self._n_red),
+            blue=_one("blue", self._idx_blue, self._n_blue))
+
+    def _refine_r_center_group(self, type_key, idx, r_est_group,
+                               s_fallback, r_min, r_max,
+                               phys_args, phys_kw):
+        """Optimise the per-spot local-grid centre via damped Newton in
+        log(r), minimising the phi-marginalised negative log-likelihood.
+
+        Called once per spot group (sys / red / blue). Seeds are
+        supplied by the caller — closed-form Kepler/accel for HV and
+        sys-with-accel, coarse-scan argmax for sys-without-accel —
+        and the same Newton recipe applies uniformly afterwards.
+
+        Returns ``(r_opt, s)`` — the per-spot centre and a log-r
+        half-width derived from the Hessian at the converged point:
+        ``s = max(1 / sqrt(max(f'', hess_floor)), s_fallback)``. The
+        Hessian-based width is the 1-D Gaussian approximation of the
+        φ-marginal NLL width; it wins when the integrand is broader
+        than the seed-stage propagated-noise or scan-bin width, and
+        the fallback protects against pathological (near-flat)
+        Hessians.
+
+        Per-spot fallback to ``(r_est, s_fallback)`` on non-finite
+        Newton output — rare because the Newton body clips each
+        iterate to [ell_lo, ell_hi] and the integrand is finite there.
+        Boundary-pinned r_opt is accepted as-is; `_build_local_sinh`'s
+        ``s_cap`` shrinks the grid to fit within bounds, so a pinned
+        centre gives a tight-but-well-defined grid against the bound
+        rather than a discontinuous flip.
+        """
+        pc = self._phi_concat[type_key]
+        sin_phi = pc["sin_phi"]
+        cos_phi = pc["cos_phi"]
+        log_w_phi = pc["log_w_phi"]
+        has_any_accel = self._group_has_any_accel(type_key)
+
+        (x0, y0, D_A, M_BH, v_sys,
+         r_ang_ref_i, r_ang_ref_Omega, r_ang_ref_periapsis,
+         i0, di_dr, Omega0, dOmega_dr,
+         sigma_x_floor2, sigma_y_floor2, var_v_sys, var_v_hv,
+         sigma_a_floor2) = phys_args
+        d2i_dr2 = phys_kw.get("d2i_dr2", 0.0)
+        d2Omega_dr2 = phys_kw.get("d2Omega_dr2", 0.0)
+        ecc = phys_kw.get("ecc", None)
+        periapsis0 = phys_kw.get("periapsis0", 0.0)
+        dperiapsis_dr = phys_kw.get("dperiapsis_dr", 0.0)
+
+        dtype = r_est_group.dtype
+        x_g = self._all_x[idx].astype(dtype)
+        y_g = self._all_y[idx].astype(dtype)
+        v_g = self._all_v[idx].astype(dtype)
+        a_g = self._all_a[idx].astype(dtype)
+        sx2_g = self._all_sigma_x2[idx].astype(dtype)
+        sy2_g = self._all_sigma_y2[idx].astype(dtype)
+        sv2_g = self._all_sigma_v2[idx].astype(dtype)
+        sa2_g = self._all_sigma_a2[idx].astype(dtype)
+        has_a_g = self._all_has_accel[idx].astype(dtype)
+        is_hv_g = self.is_highvel[idx]
+
+        ell_lo = jnp.log(r_min * 1.01)
+        ell_hi = jnp.log(r_max * 0.99)
+        ell_est = jnp.log(r_est_group)
+
+        def f_one(ell, spot):
+            (xi, yi, vi, ai, sx2i, sy2i, sv2i, sa2i, hai, ishvi) = spot
+            r = jnp.exp(ell)
+
+            i_r, Om_r = warp_geometry(
+                r, r_ang_ref_i, r_ang_ref_Omega,
+                i0, di_dr, Omega0, dOmega_dr,
+                d2i_dr2, d2Omega_dr2)
+            sin_i = jnp.sin(i_r)
+            cos_i = jnp.cos(i_r)
+            sin_O = jnp.sin(Om_r)
+            cos_O = jnp.cos(Om_r)
+
+            X, Y = predict_position(
+                r, sin_phi, cos_phi, x0, y0,
+                sin_i, cos_i, sin_O, cos_O)
+            if ecc is None:
+                V = predict_velocity_los(
+                    r, sin_phi, cos_phi, D_A, M_BH, v_sys, sin_i)
+            else:
+                omega_r = (periapsis0
+                           + dperiapsis_dr * (r - r_ang_ref_periapsis))
+                V = predict_velocity_los(
+                    r, sin_phi, cos_phi, D_A, M_BH, v_sys, sin_i,
+                    ecc=ecc,
+                    sin_om=jnp.sin(omega_r), cos_om=jnp.cos(omega_r))
+
+            var_x = sx2i + sigma_x_floor2
+            var_y = sy2i + sigma_y_floor2
+            var_v = sv2i + jnp.where(ishvi, var_v_hv, var_v_sys)
+
+            nhc = neg_half_chi2_position(xi, yi, X, Y, var_x, var_y)
+            nhc = nhc + neg_half_chi2_velocity(vi, V, var_v)
+            if has_any_accel:
+                A = predict_acceleration_los(
+                    r, sin_phi, cos_phi, D_A, M_BH, sin_i)
+                var_a = sa2i + sigma_a_floor2
+                nhc = nhc + neg_half_chi2_acceleration(
+                    ai, A, var_a, hai)
+            return -logsumexp(nhc + log_w_phi)
+
+        def optim_one(ell0, spot):
+            return damped_newton_1d(
+                lambda ell: f_one(ell, spot), ell0,
+                n_steps=self._n_refine_steps,
+                step_max=self._refine_step_max,
+                hess_floor=self._refine_hess_floor,
+                lo=ell_lo, hi=ell_hi)
+
+        spot_data = (x_g, y_g, v_g, a_g,
+                     sx2_g, sy2_g, sv2_g, sa2_g,
+                     has_a_g, is_hv_g)
+        ell_opt, h_opt = jax.vmap(optim_one, in_axes=(0, 0))(
+            ell_est, spot_data)
+        r_opt = jnp.exp(ell_opt)
+        s_hess = 1.0 / jnp.sqrt(h_opt)
+
+        # Per-spot width: max(Hessian, propagated) — take the wider
+        # estimate as a safety floor. Hessian wins when the φ-marginal
+        # has heavier-than-noise-estimate tails (edge-on geometries).
+        # Propagated wins if Newton lands on a near-flat / over-peaked
+        # point where the Hessian is pathological.
+        s_hybrid = jnp.maximum(s_hess, s_fallback)
+
+        bad = ~jnp.isfinite(r_opt) | ~jnp.isfinite(s_hybrid)
+        r_c = jnp.where(bad, r_est_group, r_opt)
+        s = jnp.where(bad, s_fallback, s_hybrid)
+        return r_c, s
 
     # ---- unified φ integrand (1-D or 2-D r_ang) ----
 
@@ -948,11 +1316,13 @@ class MaserDiskModel(ModelBase):
                        var_v_sys, var_v_hv, sigma_a_floor2,
                        d2i_dr2=0.0, d2Omega_dr2=0.0,
                        ecc=None, periapsis0=None, dperiapsis_dr=0.0):
-        """Backward-compat wrapper: precompute then evaluate.
+        """Convenience wrapper: precompute then evaluate, including lnorm.
 
         Production Mode 1/2 paths call _r_precompute and _phi_eval
-        directly; this wrapper is kept for bruteforce_ll_mode1.
-        r_ang must be 1-D, shape (N,).
+        directly. This wrapper is the single-entry kernel used by
+        `bruteforce_ll_mode1` in the convergence harness, where
+        r_ang is 1-D shape (N,) and the caller wants the full
+        per-(r,φ) integrand rather than just −½χ².
         """
         r_pre = self._r_precompute(
             r_ang, idx, x0, y0, D_A, M_BH, v_sys,
@@ -968,18 +1338,15 @@ class MaserDiskModel(ModelBase):
 
     # ---- unified φ [+ r] marginal ----
 
-    def _group_has_any_accel(self, type_key, shared_r):
+    def _group_has_any_accel(self, type_key):
         """Is there at least one accel-measured spot in this group?
 
-        Mode 1 merges sys_cons + sys_uncons into a single "sys" group,
-        so the broader "sys" key is used there. Mode 2 splits them: the
-        shared-r branch is always sys_uncons (no accel), the per-spot
-        branch is sys_cons when sys_uncons is empty, else "sys".
+        For "sys", uses "sys_cons" when there are no sys-uncons spots
+        (every sys spot then has an accel measurement) and "sys"
+        otherwise (the group mixes accel-measured and not).
         """
         if type_key == "sys":
-            key = ("sys_uncons" if shared_r
-                   else "sys_cons" if self._n_sys_uncons == 0
-                   else "sys")
+            key = "sys_cons" if self._n_sys_uncons == 0 else "sys"
         else:
             key = type_key
         return self._group_has_accel[key]
@@ -993,63 +1360,70 @@ class MaserDiskModel(ModelBase):
           - Mode 2 HV and sys_cons: r_ang shape (N, n_r),
             log_w_r shape (N, n_r).
 
-        Returns shape (N_group,).
+        ``batch is None`` (or ``batch >= n_idx``) → single-shot
+        evaluation (one XLA op). Otherwise the spot axis is chunked
+        with ``jax.lax.scan`` so the largest live intermediate is
+        ``O(batch · [n_r ·] n_phi)``. Inputs are padded to a multiple
+        of ``batch`` so every scan iteration sees identical shapes
+        (single compile, no per-residual recompile); padding is
+        sliced off the output. Returns shape ``(N_group,)``.
         """
         pc = self._phi_concat[type_key]
         n_idx = int(idx.shape[0])
-        parts = []
-        for s in range(0, n_idx, batch):
-            sl = slice(s, s + batch)
-            b_idx = idx[sl]
-            r_b = r_ang[sl]
-            lwr_b = None if log_w_r is None else log_w_r[sl]
+
+        def _eval(idx_b, r_b, lwr_b):
             r_pre = self._r_precompute(
-                r_b, b_idx, *phys_args, **phys_kw,
+                r_b, idx_b, *phys_args, **phys_kw,
                 has_any_accel=has_any_accel)
             # _phi_eval returns −½χ² only; lnorm is added after
             # logsumexp so the max-subtraction acts on bounded χ²
             # differences (protects float32 precision).
-            neg_half_chi2 = self._phi_eval(
+            nhc = self._phi_eval(
                 r_pre, pc["sin_phi"], pc["cos_phi"])
             lnorm_b = r_pre["lnorm"] + r_pre["lnorm_a"]
             if lwr_b is None:
-                ps_b = lnorm_b + logsumexp(
-                    neg_half_chi2 + pc["log_w_phi"], axis=-1)
-            else:
-                w2d = lwr_b[:, :, None] + pc["log_w_phi"][None, None, :]
-                ps_b = lnorm_b + logsumexp(
-                    neg_half_chi2 + w2d, axis=(-2, -1))
-            parts.append(ps_b)
-        return parts[0] if len(parts) == 1 else jnp.concatenate(parts, 0)
+                return lnorm_b + logsumexp(
+                    nhc + pc["log_w_phi"], axis=-1)
+            w2d = lwr_b[:, :, None] + pc["log_w_phi"][None, None, :]
+            return lnorm_b + logsumexp(nhc + w2d, axis=(-2, -1))
 
-    def _marginal_shared_r(self, type_key, idx, r_ang, log_w_r,
-                           has_any_accel, phys_args, phys_kw):
-        """Per-spot log-marginal for the sys-uncons group (shared r grid).
+        if batch is None or batch >= n_idx:
+            return _eval(idx, r_ang, log_w_r)
 
-        Used only in Mode 2 for systemic spots without an acceleration
-        measurement: r_ang is shared across all spots in the group,
-        shape (n_r,). Returns shape (N_group,).
-        """
-        pc = self._phi_concat[type_key]
-        r_pre = self._r_precompute(
-            r_ang, idx, *phys_args, **phys_kw,
-            has_any_accel=has_any_accel)
-        neg_half_chi2 = self._phi_eval_shared_r(
-            r_pre, pc["sin_phi"], pc["cos_phi"])
-        w2d = log_w_r[None, :, None] + pc["log_w_phi"][None, None, :]
-        lnorm_b = r_pre["lnorm"] + r_pre["lnorm_a"]
-        return lnorm_b + logsumexp(neg_half_chi2 + w2d, axis=(-2, -1))
+        n_chunks = (n_idx + batch - 1) // batch
+        n_pad = n_chunks * batch - n_idx
+        if n_pad:
+            idx_p = jnp.concatenate([idx, idx[:n_pad]])
+            r_p = jnp.concatenate([r_ang, r_ang[:n_pad]], axis=0)
+            lwr_p = (None if log_w_r is None else
+                     jnp.concatenate([log_w_r, log_w_r[:n_pad]], axis=0))
+        else:
+            idx_p, r_p, lwr_p = idx, r_ang, log_w_r
+        idx_c = idx_p.reshape(n_chunks, batch)
+        r_c = r_p.reshape(n_chunks, batch, *r_p.shape[1:])
+
+        if lwr_p is None:
+            def body(_, x):
+                return None, _eval(x[0], x[1], None)
+            xs = (idx_c, r_c)
+        else:
+            lwr_c = lwr_p.reshape(n_chunks, batch, *lwr_p.shape[1:])
+            def body(_, x):
+                return None, _eval(x[0], x[1], x[2])
+            xs = (idx_c, r_c, lwr_c)
+        _, ps_chunks = jax.lax.scan(body, None, xs)
+        return ps_chunks.reshape(-1)[:n_idx]
 
     def _eval_phi_marginal(self, spot_groups, phys_args, phys_kw=None,
                            spot_batch=None):
         """Compute the per-spot log-marginal likelihood, scattered into
         a length-`n_spots` array in original data order.
 
-        `spot_groups` is the list produced by `_build_r_grids_mode2`
-        (Mode 2) or assembled in `_sample_galaxy` (Mode 1). Each group
-        describes one spot class (red / blue / sys [cons or uncons])
-        and is dispatched to either `_marginal_per_spot_r` or
-        `_marginal_shared_r` depending on its r-grid shape.
+        `spot_groups` is the list of `(type_key, idx, r_ang, log_w_r)`
+        tuples produced by `_build_r_grids_mode2` (Mode 2) or assembled
+        in `_sample_galaxy` (Mode 1). Each group describes one spot
+        class (red / blue / sys) and is dispatched to
+        `_marginal_per_spot_r`.
 
         `spot_batch` optionally caps the (N_batch, [n_r,] n_phi)
         intermediates for convergence checks on a small GPU.
@@ -1059,22 +1433,17 @@ class MaserDiskModel(ModelBase):
         result = jnp.zeros(self.n_spots)
 
         for group in spot_groups:
-            type_key, idx, r_ang, log_w_r, shared_r = group
+            type_key, idx, r_ang, log_w_r = group
             n_idx = int(idx.shape[0])
             if n_idx == 0:
                 continue
 
-            has_any_accel = self._group_has_any_accel(type_key, shared_r)
-            if shared_r:
-                ps = self._marginal_shared_r(
-                    type_key, idx, r_ang, log_w_r,
-                    has_any_accel, phys_args, phys_kw)
-            else:
-                batch = (n_idx if spot_batch is None
-                         else min(int(spot_batch), n_idx))
-                ps = self._marginal_per_spot_r(
-                    type_key, idx, r_ang, log_w_r,
-                    has_any_accel, phys_args, phys_kw, batch)
+            has_any_accel = self._group_has_any_accel(type_key)
+            batch = (None if spot_batch is None
+                     else min(int(spot_batch), n_idx))
+            ps = self._marginal_per_spot_r(
+                type_key, idx, r_ang, log_w_r,
+                has_any_accel, phys_args, phys_kw, batch)
             result = result.at[idx].set(ps)
 
         return result
@@ -1157,7 +1526,8 @@ class MaserDiskModel(ModelBase):
 
         if self.marginalise_r:
             spot_groups = self._build_r_grids_mode2(
-                D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+                D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+                phys_args=phys_args, phys_kw=phys_kw)
         else:
             # Improper uniform on the physical r_ang range [R_phys_lo,
             # R_phys_hi] converted through the current D_A, so the
@@ -1177,18 +1547,19 @@ class MaserDiskModel(ModelBase):
             if self._n_sys > 0:
                 spot_groups.append(
                     ("sys", self._idx_sys,
-                     r_spots[self._idx_sys], None, False))
+                     r_spots[self._idx_sys], None))
             if self._n_red > 0:
                 spot_groups.append(
                     ("red", self._idx_red,
-                     r_spots[self._idx_red], None, False))
+                     r_spots[self._idx_red], None))
             if self._n_blue > 0:
                 spot_groups.append(
                     ("blue", self._idx_blue,
-                     r_spots[self._idx_blue], None, False))
+                     r_spots[self._idx_blue], None))
 
         ll_per_spot = self._eval_phi_marginal(
-            spot_groups, phys_args, phys_kw)
+            spot_groups, phys_args, phys_kw,
+            spot_batch=self._mode2_spot_batch)
         factor("ll_disk", jnp.sum(ll_per_spot))
 
         return D_c
