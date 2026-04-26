@@ -16,8 +16,7 @@ All settings (priors, sampler, grid sizes, per-galaxy overrides) live in
 - **NGC4258** — anchor galaxy. Position errors are ~10× tighter than
   the MCP five, so `mode2` (shared r, φ grids) cannot resolve the peaks.
   Runs in `mode1` (sample `r_ang` per spot, marginalise φ on dense
-  per-type brute-force grids) with NUTS on GPU, or in mode2-like
-  CPU+MPI (one spot per rank) via `run_mode2_mpi.py`.
+  per-type brute-force grids) with NUTS on GPU.
 
 ## Python entry points
 
@@ -25,7 +24,6 @@ All settings (priors, sampler, grid sizes, per-galaxy overrides) live in
 |---|---|
 | `run_maser_disk.py` | Generic single-galaxy runner (NUTS or NSS). Driven by `config_maser.toml`. |
 | `run_n4258_mode1.py` | NGC4258 Mode 1 NUTS with dense 100k φ grid (no ecc, no quadratic warp). Historical/dev. |
-| `run_mode2_mpi.py` | CPU+MPI runner, one spot per rank, DE MAP or ultranest posterior. Built for NGC4258 where GPU memory can't hold the required grids. |
 | `run_de_map.py` | DE MAP optimizer (mode2 only) for one galaxy, saves result to TOML. |
 | `run_mock_maser.py` | Short single-mock closure test on one synthetic galaxy. |
 | `run_mock_maser_disk.py` | Batch mock closure tests over many seeds, with NUTS and KS-style summary. |
@@ -33,9 +31,8 @@ All settings (priors, sampler, grid sizes, per-galaxy overrides) live in
 
 ## Shell submission scripts
 
-All submit through `addqueue` on glamdring. Both GPU and CPU/MPI jobs
-use the single `venv_candel` (JAX with CUDA, CPU fallback when no GPU
-is visible).
+All submit through `addqueue` on glamdring. Jobs use the single
+`venv_candel` (JAX with CUDA, CPU fallback when no GPU is visible).
 
 ### `submit_all.sh` — MCP five (NSS or NUTS)
 
@@ -67,24 +64,6 @@ Flags: `-q QUEUE` (default `optgpu`), `--warmup`, `--samples`,
 `--init {config|median|sample}`, `--mode`, `--no-ecc`, `--no-quadratic-warp`.
 NSS is *not* supported here (358 per-spot `r_ang` parameters); DE MAP
 doesn't support mode1.
-
-### `submit_mode2_mpi.sh` — CPU+MPI mode2 (primarily NGC4258)
-
-Submits `run_mode2_mpi.py` via `addqueue -n 1x64` on the `redwood`
-queue. Reads the real spot count from the data file (optionally capped
-by `--max-spots`) and launches one rank per spot round-robin.
-
-```bash
-bash scripts/megamaser/submit_mode2_mpi.sh --galaxy NGC4258 --method de  # DE MAP
-bash scripts/megamaser/submit_mode2_mpi.sh --galaxy NGC4258 --method ns  # ultranest posterior
-bash scripts/megamaser/submit_mode2_mpi.sh --galaxy NGC4258 --method de --resume --out-dir RESULTS_DIR
-```
-
-Forwards DE tuning (`--de-popsize`, `--de-maxiter`, `--de-F`,
-`--de-CR`, `--checkpoint-every`) and ultranest tuning
-(`--ns-min-live`, `--ns-max-ncalls`, `--ns-stepsampler`, `--ns-nsteps`).
-Exports the OpenMPI TCP/shm transport knobs required on glamdring
-(OFI MTL crashes at init).
 
 ### `run_de_map.sh` — DE MAP on mode2 galaxies
 
@@ -125,7 +104,7 @@ brute-force references. Scripts live in `convergence/`
   are adequate.
 - **NGC4258, Mode 2** — shared grids cannot resolve σ_φ ~ 0.001 rad
   peaks; error is ≈ -4200 nats, almost entirely from the systemic
-  spots. This is why NGC4258 uses Mode 1 or mode2-MPI (per-spot grids).
+  spots. This is why NGC4258 uses Mode 1.
 - **NGC4258, Mode 1** — per-type brute-force φ grids converge to the
   dense reference when `r_ang` is sampled explicitly; NUTS handles the
   r exploration.
@@ -145,11 +124,6 @@ Reproduction commands live in the convergence scripts themselves.
     ≈ 0.007). D ≈ 7.51 Mpc vs Reid 7.58; periapsis offset by ~87°.
     Fix candidates: tight prior on i, sign check on the `periapsis`
     convention, dense-mass block over the warp parameters.
-  - CPU+MPI mode2 runner (`run_mode2_mpi.py` + `submit_mode2_mpi.sh`)
-    exists as an alternative that sidesteps GPU-memory limits by
-    parallelising one spot per rank. Two MPI gotchas on glamdring are
-    handled inside the submit script (OFI MTL → TCP/shm; ultranest's
-    own MPI mode disabled on rank 0).
 - **Joint `H0`:** `toy_joint_H0.py` produces a first-pass combined
   posterior from the per-galaxy NSS chains. Still a "toy" combiner —
   per-galaxy `D_c` posteriors are KDE'd and the volumetric prior divided
@@ -159,7 +133,5 @@ Reproduction commands live in the convergence scripts themselves.
 ## Related docs
 
 - `docs/maser_numerical_accuracy.md` — quadrature/grid accuracy notes.
-- `docs/mode2_mpi_runner.md` — grid sizes, memory budget, full CLI for
-  `run_mode2_mpi.py`.
 - `instructions/maser_disk_jobs.md` — runner, config, submission.
 - `instructions/glamdring_gpu_jobs.md` — queues and `addqueue` syntax.

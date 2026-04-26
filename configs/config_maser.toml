@@ -379,64 +379,6 @@ D_sobol_n_sigma = 5
 max_generations = 5000
 eval_chunk = 25
 
-# CPU+MPI mode2 runner defaults — consumed by scripts/megamaser/run_mode2_mpi.py
-# and scripts/megamaser/submit_mode2_mpi.sh. The submit script derives the
-# rank count from the data file (optionally capped by `--max-spots`); the
-# per-galaxy blocks here only carry grid sizes. These override the [model]
-# defaults when the mode2-MPI runner is used.
-[mode2_mpi]
-queue = "redwood"
-memory_gb_per_cpu = 5
-# Grid sizes are specified PER GALAXY below. Currently all six galaxies
-# share the same settings (NGC4258 sets the ceiling: position errors
-# ~3 μas → narrow φ peaks). Per-spot memory at these sizes:
-#   sys-no-accel: n_r_brute × 2·n_phi_sys float64       ≈ 320 MB
-#   HV / sys-accel: n_r_local × (n_phi_hv_high + 2·n_phi_hv_low) ≈ 56 MB
-# Both fit well within 5 GB per CPU. Edit a per-galaxy block to tune
-# just that galaxy without touching the others.
-
-[mode2_mpi.galaxies.CGCG074-064]
-n_phi_hv_high = 10001
-n_phi_hv_low = 2001
-n_phi_sys = 10001
-n_r_local = 501
-n_r_brute = 2001
-
-[mode2_mpi.galaxies.NGC4258]
-n_phi_hv_high = 10001
-n_phi_hv_low = 2001
-n_phi_sys = 10001
-n_r_local = 501
-n_r_brute = 2001
-
-[mode2_mpi.galaxies.NGC5765b]
-n_phi_hv_high = 10001
-n_phi_hv_low = 2001
-n_phi_sys = 10001
-n_r_local = 501
-n_r_brute = 2001
-
-[mode2_mpi.galaxies.NGC6264]
-n_phi_hv_high = 10001
-n_phi_hv_low = 2001
-n_phi_sys = 10001
-n_r_local = 501
-n_r_brute = 2001
-
-[mode2_mpi.galaxies.NGC6323]
-n_phi_hv_high = 10001
-n_phi_hv_low = 2001
-n_phi_sys = 10001
-n_r_local = 501
-n_r_brute = 2001
-
-[mode2_mpi.galaxies.UGC3789]
-n_phi_hv_high = 10001
-n_phi_hv_low = 2001
-n_phi_sys = 10001
-n_r_local = 501
-n_r_brute = 2001
-
 [joint.priors.sigma_pec]
 dist = "maxwell"
 scale = 156.7
