@@ -1146,13 +1146,12 @@ class MaserDiskModel(ModelBase):
         K = self._K_sigma
         target_rise = K * K / 2.0
         f_0 = jax.vmap(f_one)(ell_opt, spot_data)
-        log_bin = ((jnp.log(r_max) - jnp.log(r_min))
-                   / (self._n_r_global - 1))
+        log_half_range = 0.5 * (ell_hi - ell_lo)
 
         def _find_half_width(ell_c, f_c, spot, direction):
             """Bisect to find delta where f(ell_c + direction*delta) - f_c >= target_rise."""
             lo = jnp.zeros_like(ell_c)
-            hi = jnp.full_like(ell_c, 3.0 * log_bin)
+            hi = jnp.full_like(ell_c, log_half_range)
 
             def body(_, state):
                 lo, hi = state

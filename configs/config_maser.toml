@@ -1,6 +1,8 @@
 [inference]
 sampler = "nss"
 seed = 42
+
+# NUTS / HMC
 num_warmup = 2000
 num_samples = 2000
 num_chains = 1
@@ -27,10 +29,22 @@ dense_mass_blocks = [
 init_maxiter = 0
 init_method = "config"
 max_tree_depth = 10
+
+# Nested sampling (NSS)
 n_live = 5000
 num_mcmc_steps = 0
 num_delete = 25
 termination = -3
+
+[optimise]
+# Differential evolution (DE) MAP optimizer
+log2_N = 16
+pop_size = 1000
+max_generations = 1000
+patience = 100
+eval_chunk = 64
+sobol_n_sigma = 5
+min_dist_frac = 0.005
 
 [model]
 Om = 0.315
@@ -39,7 +53,7 @@ mode = "mode2"
 sigma_v_default = 0.25
 D_c_prior = "uniform"
 R_phys_lo = 0.01
-R_phys_hi = 1.0
+R_phys_hi = 1.5
 
 # Unified phi grid knobs (identical in Mode 1 and Mode 2).
 # HV (red/blue): 3 uniform sub-ranges centred on the peak:
@@ -52,23 +66,14 @@ R_phys_hi = 1.0
 # Mode 1 at r_ang_scale=1.
 phi_hv_inner_deg = 30.0
 phi_hv_outer_deg = 90.0
-n_phi_hv_high = 4001
-n_phi_hv_low = 751
+n_phi_hv_high = 5001
+n_phi_hv_low = 2501
 
 # Systemic: explicit list of disjoint sub-ranges around phi=0 and
 # phi=pi (Reid convention). Each sub-range is uniform, n_phi_sys
 # points, trapezoidal.
 phi_sys_ranges_deg = [[-45, 45], [135, 225]]
-n_phi_sys = 4001
-
-# Mode 1 (marginalise_r = false) uses a denser phi grid — per-spot
-# likelihood peaks are narrower than under the r-marginal in Mode 2.
-# NGC4258 and UGC3789 carry per-galaxy overrides; these defaults apply
-# to the four other MCP galaxies (CGCG074-064, NGC5765b, NGC6264,
-# NGC6323). Picked from the 2026-04-26 phi-marginal convergence sweep.
-n_phi_hv_high_mode1 = 5001
-n_phi_hv_low_mode1 = 2501
-n_phi_sys_mode1 = 5001
+n_phi_sys = 5001
 
 # Mode 2 r-grid knobs.
 #   n_r_local:  sinh-spaced per-spot grid centred on the posterior
@@ -85,7 +90,7 @@ K_sigma = 10.0
 
 # Per-spot Brent refinement within ±3 global-grid bins of the seed.
 # Brent combines parabolic interpolation with golden-section
-# fallback — converges to machine precision in ~15 steps.
+# fallback.
 refine_r_center = true
 n_refine_steps = 32
 
