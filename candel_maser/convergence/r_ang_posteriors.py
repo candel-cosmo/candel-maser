@@ -14,21 +14,17 @@ Usage:
         [--galaxies UGC3789 NGC6323] [--n-r 501] [--out PATH]
 """
 import argparse
-import logging
 import os
 
-# Silence the JAX CUDA-plugin init warning on CPU-only nodes.
-logging.getLogger("jax._src.xla_bridge").setLevel(logging.CRITICAL)
+import jax
+import jax.numpy as jnp
+import matplotlib.pyplot as plt
+import numpy as np
+import tomli
+from jax.scipy.special import logsumexp
 
-import jax  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import tomli  # noqa: E402
-from jax.scipy.special import logsumexp  # noqa: E402
-
-from candel.model.integration import trapz_log_weights  # noqa: E402
-from candel.model.maser_convergence import build_model  # noqa: E402
+from candel.model.integration import trapz_log_weights
+from candel.model.maser_convergence import build_model
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
 DEFAULT_GALAXIES = ["UGC3789", "NGC6323"]
@@ -120,14 +116,14 @@ def compute_posteriors(galaxy, master_cfg, n_r, r_batch, f_grid):
     overrides = _phi_overrides(galaxy, master_cfg, f_grid)
     print(f"  φ grid: {overrides}", flush=True)
     model = build_model(galaxy, master_cfg, mode="mode1", **overrides)
-    if galaxies_cfg[galaxy].get("forbid_marginalise_r", False):
-        centres = None
-    else:
+    try:
         model_m2 = build_model(
             galaxy, master_cfg, mode="mode2", **overrides)
         phys_args_m2, phys_kw_m2, _ = _phys_from_init(
             model_m2, galaxies_cfg, galaxy)
         centres = model_m2.get_mode2_centres(phys_args_m2, phys_kw_m2)
+    except (ValueError, KeyError):
+        centres = None
 
     phys_args, phys_kw, diag = _phys_from_init(
         model, galaxies_cfg, galaxy)

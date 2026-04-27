@@ -41,7 +41,11 @@ if [[ "$CANDEL_CLUSTER" != "glamdring" ]]; then
 fi
 PYTHON="$CANDEL_PYTHON"
 
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export JAX_PLATFORMS=cuda
+
 echo "Submitting r_ang_posteriors -> $QUEUE"
+echo "JAX: XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda"
 echo "Args: ${PASS_ARGS[*]:-(defaults)}"
 
 addqueue -q "$QUEUE" -s -m 16 --gpus 1 \
