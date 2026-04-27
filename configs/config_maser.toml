@@ -72,36 +72,22 @@ n_phi_sys_mode1 = 5001
 
 # Mode 2 r-grid knobs.
 #   n_r_local:  sinh-spaced per-spot grid centred on the posterior
-#               peak (seed → Newton refine → shift-template).
-#   n_r_global: shared log-uniform grid spanning [r_min, r_max];
-#               appended to every spot's local grid and sorted, so
-#               global tails/secondary modes are always covered.
-#   n_r_scan:   coarse log-uniform scan used to seed the Newton
-#               refinement for sys-without-accel spots (no
-#               closed-form Kepler/accel inversion available).
+#               peak (Brent-refined from best-of scan vs closed-form).
+#   n_r_global: shared log-uniform grid with data-driven range
+#               (closed-form seed min/max × padding). Also doubles as
+#               the scan grid: its phi-marginal is evaluated to find
+#               per-spot seeds before Brent refinement.
 #   K_sigma:    half-width (in multiples of the per-spot σ_r) for
 #               the local sinh transform.
-# Defaults set from the 2026-04-26 NGC5765b convergence sweep against
-# a float64 brute-force reference: (501, 301, K=10) lies between
-# (401, 201) → Δll=+0.11 and (601, 301) → Δll=+0.018, comfortably under
-# 0.1 nat. K_sigma=15 was tested and made convergence worse — at fixed
-# n_r_local, widening the per-spot sinh trades peak resolution for
-# tail coverage that nothing useful lives in.
-n_r_local = 501
-n_r_global = 301
-n_r_scan = 48
+n_r_local = 256
+n_r_global = 128
 K_sigma = 10.0
 
-# Per-spot sinh grid centre refinement (HV + sys+accel only; sys-no-
-# accel uses the shared brute grid regardless). When true, replaces
-# the physics-based r_est with the argmin of the φ-marginalised NLL
-# in log(r) found by a fixed-iteration damped-Newton loop. The sinh
-# half-width is capped per-spot so the grid always fits within
-# [r_min, r_max]. Non-finite Newton output falls back to r_est.
+# Per-spot Brent refinement within ±3 global-grid bins of the seed.
+# Brent combines parabolic interpolation with golden-section
+# fallback — converges to machine precision in ~15 steps.
 refine_r_center = true
-n_refine_steps = 10
-refine_step_max = 0.5
-refine_hess_floor = 1e-3
+n_refine_steps = 32
 
 # Spot-axis chunking for the NumPyro likelihood evaluation
 # (`_eval_phi_marginal`). Disabled by default — the per-group forward
