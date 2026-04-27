@@ -36,16 +36,6 @@ num_mcmc_steps = 0
 num_delete = 25
 termination = -3
 
-[optimise]
-# Differential evolution (DE) MAP optimizer
-log2_N = 16
-pop_size = 1000
-max_generations = 1000
-patience = 100
-eval_chunk = 64
-sobol_n_sigma = 5
-min_dist_frac = 0.005
-
 [model]
 Om = 0.315
 use_selection = false
@@ -405,11 +395,17 @@ sigma_a_floor = 0.279
 dv_sys = 15.2498
 
 [optimise]
+# Differential evolution (DE) MAP optimizer
+log2_N = 16
+pop_size = 1000
+max_generations = 5000
+patience = 100
+eval_chunk = 25
+sobol_n_sigma = 5
+min_dist_frac = 0.005
 H0_for_D_estimate = 70.0
 D_sobol_sigma_v = 500.0
 D_sobol_n_sigma = 5
-max_generations = 5000
-eval_chunk = 25
 
 [joint.priors.sigma_pec]
 dist = "maxwell"
