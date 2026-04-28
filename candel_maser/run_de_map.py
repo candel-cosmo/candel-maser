@@ -117,6 +117,10 @@ tmp.close()
 model = MaserDiskModel(tmp.name, data)
 os.unlink(tmp.name)
 
+eval_chunk = opt_cfg.get("eval_chunk", "default")
+mode2_spot_batch = gcfg.get("mode2_spot_batch", "default")
+fprint(f"DE settings: eval_chunk={eval_chunk}, mode2_spot_batch={mode2_spot_batch}")
+
 # ---- Run DE MAP ----
 ckpt_dir = os.path.join(
     master_cfg["io"].get("root_output", "results/Megamaser"),
