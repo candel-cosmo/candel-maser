@@ -69,6 +69,8 @@ with open("scripts/megamaser/config_maser.toml", "rb") as f:
 parser = argparse.ArgumentParser()
 parser.add_argument("galaxy", type=str)
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--resume", action="store_true",
+                    help="Resume from latest checkpoint if one exists")
 args = parser.parse_args()
 
 galaxy = args.galaxy
@@ -94,12 +96,16 @@ if "D_lo" in gcfg and "D_hi" in gcfg:
     data["D_lo"] = float(gcfg["D_lo"])
     data["D_hi"] = float(gcfg["D_hi"])
 
-# ---- Build model ----
+# ---- Build model (force mode2 — DE requires r+phi marginalisation) ----
 config = {
     "inference": master_cfg["inference"],
-    "model": master_cfg["model"],
+    "model": {**master_cfg["model"], "mode": "mode2"},
     "io": master_cfg["io"],
     "optimise": master_cfg.get("optimise", {}),
+}
+config["model"]["galaxies"] = {
+    g: {k: v for k, v in blk.items() if k != "mode"}
+    for g, blk in master_cfg["model"]["galaxies"].items()
 }
 
 tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False)
@@ -109,9 +115,23 @@ model = MaserDiskModel(tmp.name, data)
 os.unlink(tmp.name)
 
 # ---- Run DE MAP ----
+ckpt_dir = os.path.join(
+    master_cfg["io"].get("root_output", "results/Megamaser"),
+    "de_checkpoints", galaxy)
+os.makedirs(ckpt_dir, exist_ok=True)
+ckpt_path = os.path.join(ckpt_dir, "de_ckpt.npz")
+resume_path = None
+if args.resume and os.path.isfile(ckpt_path):
+    resume_path = ckpt_path
+    fprint(f"Resuming from {ckpt_path}")
+elif args.resume:
+    fprint(f"--resume: no checkpoint found at {ckpt_path}, starting fresh")
+fprint(f"Checkpoints: {ckpt_dir}")
+
 fsection(f"DE MAP optimization ({galaxy}, {data['n_spots']} spots)")
 t0 = time.time()
-init_params = find_MAP(model, model_kwargs={}, seed=seed)
+init_params = find_MAP(model, model_kwargs={}, seed=seed,
+                       checkpoint_dir=ckpt_dir, resume_path=resume_path)
 dt = time.time() - t0
 
 # ---- Print results ----

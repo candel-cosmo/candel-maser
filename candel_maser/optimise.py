@@ -24,6 +24,7 @@ Two strategies:
 Both operate in constrained space for the global survey, then (Adam only)
 switch to unconstrained space for gradient optimization.
 """
+import os
 import time
 
 import jax
@@ -679,12 +680,43 @@ def sobol_optimize(model, model_args=(), model_kwargs=None,
 # -----------------------------------------------------------------------
 
 
+def _save_de_checkpoint(path, state, key, gens_without_improvement,
+                        best_logp_so_far, lo, hi, names, sizes):
+    tmp = path + ".tmp.npz"
+    np.savez(
+        tmp,
+        population=np.asarray(state.population),
+        fitness=np.asarray(state.fitness),
+        best_solution=np.asarray(state.best_solution),
+        best_fitness=np.asarray(state.best_fitness),
+        generation_counter=np.asarray(state.generation_counter),
+        key=np.asarray(key),
+        gens_without_improvement=np.array(gens_without_improvement),
+        best_logp_so_far=np.array(best_logp_so_far),
+        lo=lo, hi=hi,
+        names=np.array(names, dtype=str),
+        sizes=np.array(sizes),
+    )
+    os.replace(tmp, path)
+
+
+def _load_de_checkpoint(path, lo, hi, names, sizes):
+    d = np.load(path)
+    if not np.allclose(d["lo"], lo) or not np.allclose(d["hi"], hi):
+        raise ValueError("Checkpoint bounds do not match current model.")
+    if list(d["names"]) != list(names) or list(d["sizes"]) != list(sizes):
+        raise ValueError("Checkpoint param layout does not match.")
+    return d
+
+
 def de_optimize(model, model_args=(), model_kwargs=None,
                 log2_N=16, pop_size=1000, max_generations=1000,
                 patience=100, eval_chunk=64,
                 sobol_n_sigma=5, min_dist_frac=0.005,
                 sobol_bounds_override=None,
-                log_every=100, seed=42, verbose=True):
+                log_every=100, seed=42, verbose=True,
+                checkpoint_dir=None, resume_path=None,
+                checkpoint_interval=600):
     """Derivative-free MAP optimizer using Differential Evolution.
 
     Strategy:
@@ -733,6 +765,12 @@ def de_optimize(model, model_args=(), model_kwargs=None,
         Random seed.
     verbose : bool
         Print progress.
+    checkpoint_dir : str or None
+        Directory for periodic checkpoints (time-based, see
+        ``checkpoint_interval``). None disables checkpointing.
+    resume_path : str or None
+        Path to a checkpoint ``.npz`` to resume from. Skips the Sobol
+        survey and resumes the DE loop.
 
     Returns
     -------
@@ -805,84 +843,122 @@ def de_optimize(model, model_args=(), model_kwargs=None,
 
     _fitness_raw = jax.jit(jax.vmap(_fitness_single))
 
-    def fitness_batch(x_normed):
-        n = x_normed.shape[0]
-        if n <= eval_chunk:
-            return _fitness_raw(x_normed)
+    def _eval_padded(fn, x, chunk):
+        """Evaluate fn on x in chunks of exactly `chunk`, padding if needed."""
+        n = x.shape[0]
+        n_pad = (-n) % chunk
+        if n_pad:
+            x = jnp.concatenate([x, jnp.broadcast_to(x[:1], (n_pad,) + x.shape[1:])])
         parts = []
-        for i in range(0, n, eval_chunk):
-            parts.append(_fitness_raw(x_normed[i:i + eval_chunk]))
+        for i in range(0, x.shape[0], chunk):
+            parts.append(fn(x[i:i + chunk]))
             jax.block_until_ready(parts[-1])
-        return jnp.concatenate(parts)
+        out = jnp.concatenate(parts)
+        return out[:n]
+
+    def fitness_batch(x_normed):
+        return _eval_padded(_fitness_raw, x_normed, eval_chunk)
 
     # Compile
     t0 = time.time()
-    x_test = jnp.tile(jnp.array(0.5 * (lo + hi))[None, :], (4, 1))
+    x_test = jnp.tile(jnp.array(0.5 * (lo + hi))[None, :], (eval_chunk, 1))
     _ = _logp_batch_raw(x_test)
     jax.block_until_ready(_)
     if verbose:
         fprint(f"JIT compiled in {time.time() - t0:.1f}s")
 
-    # Sobol survey (may use tighter bounds than DE)
-    sampler = Sobol(d=D, scramble=True, seed=seed)
-    sobol_01 = sampler.random(N_sobol)
-    sobol_points = sobol_lo + sobol_01 * (sobol_hi - sobol_lo)
-    sobol_jax = jnp.array(sobol_points)
-
+    # Compile fitness (needed for both fresh and resume paths)
     t0 = time.time()
-    logp_all = []
-    n_batches = (N_sobol + eval_chunk - 1) // eval_chunk
-    for i in trange(n_batches, desc="Sobol", disable=not verbose):
-        start = i * eval_chunk
-        end = min(start + eval_chunk, N_sobol)
-        vals = _logp_batch_raw(sobol_jax[start:end])
-        jax.block_until_ready(vals)
-        logp_all.append(np.asarray(vals))
-    logp_all = np.concatenate(logp_all)
-    valid = np.isfinite(logp_all)
-    logp_all = np.where(valid, logp_all, -np.inf)
-
-    if verbose:
-        fprint(f"Sobol done in {time.time() - t0:.1f}s "
-               f"({valid.sum()}/{N_sobol} valid, "
-               f"best logP = {logp_all[valid].max():.1f})")
-
-    # Seed initial population from top Sobol points
-    selected = _select_distinct(sobol_points, logp_all, pop_size,
-                                min_dist_frac)
-    x0 = sobol_points[selected]
-    x0_normed = jnp.array((x0 - lo) / scale)
-
-    # Compile fitness
-    t0 = time.time()
-    f0 = fitness_batch(x0_normed)
-    jax.block_until_ready(f0)
+    _ = fitness_batch(jnp.full((eval_chunk, D), 0.5))
+    jax.block_until_ready(_)
     if verbose:
         fprint(f"Fitness JIT compiled in {time.time() - t0:.1f}s")
 
-    # DE loop
-    if verbose:
-        fsection(f"DE (pop={pop_size}, max_gen={max_generations})")
-
-    key = jax.random.PRNGKey(seed)
     de = DifferentialEvolution(
         population_size=pop_size, solution=jnp.zeros(D))
-    params = de.default_params
-    state = de.init(key, x0_normed, f0, params)
+    de_params = de.default_params
 
-    best_logp_so_far = -float(state.best_fitness)
-    gens_without_improvement = 0
+    if resume_path is not None:
+        # --- Resume from checkpoint ---
+        ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
+        key = jnp.array(ckpt["key"])
+        gen_start = int(ckpt["generation_counter"])
+        gens_without_improvement = int(ckpt["gens_without_improvement"])
+        best_logp_so_far = float(ckpt["best_logp_so_far"])
 
+        x0_normed = jnp.array(ckpt["population"])
+        f0 = jnp.array(ckpt["fitness"])
+        state = de.init(key, x0_normed, f0, de_params)
+        state = state.replace(
+            best_solution=jnp.array(ckpt["best_solution"]),
+            best_fitness=jnp.array(ckpt["best_fitness"]),
+            generation_counter=jnp.array(ckpt["generation_counter"]),
+        )
+        if verbose:
+            fprint(f"Resumed from {resume_path} "
+                   f"(gen={gen_start}, best logP={best_logp_so_far:.2f}, "
+                   f"stale={gens_without_improvement})")
+    else:
+        # --- Fresh: Sobol survey + seed population ---
+        sampler = Sobol(d=D, scramble=True, seed=seed)
+        sobol_01 = sampler.random(N_sobol)
+        sobol_points = sobol_lo + sobol_01 * (sobol_hi - sobol_lo)
+        sobol_jax = jnp.array(sobol_points)
+
+        t0 = time.time()
+        n_pad = (-N_sobol) % eval_chunk
+        if n_pad:
+            sobol_jax = jnp.concatenate(
+                [sobol_jax, jnp.broadcast_to(sobol_jax[:1], (n_pad,) + sobol_jax.shape[1:])])
+        logp_all = []
+        n_batches = sobol_jax.shape[0] // eval_chunk
+        for i in trange(n_batches, desc="Sobol", disable=not verbose):
+            start = i * eval_chunk
+            vals = _logp_batch_raw(sobol_jax[start:start + eval_chunk])
+            jax.block_until_ready(vals)
+            logp_all.append(np.asarray(vals))
+        logp_all = np.concatenate(logp_all)[:N_sobol]
+        valid = np.isfinite(logp_all)
+        logp_all = np.where(valid, logp_all, -np.inf)
+
+        if verbose:
+            fprint(f"Sobol done in {time.time() - t0:.1f}s "
+                   f"({valid.sum()}/{N_sobol} valid, "
+                   f"best logP = {logp_all[valid].max():.1f})")
+
+        selected = _select_distinct(sobol_points, logp_all, pop_size,
+                                    min_dist_frac)
+        x0 = sobol_points[selected]
+        x0_normed = jnp.array((x0 - lo) / scale)
+        f0 = fitness_batch(x0_normed)
+        jax.block_until_ready(f0)
+
+        key = jax.random.PRNGKey(seed)
+        state = de.init(key, x0_normed, f0, de_params)
+        gen_start = 0
+        best_logp_so_far = -float(state.best_fitness)
+        gens_without_improvement = 0
+
+    # DE loop
+    if verbose:
+        fsection(f"DE (pop={pop_size}, max_gen={max_generations}, "
+                 f"start={gen_start})")
+
+    remaining = max_generations - gen_start
+    _ckpt_path = (os.path.join(checkpoint_dir, "de_ckpt.npz")
+                  if checkpoint_dir is not None else None)
+    _last_ckpt_time = time.time()
     t0 = time.time()
     final_gen = max_generations
-    for gen in trange(max_generations, desc="DE", disable=not verbose):
+    for step in trange(remaining, desc="DE", disable=not verbose):
+        gen = gen_start + step
         key, ask_key, tell_key = jax.random.split(key, 3)
-        population, state = de.ask(ask_key, state, params)
+        population, state = de.ask(ask_key, state, de_params)
         population = _reflect_bounds(population)
         fitnesses = fitness_batch(population)
         jax.block_until_ready(fitnesses)
         state, metrics = de.tell(
-            tell_key, population, fitnesses, state, params)
+            tell_key, population, fitnesses, state, de_params)
 
         current_best = -float(state.best_fitness)
         if current_best > best_logp_so_far + 0.1:
@@ -896,6 +972,20 @@ def de_optimize(model, model_args=(), model_kwargs=None,
             true_logp = float(logp_fn(jnp.array(x_best)))
             fprint(f"  gen {gen+1:5d}: logP = {true_logp:.2f}, "
                    f"stale = {gens_without_improvement}/{patience}")
+            offset = 0
+            for name, size in zip(names, sizes):
+                if size == 1:
+                    fprint(f"    {name:20s} = {x_best[offset]:.4f}")
+                offset += size
+
+        if (_ckpt_path is not None
+                and time.time() - _last_ckpt_time >= checkpoint_interval):
+            _save_de_checkpoint(
+                _ckpt_path, state, key, gens_without_improvement,
+                best_logp_so_far, lo, hi, names, sizes)
+            _last_ckpt_time = time.time()
+            if verbose:
+                fprint(f"  checkpoint: gen {gen+1}")
 
         if gens_without_improvement >= patience:
             if verbose:
@@ -950,7 +1040,8 @@ def _use_de(model):
     return getattr(model, "marginalise_r", False)
 
 
-def find_MAP(model, model_kwargs=None, seed=42):
+def find_MAP(model, model_kwargs=None, seed=42,
+             checkpoint_dir=None, resume_path=None):
     """Find MAP estimate, automatically selecting the optimizer.
 
     Uses DE for maser disk models with r+phi marginalization
@@ -1000,6 +1091,8 @@ def find_MAP(model, model_kwargs=None, seed=42):
             min_dist_frac=opt_cfg.get("min_dist_frac", 0.005),
             sobol_bounds_override=sobol_bounds_override,
             seed=seed,
+            checkpoint_dir=checkpoint_dir,
+            resume_path=resume_path,
         )
         best_params, best_logp, results = de_optimize(model, **kwargs)
     else:
