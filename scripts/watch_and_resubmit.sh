@@ -154,6 +154,7 @@ echo "[watch] Marker: '$MARKER'"
 echo "[watch] Max retries: $MAX_RETRIES | Poll: ${POLL}s"
 echo "[watch] Resume flag: ${RESUME_FLAG:-(none)}"
 echo "[watch] Cluster: $CANDEL_CLUSTER"
+echo "[watch] Command: ${CMD[*]}"
 echo ""
 
 resubmit_cmd=("${CMD[@]}")
