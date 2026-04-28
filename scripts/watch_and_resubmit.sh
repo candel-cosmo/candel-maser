@@ -159,6 +159,8 @@ echo ""
 resubmit_cmd=("${CMD[@]}")
 
 for attempt in $(seq 0 "$MAX_RETRIES"); do
+    export CANDEL_WATCH_ROUND="$attempt"
+
     echo "========================================"
     echo "[watch] Round $attempt/$MAX_RETRIES ($(date '+%Y-%m-%d %H:%M:%S'))"
     echo "========================================"
