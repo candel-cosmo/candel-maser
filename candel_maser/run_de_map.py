@@ -30,21 +30,20 @@ if needed:
     os.environ["LD_LIBRARY_PATH"] = ":".join(needed) + (f":{ld}" if ld else "")
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
 import argparse
 import tempfile
 import time
 
 import tomli
 
-# Check per-galaxy use_float64 before importing JAX
-with open("scripts/megamaser/config_maser.toml", "rb") as _f:
-    _pre_cfg = tomli.load(_f)
-_galaxy_arg = sys.argv[1] if len(sys.argv) > 1 else ""
-_gal_cfg = _pre_cfg.get("model", {}).get("galaxies", {}).get(_galaxy_arg, {})
-if _gal_cfg.get("use_float64", False):
+# DE is derivative-free so float32 is sufficient; use --f64 to override.
+if "--f64" in sys.argv:
+    sys.argv.remove("--f64")
     import jax
     jax.config.update("jax_enable_x64", True)
-    print(f"float64 enabled for {_galaxy_arg}", flush=True)
+    print("float64 enabled (--f64)", flush=True)
 
 import jax
 import numpy as np

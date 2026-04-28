@@ -85,14 +85,12 @@ refine_r_center = true
 n_refine_steps = 32
 
 # Spot-axis chunking for the NumPyro likelihood evaluation
-# (`_eval_phi_marginal`). Disabled by default — the per-group forward
-# intermediate `O(N_group · [n_r ·] n_phi)` fits comfortably for the
-# four small-MCP galaxies (≤80 spots/group) at the current grids, and
-# unbatched is fastest (single XLA op, no per-chunk Python overhead,
-# no per-residual recompile). Set this to a positive int only when
-# the live intermediate or AD tape (Mode 1 NUTS on a large galaxy)
-# would not fit on the target GPU; chunking then runs as
-# `jax.lax.scan` over `ceil(N_group / mode2_spot_batch)` chunks.
+# (`_eval_phi_marginal`). For single-evaluation samplers (NUTS with 1
+# chain) the per-group intermediate fits for ≤80 spots/group, and
+# unbatched is fastest. For NSS (which vmaps over num_delete chains)
+# the intermediate is multiplied by num_delete and can OOM;
+# run_maser_disk.py auto-sets mode2_spot_batch=16 for NSS when this
+# is unset. Per-galaxy overrides (e.g. NGC4258) take precedence.
 # mode2_spot_batch = 16
 
 [model.priors.H0]
@@ -268,6 +266,7 @@ r_ang_ref_periapsis = 0.0
 dense_mass_globals = true
 target_accept_prob = 0.9
 eval_chunk = 1
+mode2_spot_batch = 4
 
 [model.galaxies.NGC4258.init]
 D_c = 7.593
