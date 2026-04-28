@@ -843,21 +843,23 @@ def de_optimize(model, model_args=(), model_kwargs=None,
 
     _fitness_raw = jax.jit(jax.vmap(_fitness_single))
 
-    def _eval_padded(fn, x, chunk):
+    def _eval_padded(fn, x, chunk, desc=None):
         """Evaluate fn on x in chunks of exactly `chunk`, padding if needed."""
         n = x.shape[0]
         n_pad = (-n) % chunk
         if n_pad:
             x = jnp.concatenate([x, jnp.broadcast_to(x[:1], (n_pad,) + x.shape[1:])])
+        n_chunks = x.shape[0] // chunk
         parts = []
-        for i in range(0, x.shape[0], chunk):
+        for i in trange(0, x.shape[0], chunk, total=n_chunks,
+                        desc=desc, disable=not verbose):
             parts.append(fn(x[i:i + chunk]))
             jax.block_until_ready(parts[-1])
         out = jnp.concatenate(parts)
         return out[:n]
 
-    def fitness_batch(x_normed):
-        return _eval_padded(_fitness_raw, x_normed, eval_chunk)
+    def fitness_batch(x_normed, desc=None):
+        return _eval_padded(_fitness_raw, x_normed, eval_chunk, desc=desc)
 
     # Compile (single JIT — Sobol survey reuses the same fitness function)
     t0 = time.time()
@@ -898,7 +900,7 @@ def de_optimize(model, model_args=(), model_kwargs=None,
 
         t0 = time.time()
         sobol_normed = jnp.array((sobol_points - lo) / scale)
-        logp_all = -np.asarray(fitness_batch(sobol_normed))
+        logp_all = -np.asarray(fitness_batch(sobol_normed, desc="Sobol"))
         valid = np.isfinite(logp_all)
         logp_all = np.where(valid, logp_all, -np.inf)
 
