@@ -70,6 +70,10 @@ parser.add_argument("galaxy", type=str)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--resume", action="store_true",
                     help="Resume from latest checkpoint if one exists")
+parser.add_argument("--no-ecc", action="store_true",
+                    help="Disable eccentricity model")
+parser.add_argument("--no-quadratic-warp", action="store_true",
+                    help="Disable quadratic disk warp")
 args = parser.parse_args()
 
 galaxy = args.galaxy
@@ -110,6 +114,16 @@ config["model"]["galaxies"] = {
     g: {k: v for k, v in blk.items() if k != "mode"}
     for g, blk in master_cfg["model"]["galaxies"].items()
 }
+if args.no_ecc:
+    config["model"]["galaxies"][galaxy]["use_ecc"] = False
+if args.no_quadratic_warp:
+    config["model"]["galaxies"][galaxy]["use_quadratic_warp"] = False
+
+ckpt_tag = "de_ckpt"
+if args.no_ecc:
+    ckpt_tag += "_no_ecc"
+if args.no_quadratic_warp:
+    ckpt_tag += "_no_quad_warp"
 
 tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False)
 tomli_w.dump(config, tmp)
@@ -126,7 +140,7 @@ ckpt_dir = os.path.join(
     master_cfg["io"].get("root_output", "results/Megamaser"),
     "de_checkpoints", galaxy)
 os.makedirs(ckpt_dir, exist_ok=True)
-ckpt_path = os.path.join(ckpt_dir, "de_ckpt.npz")
+ckpt_path = os.path.join(ckpt_dir, f"{ckpt_tag}.npz")
 resume_path = None
 if args.resume and os.path.isfile(ckpt_path):
     resume_path = ckpt_path
