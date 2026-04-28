@@ -156,12 +156,11 @@ echo "[watch] Resume flag: ${RESUME_FLAG:-(none)}"
 echo "[watch] Cluster: $CANDEL_CLUSTER"
 echo ""
 
-attempt=0
 resubmit_cmd=("${CMD[@]}")
 
-while true; do
+for attempt in $(seq 0 "$MAX_RETRIES"); do
     echo "========================================"
-    echo "[watch] Round $attempt ($(date '+%Y-%m-%d %H:%M:%S'))"
+    echo "[watch] Round $attempt/$MAX_RETRIES ($(date '+%Y-%m-%d %H:%M:%S'))"
     echo "========================================"
 
     job_ids=()
@@ -180,14 +179,13 @@ while true; do
         exit 0
     fi
 
-    attempt=$((attempt + 1))
-    if [[ $attempt -ge $MAX_RETRIES ]]; then
+    if [[ $attempt -eq $MAX_RETRIES ]]; then
         echo "[watch] Max retries ($MAX_RETRIES) reached. Exiting."
         exit 1
     fi
 
     echo ""
-    echo "[watch] Resubmitting (attempt $attempt/$MAX_RETRIES)..."
+    echo "[watch] Resubmitting (round $((attempt + 1))/$MAX_RETRIES)..."
 
     # Build resubmit command: original command + resume flag (if set)
     resubmit_cmd=("${CMD[@]}")
