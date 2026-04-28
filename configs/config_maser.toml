@@ -267,6 +267,9 @@ r_ang_ref_Omega = 6.1
 r_ang_ref_periapsis = 0.0
 dense_mass_globals = true
 target_accept_prob = 0.9
+# NGC4258 has 187 systemic spots; unbatched Mode 2 intermediates
+# (N_spots × n_r × n_phi × float64 × ~6 arrays) exceed GPU memory.
+mode2_spot_batch = 8
 
 [model.galaxies.NGC4258.init]
 D_c = 7.593
@@ -373,21 +376,20 @@ n_phi_hv_low = 2501
 n_phi_sys = 5001
 
 [model.galaxies.UGC3789.init]
-H0 = 64.5287
-D_c = 50.7209
-eta = 5.3635
-x0 = -402.2705
-y0 = -461.1638
-i0 = 85.6441
-Omega0 = 222.9669
-dOmega_dr = -3.2655
-di_dr = 8.1005
-sigma_x_floor = 4.6195
-sigma_y_floor = 7.5683
-sigma_v_sys = 0.0175
-sigma_v_hv = 2.0618
-sigma_a_floor = 0.279
-dv_sys = 15.2498
+D_c = 53.2636
+Omega0 = 222.9935
+dOmega_dr = -3.3206
+di_dr = 8.4371
+dv_sys = 15.4967
+eta = 5.3634
+i0 = 85.6456
+sigma_a_floor = 0.2382
+sigma_v_hv = 2.0396
+sigma_v_sys = 1.5958
+sigma_x_floor = 4.7198
+sigma_y_floor = 7.9717
+x0 = -402.4226
+y0 = -461.1449
 
 [optimise]
 # Differential evolution (DE) MAP optimizer
