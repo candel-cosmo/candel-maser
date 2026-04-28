@@ -493,10 +493,6 @@ class MaserDiskModel(ModelBase):
         if mode not in valid:
             raise ValueError(
                 f"Invalid mode '{mode}'; expected one of {valid}.")
-        if mode == "mode2" and gal_cfg.get("forbid_marginalise_r", False):
-            raise ValueError(
-                "This galaxy has `forbid_marginalise_r = true`; mode2 is "
-                "not supported. Set mode = 'mode1'.")
         self.mode = mode
         self.marginalise_r = (mode == "mode2")
 

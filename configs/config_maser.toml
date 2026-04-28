@@ -259,7 +259,6 @@ ecc_cartesian = true
 use_quadratic_warp = true
 use_float64 = true
 mode = "mode1"
-forbid_marginalise_r = true
 # Denser phi grids for NGC4258 (position errors ~3 μas → narrow phi peaks).
 n_phi_hv_high = 20001
 n_phi_hv_low = 5001
