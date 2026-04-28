@@ -267,9 +267,7 @@ r_ang_ref_Omega = 6.1
 r_ang_ref_periapsis = 0.0
 dense_mass_globals = true
 target_accept_prob = 0.9
-# NGC4258 has 187 systemic spots; unbatched Mode 2 intermediates
-# (N_spots × n_r × n_phi × float64 × ~6 arrays) exceed GPU memory.
-mode2_spot_batch = 8
+eval_chunk = 1
 
 [model.galaxies.NGC4258.init]
 D_c = 7.593

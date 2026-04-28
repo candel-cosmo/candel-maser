@@ -97,11 +97,15 @@ if "D_lo" in gcfg and "D_hi" in gcfg:
     data["D_hi"] = float(gcfg["D_hi"])
 
 # ---- Build model (force mode2 — DE requires r+phi marginalisation) ----
+opt_cfg = dict(master_cfg.get("optimise", {}))
+if "eval_chunk" in gcfg:
+    opt_cfg["eval_chunk"] = gcfg["eval_chunk"]
+
 config = {
     "inference": master_cfg["inference"],
     "model": {**master_cfg["model"], "mode": "mode2"},
     "io": master_cfg["io"],
-    "optimise": master_cfg.get("optimise", {}),
+    "optimise": opt_cfg,
 }
 config["model"]["galaxies"] = {
     g: {k: v for k, v in blk.items() if k != "mode"}
