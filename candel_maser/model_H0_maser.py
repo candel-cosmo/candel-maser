@@ -1145,7 +1145,7 @@ class MaserDiskModel(ModelBase):
         log_half_range = 0.5 * (ell_hi - ell_lo)
 
         def _find_half_width(ell_c, f_c, spot, direction):
-            """Bisect to find delta where f(ell_c + direction*delta) - f_c >= target_rise."""
+            """Bisect for delta where f changes by target_rise."""
             lo = jnp.zeros_like(ell_c)
             hi = jnp.full_like(ell_c, log_half_range)
 
@@ -1436,11 +1436,14 @@ class MaserDiskModel(ModelBase):
         if lwr_p is None:
             def body(_, x):
                 return None, _eval(x[0], x[1], None)
+
             xs = (idx_c, r_c)
         else:
             lwr_c = lwr_p.reshape(n_chunks, batch, *lwr_p.shape[1:])
+
             def body(_, x):
                 return None, _eval(x[0], x[1], x[2])
+
             xs = (idx_c, r_c, lwr_c)
         _, ps_chunks = jax.lax.scan(body, None, xs)
         return ps_chunks.reshape(-1)[:n_idx]

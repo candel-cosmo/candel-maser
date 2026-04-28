@@ -848,7 +848,8 @@ def de_optimize(model, model_args=(), model_kwargs=None,
         n = x.shape[0]
         n_pad = (-n) % chunk
         if n_pad:
-            x = jnp.concatenate([x, jnp.broadcast_to(x[:1], (n_pad,) + x.shape[1:])])
+            pad = jnp.broadcast_to(x[:1], (n_pad,) + x.shape[1:])
+            x = jnp.concatenate([x, pad])
         n_chunks = x.shape[0] // chunk
         parts = []
         for i in trange(0, x.shape[0], chunk, total=n_chunks,

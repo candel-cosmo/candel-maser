@@ -39,8 +39,10 @@ def brent_1d(f, a, b, n_steps):
     # Initialise at the midpoint.
     x = 0.5 * (a + b)
     fx = f(x)
-    w = x;  fw = fx
-    v = x;  fv = fx
+    w = x
+    fw = fx
+    v = x
+    fv = fx
     e = b - a       # distance moved two steps ago
     d = 0.5 * e     # distance moved last step
 
@@ -77,9 +79,10 @@ def brent_1d(f, a, b, n_steps):
         new_d = jnp.where(para_ok, para_d, golden_d)
 
         # Enforce minimum step size.
-        u = x + jnp.where(jnp.abs(new_d) >= tol1,
-                           new_d,
-                           jnp.copysign(tol1, new_d))
+        u = x + jnp.where(
+            jnp.abs(new_d) >= tol1,
+            new_d,
+            jnp.copysign(tol1, new_d))
         fu = f(u)
 
         # ── Update bracket ──
@@ -87,26 +90,32 @@ def brent_1d(f, a, b, n_steps):
         # If fu > fx, x stays best: shrink bracket from the u side.
         a_new = jnp.where(
             fu <= fx,
-            jnp.where(u < x, a, x),    # u is best: keep a (u left) or raise a to x (u right)
-            jnp.where(u < x, u, a))    # x is best: raise a to u (u left) or keep a
+            jnp.where(u < x, a, x),
+            jnp.where(u < x, u, a))
         b_new = jnp.where(
             fu <= fx,
-            jnp.where(u < x, x, b),    # u is best: lower b to x (u left) or keep b
-            jnp.where(u < x, b, u))    # x is best: keep b (u left) or lower b to u
+            jnp.where(u < x, x, b),
+            jnp.where(u < x, b, u))
 
         # ── Update best / second / third ──
         # Case: u is new best.
-        x1 = u;  fx1 = fu
-        w1 = x;  fw1 = fx
-        v1 = w;  fv1 = fw
+        x1 = u
+        fx1 = fu
+        w1 = x
+        fw1 = fx
+        v1 = w
+        fv1 = fw
         # Case: u improves on w (or w == x).
-        w2 = u;  fw2 = fu
-        v2 = v;  fv2 = fv
+        w2 = u
+        fw2 = fu
+        v2 = v
+        fv2 = fv
         update_v2 = (fu <= fv) | (v == x) | (v == w)
         v2 = jnp.where(update_v2, u, v)
         fv2 = jnp.where(update_v2, fu, fv)
         # Case: u only improves on v.
-        v3 = v;  fv3 = fv
+        v3 = v
+        fv3 = fv
         update_v3 = (fu <= fv) | (v == x) | (v == w)
         v3 = jnp.where(update_v3, u, v)
         fv3 = jnp.where(update_v3, fu, fv)
