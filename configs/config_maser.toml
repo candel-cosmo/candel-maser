@@ -232,21 +232,20 @@ D_lo = 66.0
 D_hi = 150.0
 
 [model.galaxies.CGCG074-064.init]
-H0 = 79.8946
-D_c = 89.2701
+D_c = 88.2221
+Omega0 = 101.4636
+dOmega_dr = 4.8959
+di_dr = -1.855
+dv_sys = -265.5803
 eta = 5.4411
-x0 = 1.3965
-y0 = 6.4031
-i0 = 90.6023
-Omega0 = 101.468
-dOmega_dr = 4.7988
-di_dr = -1.8697
-sigma_x_floor = 0.35
-sigma_y_floor = 14.2729
-sigma_v_sys = 1.8223
-sigma_v_hv = 2.0683
-sigma_a_floor = 0.2378
-dv_sys = -265.5389
+i0 = 90.6084
+sigma_a_floor = 0.2321
+sigma_v_hv = 2.0975
+sigma_v_sys = 1.8707
+sigma_x_floor = 0.3259
+sigma_y_floor = 14.2533
+x0 = 1.3357
+y0 = 6.4521
 
 [model.galaxies.NGC4258]
 ra = 184.74009
