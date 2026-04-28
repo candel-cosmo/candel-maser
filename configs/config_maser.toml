@@ -298,21 +298,20 @@ D_lo = 85.0
 D_hi = 200.0
 
 [model.galaxies.NGC5765b.init]
-H0 = 68.1294
-D_c = 123.4795
-eta = 5.5729
-x0 = -44.8896
-y0 = -99.1145
-i0 = 84.9224
-Omega0 = 146.83
-dOmega_dr = -3.2848
-di_dr = 11.6208
-sigma_x_floor = 10.1172
-sigma_y_floor = 3.4971
-sigma_v_sys = 1.8661
-sigma_v_hv = 2.8261
-sigma_a_floor = 0.0798
-dv_sys = -131.1467
+D_c = 122.7176
+Omega0 = 146.8322
+dOmega_dr = -3.3126
+di_dr = 11.5741
+dv_sys = -131.1841
+eta = 5.573
+i0 = 84.9069
+sigma_a_floor = 0.0787
+sigma_v_hv = 2.8282
+sigma_v_sys = 1.8525
+sigma_x_floor = 10.167
+sigma_y_floor = 3.6092
+x0 = -44.8169
+y0 = -99.28
 
 [model.galaxies.NGC6264]
 ra = 254.3172
@@ -322,21 +321,20 @@ D_lo = 70.0
 D_hi = 250.0
 
 [model.galaxies.NGC6264.init]
-H0 = 62.6426
-D_c = 160.7498
-eta = 5.3226
-x0 = 4.166
-y0 = 6.9749
-i0 = 90.3963
-Omega0 = 94.2117
-dOmega_dr = 18.4692
-di_dr = -1.2975
-sigma_x_floor = 0.6085
-sigma_y_floor = 5.4471
-sigma_v_sys = 1.6202
-sigma_v_hv = 2.9953
-sigma_a_floor = 0.1373
-dv_sys = 66.4503
+D_c = 154.3069
+Omega0 = 94.2149
+dOmega_dr = 18.4328
+di_dr = -1.2724
+dv_sys = 66.3185
+eta = 5.3225
+i0 = 90.4007
+sigma_a_floor = 0.1375
+sigma_v_hv = 2.9881
+sigma_v_sys = 1.6055
+sigma_x_floor = 0.6357
+sigma_y_floor = 5.4724
+x0 = 4.332
+y0 = 6.9434
 
 [model.galaxies.NGC6323]
 ra = 258.32519
@@ -346,21 +344,20 @@ D_lo = 60.0
 D_hi = 350.0
 
 [model.galaxies.NGC6323.init]
-H0 = 50.4354
-D_c = 151.1639
-eta = 4.9678
-x0 = 14.5012
-y0 = 3.3823
-i0 = 91.8349
-Omega0 = 189.5905
-dOmega_dr = 13.8031
-di_dr = -1.1693
-sigma_x_floor = 3.978
-sigma_y_floor = 2.4919
-sigma_v_sys = 1.8041
-sigma_v_hv = 1.698
-sigma_a_floor = 0.1486
-dv_sys = 190.3925
+D_c = 129.6377
+Omega0 = 189.5884
+dOmega_dr = 13.7816
+di_dr = -1.1462
+dv_sys = 190.7366
+eta = 4.9676
+i0 = 91.7804
+sigma_a_floor = 0.1382
+sigma_v_hv = 1.7355
+sigma_v_sys = 1.8151
+sigma_x_floor = 4.0377
+sigma_y_floor = 2.7455
+x0 = 14.6921
+y0 = 3.9158
 
 [model.galaxies.UGC3789]
 ra = 109.87872
