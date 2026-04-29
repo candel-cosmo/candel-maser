@@ -33,7 +33,7 @@ max_tree_depth = 10
 # Nested sampling (NSS)
 n_live = 5000
 num_mcmc_steps = 0
-num_delete = 25
+num_delete = 5
 termination = -3
 
 [model]
@@ -84,13 +84,10 @@ K_sigma = 10.0
 refine_r_center = true
 n_refine_steps = 32
 
-# Spot-axis chunking for the NumPyro likelihood evaluation
-# (`_eval_phi_marginal`). For single-evaluation samplers (NUTS with 1
-# chain) the per-group intermediate fits for ≤80 spots/group, and
-# unbatched is fastest. For NSS (which vmaps over num_delete chains)
-# the intermediate is multiplied by num_delete and can OOM;
-# run_maser_disk.py auto-sets mode2_spot_batch=16 for NSS when this
-# is unset. Per-galaxy overrides (e.g. NGC4258) take precedence.
+# Spot-axis chunking for the likelihood evaluation. Both NSS
+# (num_delete parallel chains) and DE (eval_chunk parallel evals)
+# vmap over the same number of candidates, so per-galaxy
+# mode2_spot_batch settings apply to both uniformly.
 # mode2_spot_batch = 16
 
 [model.priors.H0]
@@ -394,7 +391,7 @@ log2_N = 16
 pop_size = 1000
 max_generations = 5000
 patience = 100
-eval_chunk = 4
+eval_chunk = 5
 sobol_n_sigma = 5
 min_dist_frac = 0.005
 H0_for_D_estimate = 70.0

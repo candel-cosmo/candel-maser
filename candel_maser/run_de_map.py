@@ -52,7 +52,7 @@ import tomli_w
 from candel.inference.optimise import find_MAP
 from candel.model.model_H0_maser import MaserDiskModel
 from candel.pvdata.megamaser_data import load_megamaser_spots
-from candel.util import data_path, fprint, fsection
+from candel.util import data_path, fprint, fsection, results_path
 
 _devs = jax.devices()
 _dev_names = ", ".join(d.device_kind for d in _devs)
@@ -131,12 +131,11 @@ tmp.close()
 model = MaserDiskModel(tmp.name, data)
 os.unlink(tmp.name)
 
-eval_chunk = opt_cfg.get("eval_chunk", "default")
-mode2_spot_batch = gcfg.get("mode2_spot_batch", "default")
-fprint(f"DE settings: eval_chunk={eval_chunk}, mode2_spot_batch={mode2_spot_batch}")
+fprint(f"DE settings: eval_chunk={opt_cfg.get('eval_chunk', 'default')}, "
+       f"mode2_spot_batch={model._mode2_spot_batch}")
 
 # ---- Run DE MAP ----
-ckpt_dir = os.path.join(
+ckpt_dir = results_path(
     master_cfg["io"].get("root_output", "results/Megamaser"),
     "de_checkpoints", galaxy)
 os.makedirs(ckpt_dir, exist_ok=True)
