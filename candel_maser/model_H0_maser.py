@@ -1475,7 +1475,9 @@ class MaserDiskModel(ModelBase):
             has_any_accel = self._group_has_any_accel(type_key)
             batch = (None if spot_batch is None
                      else min(int(spot_batch), n_idx))
-            ps = self._marginal_per_spot_r(
+            ps = jax.checkpoint(
+                self._marginal_per_spot_r,
+                static_argnums=(0, 4, 7))(
                 type_key, idx, r_ang, log_w_r,
                 has_any_accel, phys_args, phys_kw, batch)
             result = result.at[idx].set(ps)
