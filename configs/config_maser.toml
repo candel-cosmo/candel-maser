@@ -110,14 +110,18 @@ loc = 0.0
 scale = 300.0
 
 [model.priors.x0]
-dist = "normal"
-loc = 0.0
+dist = "truncated_normal"
+mean = 0.0
 scale = 500.0
+low = -750.0
+high = 750.0
 
 [model.priors.y0]
-dist = "normal"
-loc = 0.0
+dist = "truncated_normal"
+mean = 0.0
 scale = 500.0
+low = -750.0
+high = 750.0
 
 [model.priors.i0]
 dist = "sine_angle"
@@ -246,8 +250,8 @@ y0 = 6.4521
 ra = 184.74009
 dec = 47.30372
 v_sys_obs = 667
-D_lo = 4.0
-D_hi = 10.0
+D_lo = 6.0
+D_hi = 9.0
 use_ecc = true
 ecc_cartesian = true
 use_quadratic_warp = true
@@ -259,7 +263,7 @@ n_phi_hv_low = 5001
 n_phi_sys = 20001
 r_ang_ref_i = 6.1
 r_ang_ref_Omega = 6.1
-r_ang_ref_periapsis = 0.0
+r_ang_ref_periapsis = 3.0
 dense_mass_globals = true
 target_accept_prob = 0.9
 eval_chunk = 1
