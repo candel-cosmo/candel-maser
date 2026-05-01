@@ -34,19 +34,20 @@ All settings (priors, sampler, grid sizes, per-galaxy overrides) live in
 All submit through `addqueue` on glamdring. Jobs use the single
 `venv_candel` (JAX with CUDA, CPU fallback when no GPU is visible).
 
-### `submit_all.sh` — MCP five (NSS or NUTS)
+### `submit.sh` — NSS, NUTS, or DE
 
-Loops over the five MCP galaxies (or a single `--galaxy`) and submits
-one GPU job each.
+Submits one GPU job per `--galaxy` (comma-separated list). Both
+`--sampler` and `--galaxy` are required.
 
 ```bash
-bash scripts/megamaser/submit_all.sh --sampler nss                 # NSS, all five
-bash scripts/megamaser/submit_all.sh --sampler nuts --num-chains 4 # NUTS, 4 vectorised chains
-bash scripts/megamaser/submit_all.sh --sampler nss --galaxy NGC5765b
+bash scripts/megamaser/submit.sh --sampler nss --galaxy NGC5765b
+bash scripts/megamaser/submit.sh --sampler nuts --galaxy NGC5765b --num-chains 4
+bash scripts/megamaser/submit.sh --sampler nss --galaxy NGC5765b,UGC3789
 ```
 
-Options: `--mode {mode1|mode2}` (NSS requires mode2),
-`--f-grid F` (grid-density scaling), `--init-method {config|median|sample}`,
+Options: `--mode {mode1|mode2}` (NSS/DE require mode2),
+`--f-grid F` (grid-density scaling, nss/nuts only),
+`--init-method {config|median|sample}`,
 `-q QUEUE` (default `gpulong`).
 
 ### `submit_ngc4258.sh` — NGC4258 NUTS
@@ -65,15 +66,13 @@ Flags: `-q QUEUE` (default `optgpu`), `--warmup`, `--samples`,
 NSS is *not* supported here (358 per-spot `r_ang` parameters); DE MAP
 doesn't support mode1.
 
-### `run_de_map.sh` — DE MAP on mode2 galaxies
+### DE MAP on mode2 galaxies
 
-GPU DE MAP optimizer for one or more mode2 galaxies (defaults to the
-full mode2 set read from the config).
+GPU DE MAP optimizer is reached via `submit.sh --sampler de`:
 
 ```bash
-bash scripts/megamaser/run_de_map.sh                   # all mode2 galaxies
-bash scripts/megamaser/run_de_map.sh NGC5765b UGC3789  # subset
-bash scripts/megamaser/run_de_map.sh -q cmbgpu
+bash scripts/megamaser/submit.sh -q cmbgpu --sampler de --galaxy NGC5765b
+bash scripts/megamaser/submit.sh -q cmbgpu --sampler de --galaxy NGC5765b,UGC3789
 ```
 
 ### `toy_joint_H0.sh` — joint `H0` from saved per-galaxy posteriors
