@@ -61,7 +61,7 @@ print(f"JAX platform: {jax.default_backend()}, devices: {_devs} "
       f"({_dev_names}), precision: {_precision}", flush=True)
 
 # ---- Load master config ----
-with open("scripts/megamaser/config_maser.toml", "rb") as f:
+with open(os.path.join(os.path.dirname(__file__), "config_maser.toml"), "rb") as f:
     master_cfg = tomli.load(f)
 
 # ---- Parse args ----
