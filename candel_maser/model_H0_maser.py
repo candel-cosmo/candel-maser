@@ -217,17 +217,17 @@ def predict_velocity_los(r_ang, sin_phi, cos_phi, D, M_BH, v_sys, sin_i,
         return SPEED_OF_LIGHT * (
             one_plus_z_D * one_plus_z_g * (1.0 + z_0) - 1.0)
 
-    # phi - omega via angle-subtraction formulas.
+    # phi - omega via angle-subtraction; only cos_d is needed because the
+    # tangential/radial decomposition collapses algebraically:
+    #   v_t·sin_phi - v_r·cos_phi = v_kep · (sin_phi + ecc·sin_om) / E
     cos_d = cos_phi * cos_om + sin_phi * sin_om
-    sin_d = sin_phi * cos_om - cos_phi * sin_om
     # ecc→1 at anti-periapsis sends denom→0; clip so residuals stay finite.
     denom = jnp.maximum(1.0 + ecc * cos_d, 1e-6)
-    E = jnp.sqrt(denom)
-    v_r = v_kep * ecc * sin_d / E
-    v_t = v_kep * E
-    v_z = sin_i * (v_t * sin_phi - v_r * cos_phi)
+    inv_sqrt_denom = jax.lax.rsqrt(denom)
+    inv_denom = inv_sqrt_denom * inv_sqrt_denom
+    v_z = sin_i * v_kep * (sin_phi + ecc * sin_om) * inv_sqrt_denom
 
-    beta_e2 = beta_c2 * (1.0 + ecc ** 2 + 2.0 * ecc * cos_d) / denom
+    beta_e2 = beta_c2 * (1.0 + ecc ** 2 + 2.0 * ecc * cos_d) * inv_denom
     one_plus_z_D = lorentz_factor(beta_e2) * (1.0 + v_z / SPEED_OF_LIGHT)
 
     return SPEED_OF_LIGHT * (one_plus_z_D * one_plus_z_g * (1.0 + z_0) - 1.0)
