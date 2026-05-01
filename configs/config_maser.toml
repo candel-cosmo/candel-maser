@@ -125,7 +125,7 @@ high = 750.0
 
 [model.priors.i0]
 dist = "sine_angle"
-low = 60.0
+low = 70.0
 high = 110.0
 
 [model.priors.Omega0]
