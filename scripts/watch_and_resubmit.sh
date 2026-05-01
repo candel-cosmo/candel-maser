@@ -91,12 +91,12 @@ CMD=("$@")
 # ── helpers ────────────────────────────────────────────────────────────────
 
 log_path_for_job() {
-    # submit_job writes logs as "<jobname>-<jobid>.out" in $PWD on both
-    # clusters. The watcher only knows the jobid, so glob to find it.
+    # submit_job writes logs as "logs-<jobid>-<jobname>.out" in $PWD on
+    # both clusters. The watcher only knows the jobid, so glob to find it.
     local jid="$1"
     local f
-    f=$(ls "$PWD"/*-"${jid}".out 2>/dev/null | head -1)
-    echo "${f:-$PWD/<name>-${jid}.out}"
+    f=$(ls "$PWD"/logs-"${jid}"-*.out 2>/dev/null | head -1)
+    echo "${f:-$PWD/logs-${jid}-<name>.out}"
 }
 
 run_and_capture_jobids() {
