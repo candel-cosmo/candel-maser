@@ -95,6 +95,9 @@ done
 if [[ "$SAMPLER" != "nss" && "$SAMPLER" != "nuts" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler is required (nss|nuts|de)"; exit 1
 fi
+JOB_TAG=""
+$NO_ECC && JOB_TAG="${JOB_TAG}_noecc"
+$NO_QUAD_WARP && JOB_TAG="${JOB_TAG}_noqw"
 
 # If --max-retries is set, delegate to the watcher and exit. One watcher
 # per galaxy so each retries independently as soon as its own job ends.
@@ -130,7 +133,7 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     _ts=$(date +%H%M%S)
     _gals="${GALAXY//,/ }"
     for _gal in $_gals; do
-        _sname="watcher_${SAMPLER}_${_gal}_${_ts}"
+        _sname="watcher_${SAMPLER}_${_gal}${JOB_TAG}_${_ts}"
         launch_detached "$_sname" "$_logdir/${_sname}.log" \
             bash "$_watcher" "${_wargs[@]}" -- "${_cmd[@]}" --galaxy "$_gal"
     done
@@ -194,7 +197,7 @@ for GAL in $GALAXY; do
     [[ -n "$GPUTYPE" ]] && extra_flags+=(--gputype "$GPUTYPE")
     [[ -n "$GPU_MEM" ]] && extra_flags+=(--gpu-mem "$GPU_MEM")
     [[ -n "$TIME" ]]    && extra_flags+=(--time "$TIME")
-    submit_job --gpu --queue "$QUEUE" --mem "$MEM" --name "${JOB_PREFIX}_${GAL}" \
+    submit_job --gpu --queue "$QUEUE" --mem "$MEM" --name "${JOB_PREFIX}_${GAL}${JOB_TAG}" \
         --logdir "$ROOT/scripts/megamaser/logs" \
         "${extra_flags[@]}" \
         "${dry_flag[@]}" \

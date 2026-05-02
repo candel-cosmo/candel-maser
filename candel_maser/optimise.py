@@ -715,7 +715,7 @@ def de_optimize(model, model_args=(), model_kwargs=None,
                 sobol_n_sigma=5, min_dist_frac=0.005,
                 sobol_bounds_override=None,
                 log_every=100, seed=42, verbose=True,
-                checkpoint_dir=None, resume_path=None,
+                checkpoint_dir=None, checkpoint_path=None, resume_path=None,
                 checkpoint_interval=600):
     """Derivative-free MAP optimizer using Differential Evolution.
 
@@ -768,6 +768,9 @@ def de_optimize(model, model_args=(), model_kwargs=None,
     checkpoint_dir : str or None
         Directory for periodic checkpoints (time-based, see
         ``checkpoint_interval``). None disables checkpointing.
+    checkpoint_path : str or None
+        Explicit checkpoint ``.npz`` path. Overrides ``checkpoint_dir`` when
+        set.
     resume_path : str or None
         Path to a checkpoint ``.npz`` to resume from. Skips the Sobol
         survey and resumes the DE loop.
@@ -929,8 +932,9 @@ def de_optimize(model, model_args=(), model_kwargs=None,
                  f"start={gen_start})")
 
     remaining = max_generations - gen_start
-    _ckpt_path = (os.path.join(checkpoint_dir, "de_ckpt.npz")
-                  if checkpoint_dir is not None else None)
+    _ckpt_path = checkpoint_path
+    if _ckpt_path is None and checkpoint_dir is not None:
+        _ckpt_path = os.path.join(checkpoint_dir, "de_ckpt.npz")
     _last_ckpt_time = time.time()
     t0 = time.time()
     final_gen = max_generations
@@ -1025,7 +1029,7 @@ def _use_de(model):
 
 
 def find_MAP(model, model_kwargs=None, seed=42,
-             checkpoint_dir=None, resume_path=None):
+             checkpoint_dir=None, checkpoint_path=None, resume_path=None):
     """Find MAP estimate, automatically selecting the optimizer.
 
     Uses DE for maser disk models with r+phi marginalization
@@ -1076,6 +1080,7 @@ def find_MAP(model, model_kwargs=None, seed=42,
             sobol_bounds_override=sobol_bounds_override,
             seed=seed,
             checkpoint_dir=checkpoint_dir,
+            checkpoint_path=checkpoint_path,
             resume_path=resume_path,
         )
         best_params, best_logp, results = de_optimize(model, **kwargs)

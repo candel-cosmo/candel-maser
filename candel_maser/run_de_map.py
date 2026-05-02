@@ -147,11 +147,13 @@ if args.resume and os.path.isfile(ckpt_path):
 elif args.resume:
     fprint(f"--resume: no checkpoint found at {ckpt_path}, starting fresh")
 fprint(f"Checkpoints: {ckpt_dir}")
+fprint(f"Checkpoint file: {ckpt_path}")
 
 fsection(f"DE MAP optimization ({galaxy}, {data['n_spots']} spots)")
 t0 = time.time()
 init_params = find_MAP(model, model_kwargs={}, seed=seed,
-                       checkpoint_dir=ckpt_dir, resume_path=resume_path)
+                       checkpoint_dir=ckpt_dir, checkpoint_path=ckpt_path,
+                       resume_path=resume_path)
 dt = time.time() - t0
 
 # ---- Print results ----
