@@ -129,8 +129,10 @@ def load_NGC5765b_spots(root, v_sys_obs=None):
 
     Parameters
     ----------
-    root
+    root : str
         Directory containing ``NGC5765b_Gao2016_table6.dat``.
+    v_sys_obs : float
+        Observed CMB-frame recession velocity in km/s. Required.
 
     Returns
     -------
@@ -209,12 +211,15 @@ def _load_kuo_table2(root, fname, galaxy_label, v_sys_obs=None):
 
     Parameters
     ----------
-    root
+    root : str
         Directory containing the data file.
-    fname
+    fname : str
         Filename (e.g. ``"NGC6264_Kuo2013_table2.txt"``).
-    galaxy_label
+    galaxy_label : str
         Short label used in output messages.
+    v_sys_obs : float or None
+        Observed CMB-frame recession velocity in km/s. If None, use the
+        per-galaxy default.
 
     Returns
     -------
@@ -343,9 +348,9 @@ def load_NGC4258_spots(root, v_sys_obs=472.0):
 
     Parameters
     ----------
-    root
+    root : str
         Directory containing ``N4258_disk_data_MarkReid.final``.
-    v_sys_obs
+    v_sys_obs : float
         Observed CMB-frame recession velocity in km/s.
 
     Returns
@@ -436,12 +441,13 @@ def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
 
     Parameters
     ----------
-    root
+    root : str
         Directory containing the data file.
-    galaxy
+    galaxy : str
         Galaxy name: ``"CGCG074-064"``, ``"NGC5765b"``, etc.
-    v_sys_obs
-        Observed CMB-frame recession velocity in km/s. Required.
+    v_sys_obs : float or None
+        Observed CMB-frame recession velocity in km/s. Required except for
+        NGC4258, where a default is supplied.
 
     Returns
     -------

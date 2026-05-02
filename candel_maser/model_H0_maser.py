@@ -393,8 +393,8 @@ class MaserDiskModel(ModelBase):
 
         Returns the accel_measured numpy array. Also populates:
             _idx_sys, _idx_red, _idx_blue      — per type
-            _idx_sys_cons    — sys WITH accel (sinh r-grid)
-            _idx_sys_uncons  — sys WITHOUT accel (brute r-grid)
+            _idx_sys_cons    — sys WITH accel
+            _idx_sys_uncons  — sys WITHOUT accel
         """
         is_hv_np = _np.asarray(data["is_highvel"])
         is_blue_np = _np.asarray(data.get("is_blue", _np.zeros(
@@ -1186,7 +1186,7 @@ class MaserDiskModel(ModelBase):
 
         Returned pytree is consumed by _phi_eval (or _phi_eval_shared_r).
         r_ang accepts (N,) [Mode 1], (N, n_r) [Mode 2 per-spot], or
-        (n_r,) [Mode 2 shared-r, sys-uncons only]. Warped angles i(r),
+        (n_r,) for shared-r scan/reference evaluations. Warped angles i(r),
         Omega(r), omega(r) share r_ang's shape; the φ-eval step broadcasts
         them against the (n_phi,) sin/cos grid by padding a trailing axis.
         """
@@ -1313,7 +1313,7 @@ class MaserDiskModel(ModelBase):
         return nhc
 
     def _phi_eval_shared_r(self, r_pre, sin_phi, cos_phi):
-        """Shared-r variant of `_phi_eval` (sys-uncons in mode 2).
+        """Shared-r variant of `_phi_eval` for scan/reference grids.
 
         r_pre is built from a (n_r,)-shaped r_ang (no spot axis).
         Predictions are built at (n_r, n_phi); the (N, n_r, n_phi) cost
@@ -1388,8 +1388,8 @@ class MaserDiskModel(ModelBase):
 
         Used by:
           - Mode 1 (all classes): r_ang shape (N,), log_w_r None.
-          - Mode 2 HV and sys_cons: r_ang shape (N, n_r),
-            log_w_r shape (N, n_r).
+          - Mode 2 (all classes): r_ang shape (N, n_r), log_w_r shape
+            (N, n_r).
 
         ``batch is None`` (or ``batch >= n_idx``) → single-shot
         evaluation (one XLA op). Otherwise the spot axis is chunked

@@ -739,7 +739,7 @@ def de_optimize(model, model_args=(), model_kwargs=None,
     ----------
     model : callable
         NumPyro model function.
-    model_args, model_kwargs
+    model_args, model_kwargs : tuple, dict
         Arguments for the model.
     log2_N : int
         log2 of Sobol sample count (default 2^16 = 65536).
@@ -774,6 +774,8 @@ def de_optimize(model, model_args=(), model_kwargs=None,
     resume_path : str or None
         Path to a checkpoint ``.npz`` to resume from. Skips the Sobol
         survey and resumes the DE loop.
+    checkpoint_interval : float
+        Minimum time in seconds between periodic checkpoint writes.
 
     Returns
     -------
@@ -782,7 +784,9 @@ def de_optimize(model, model_args=(), model_kwargs=None,
     best_logp : float
         Log-density at the MAP.
     all_results : dict
-        Contains 'names', 'sizes', 'lo_sobol', 'hi_sobol'.
+        Contains 'names', 'sizes', 'lo_sobol', and 'hi_sobol'. For DE these
+        bound arrays are the full optimizer/prior bounds, not the optionally
+        tightened Sobol seeding bounds.
     """
     try:
         from evosax.algorithms import DifferentialEvolution
@@ -1038,6 +1042,9 @@ def find_MAP(model, model_kwargs=None, seed=42,
 
     Drop-in replacement for ``find_initial_point``. Reads optimizer
     settings from ``model.config["optimise"]`` (optional).
+
+    ``checkpoint_dir``, ``checkpoint_path``, and ``resume_path`` are passed
+    through to the DE optimizer when DE is selected; Sobol+Adam ignores them.
 
     Returns
     -------
