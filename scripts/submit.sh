@@ -128,13 +128,13 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     $NO_QUAD_WARP && _cmd+=(--no-quadratic-warp)
     $DRY && _cmd+=(--dry)
     $RESUME && _cmd+=(--resume)
-    _logdir="$ROOT/scripts/megamaser/logs"
-    mkdir -p "$_logdir"
+    _watcher_logdir="$CANDEL_WATCHER_DIR"
+    mkdir -p "$_watcher_logdir"
     _ts=$(date +%H%M%S)
     _gals="${GALAXY//,/ }"
     for _gal in $_gals; do
         _sname="watcher_${SAMPLER}_${_gal}${JOB_TAG}_${_ts}"
-        launch_detached "$_sname" "$_logdir/${_sname}.log" \
+        launch_detached "$_sname" "$_watcher_logdir/${_sname}.log" \
             bash "$_watcher" "${_wargs[@]}" -- "${_cmd[@]}" --galaxy "$_gal"
     done
     exit 0
@@ -198,7 +198,6 @@ for GAL in $GALAXY; do
     [[ -n "$GPU_MEM" ]] && extra_flags+=(--gpu-mem "$GPU_MEM")
     [[ -n "$TIME" ]]    && extra_flags+=(--time "$TIME")
     submit_job --gpu --queue "$QUEUE" --mem "$MEM" --name "${JOB_PREFIX}_${GAL}${JOB_TAG}" \
-        --logdir "$ROOT/scripts/megamaser/logs" \
         "${extra_flags[@]}" \
         "${dry_flag[@]}" \
         -- $pycmd
