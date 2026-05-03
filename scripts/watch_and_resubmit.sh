@@ -154,6 +154,8 @@ echo "[watch] Marker: '$MARKER'"
 echo "[watch] Max retries: $MAX_RETRIES | Poll: ${POLL}s"
 echo "[watch] Resume flag: ${RESUME_FLAG:-(none)}"
 echo "[watch] Cluster: $CANDEL_CLUSTER"
+echo "[watch] Host: $(hostname -f 2>/dev/null || hostname)"
+echo "[watch] PWD: $PWD"
 echo "[watch] Command: ${CMD[*]}"
 echo ""
 

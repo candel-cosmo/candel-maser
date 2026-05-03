@@ -87,8 +87,9 @@ n_refine_steps = 32
 # Spot-axis chunking for the likelihood evaluation. Both NSS
 # (num_delete parallel chains) and DE (eval_chunk parallel evals)
 # vmap over the same number of candidates, so per-galaxy
-# mode2_spot_batch settings apply to both uniformly.
-# mode2_spot_batch = 16
+# mode2_spot_batch settings apply to both uniformly. This must be set
+# explicitly for mode2 runs; 16 is the recommended default.
+mode2_spot_batch = 16
 
 [model.priors.H0]
 dist = "uniform"
