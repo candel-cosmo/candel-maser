@@ -472,7 +472,10 @@ def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
     elif galaxy == "UGC3789":
         data = load_UGC3789_spots(root, v_sys_obs=v_sys_obs)
     elif galaxy == "NGC4258":
-        data = load_NGC4258_spots(root, v_sys_obs=v_sys_obs)
+        if v_sys_obs is None:
+            data = load_NGC4258_spots(root)
+        else:
+            data = load_NGC4258_spots(root, v_sys_obs=v_sys_obs)
     else:
         _all = list(_MRT_FILES) + ["NGC5765b", "NGC6264", "NGC6323",
                                    "UGC3789", "NGC4258"]
