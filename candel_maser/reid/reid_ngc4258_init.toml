@@ -1,0 +1,32 @@
+# Plausible NGC4258 global initial values from Mark Reid's
+# background_info/fit_disk_Reid/fit_disk_control.inp.
+#
+# Units match run_reid_mcmc.py and Reid's control file:
+# - H0: km/s/Mpc
+# - Mbh_1e7Msun: 1e7 Msun
+# - positions/error floors: mas
+# - velocities/error floors: km/s
+# - accelerations: km/s/yr
+# - angles: deg
+
+[globals]
+H0 = 70.0
+Mbh_1e7Msun = 4.0
+Vsys_km_s = 474.25
+x0_mas = -0.15
+y0_mas = 0.55
+i0_deg = 86.0
+di_dr_deg_mas = 2.1
+d2i_dr2_deg_mas2 = 0.0
+PA_deg = 89.0
+dPA_dr_deg_mas = 2.3
+d2PA_dr2_deg_mas2 = -0.22
+ecc = 0.008
+peri_az_deg = 318.0
+dperi_dr_deg_mas = 123.0
+Vcor_km_s = 0.0
+sigma_x_mas = 0.002
+sigma_y_mas = 0.02
+sigma_vsys_km_s = 0.5
+sigma_vhv_km_s = 1.0
+sigma_acc_km_s_yr = 0.4
