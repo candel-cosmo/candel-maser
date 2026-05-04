@@ -38,6 +38,7 @@ DEFAULT_CONFIG = ROOT / "scripts/megamaser/config_maser.toml"
 DEFAULT_DATA = ROOT / "data/Megamaser/N4258_disk_data_MarkReid.final"
 DEFAULT_RESULTS = ROOT / "results/Megamaser/reid_mcmc"
 DEFAULT_REID_INIT = ROOT / "scripts/megamaser/check_reid/reid_ngc4258_init.toml"
+MAX_CORNER_SAMPLES = 20000
 
 GLOBAL_NAMES = [
     "H0",
@@ -62,17 +63,31 @@ GLOBAL_NAMES = [
     "sigma_acc_km_s_yr",
 ]
 
-DEFAULT_CONTOUR_PARAMS = [
-    "H0",
-    "Mbh_1e7Msun",
-    "Vsys_km_s",
-    "i0_deg",
-    "PA_deg",
-    "ecc",
-    "peri_az_deg",
-    "D_Mpc",
-    "lnP",
-]
+DEFAULT_CONTOUR_PARAMS = [*GLOBAL_NAMES, "D_Mpc"]
+
+PARAM_LABELS = {
+    "H0": r"$H_0\ [{\rm km\ s^{-1}\ Mpc^{-1}}]$",
+    "Mbh_1e7Msun": r"$M_\bullet\ [10^7\,M_\odot]$",
+    "Vsys_km_s": r"$V_{\rm sys}\ [{\rm km\ s^{-1}}]$",
+    "x0_mas": r"$x_0\ [{\rm mas}]$",
+    "y0_mas": r"$y_0\ [{\rm mas}]$",
+    "i0_deg": r"$i_0\ [{\rm deg}]$",
+    "di_dr_deg_mas": r"$di/dr\ [{\rm deg\ mas^{-1}}]$",
+    "d2i_dr2_deg_mas2": r"$d^2 i/dr^2\ [{\rm deg\ mas^{-2}}]$",
+    "PA_deg": r"${\rm PA}\ [{\rm deg}]$",
+    "dPA_dr_deg_mas": r"$d{\rm PA}/dr\ [{\rm deg\ mas^{-1}}]$",
+    "d2PA_dr2_deg_mas2": r"$d^2{\rm PA}/dr^2\ [{\rm deg\ mas^{-2}}]$",
+    "ecc": r"$e$",
+    "peri_az_deg": r"$\omega\ [{\rm deg}]$",
+    "dperi_dr_deg_mas": r"$d\omega/dr\ [{\rm deg\ mas^{-1}}]$",
+    "Vcor_km_s": r"$V_{\rm cor}\ [{\rm km\ s^{-1}}]$",
+    "sigma_x_mas": r"$\sigma_x\ [{\rm mas}]$",
+    "sigma_y_mas": r"$\sigma_y\ [{\rm mas}]$",
+    "sigma_vsys_km_s": r"$\sigma_{v,{\rm sys}}\ [{\rm km\ s^{-1}}]$",
+    "sigma_vhv_km_s": r"$\sigma_{v,{\rm hv}}\ [{\rm km\ s^{-1}}]$",
+    "sigma_acc_km_s_yr": r"$\sigma_a\ [{\rm km\ s^{-1}\ yr^{-1}}]$",
+    "D_Mpc": r"$D\ [{\rm Mpc}]$",
+}
 
 
 @dataclass
@@ -610,40 +625,63 @@ def plot_corner(arr: np.ndarray, params: list[str], path: Path) -> None:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import corner
 
-    params = [p for p in params if p in arr.dtype.names]
-    n = len(params)
+    params = [p for p in params if p != "lnP" and p in arr.dtype.names]
+    if not params:
+        raise ValueError("No valid parameters selected for corner plot")
+
+    data = np.column_stack([arr[name] for name in params])
+    finite = np.all(np.isfinite(data), axis=1)
+    data = data[finite]
+    if len(data) == 0:
+        raise ValueError("No finite samples available for corner plot")
+    if len(data) > MAX_CORNER_SAMPLES:
+        idx = np.linspace(0, len(data) - 1, MAX_CORNER_SAMPLES, dtype=int)
+        data = data[idx]
+
     best_i = best_index(arr)
-    fig, axes = plt.subplots(n, n, figsize=(1.85 * n, 1.85 * n), squeeze=False)
-    for i, yname in enumerate(params):
-        y = arr[yname]
-        for j, xname in enumerate(params):
-            ax = axes[i, j]
-            if i == j:
-                ax.hist(y, bins=40, color="#4c72b0", histtype="stepfilled", alpha=0.75)
-            elif i > j:
-                x = arr[xname]
-                ax.hist2d(x, y, bins=45, cmap="Blues")
-                if best_i is not None:
-                    ax.plot(
-                        x[best_i],
-                        y[best_i],
-                        marker="x",
-                        color="crimson",
-                        markersize=4,
-                    )
-            else:
-                ax.axis("off")
-                continue
-            if i == n - 1:
-                ax.set_xlabel(xname, fontsize=8)
-            else:
-                ax.set_xticklabels([])
-            if j == 0 and i != j:
-                ax.set_ylabel(yname, fontsize=8)
-            elif j != 0:
-                ax.set_yticklabels([])
-            ax.tick_params(labelsize=6, length=2)
+    truths = None
+    if best_i is not None:
+        truths = [arr[name][best_i] for name in params]
+
+    ranges = []
+    for j in range(data.shape[1]):
+        lo = float(np.min(data[:, j]))
+        hi = float(np.max(data[:, j]))
+        if lo == hi:
+            pad = max(abs(lo) * 1e-6, 1e-6)
+            lo -= pad
+            hi += pad
+        ranges.append((lo, hi))
+
+    fig = corner.corner(
+        data,
+        labels=[PARAM_LABELS.get(name, name) for name in params],
+        range=ranges,
+        bins=40,
+        color="#4c72b0",
+        truths=truths,
+        truth_color="crimson",
+        plot_datapoints=False,
+        fill_contours=True,
+        show_titles=True,
+        title_fmt=".4g",
+        title_kwargs={"fontsize": 8},
+        label_kwargs={"fontsize": 8},
+    )
+    if truths is not None:
+        fig.text(
+            0.995,
+            0.995,
+            r"red lines: max stored $\ln P$ sample",
+            ha="right",
+            va="top",
+            fontsize=10,
+            color="crimson",
+        )
+    for ax in fig.axes:
+        ax.tick_params(labelsize=6, length=2)
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -747,7 +785,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--trials",
         type=int,
-        default=10000000,
+        default=100000000,
         help="Final MCMC trials. Reid v24d requires >=500000 because n_skip=itermax/500000.",
     )
     parser.add_argument("--walkers", type=int, default=1)
@@ -759,7 +797,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--status-interval",
         type=int,
-        default=10000,
+        default=10000000,
         help="Progress print interval for secondary burn-in and final MCMC. "
              "Use 0 to choose max(100000, min(10000000, trials/100)).",
     )

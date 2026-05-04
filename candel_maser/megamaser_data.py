@@ -18,7 +18,7 @@ from os.path import join
 import numpy as np
 from scipy.cluster.vq import kmeans2
 
-from ..util import fprint
+from ..util import SPEED_OF_LIGHT, fprint
 
 _MRT_FILES = {
     "CGCG074-064": "CGCG074-064_Pesce2020_mrt.txt",
@@ -48,8 +48,7 @@ _CMB_DIPOLE_V = 369.82    # km/s
 
 def radio_to_optical_velocity(v_radio):
     """Convert radio-convention velocity to optical convention as Reid does."""
-    clight = 2.997925e5
-    return v_radio / (1.0 - v_radio / clight)
+    return v_radio / (1.0 - v_radio / SPEED_OF_LIGHT)
 
 
 def v_sys_to_cmb(v_sys_km_s, frame, ra_deg, dec_deg):
@@ -346,7 +345,8 @@ def load_NGC4258_spots(root, v_sys_obs=472.0):
     Reads ``N4258_disk_data_MarkReid.final``. Comment lines start with ``!``.
     Columns: ID, Vlsr, e_Vlsr, dX, e_dX, dY, e_dY, Acc, e_Acc.
     The Mark Reid file marks velocities as radio convention; central
-    velocities are converted to optical convention using Reid's formula.
+    velocities and errors are converted to optical convention using Reid's
+    formula.
     Missing accelerations are flagged by negative e_Acc.
 
     Spot classification by Vlsr: <300 → blue HV, 300–700 → systemic, >700 →
@@ -376,8 +376,10 @@ def load_NGC4258_spots(root, v_sys_obs=472.0):
             if line.startswith("!") or not line.strip():
                 continue
             parts = line.split()
-            vlsr = radio_to_optical_velocity(float(parts[1]))
-            e_vlsr = float(parts[2])
+            vlsr_radio = float(parts[1])
+            conv = 1.0 - vlsr_radio / SPEED_OF_LIGHT
+            vlsr = radio_to_optical_velocity(vlsr_radio)
+            e_vlsr = float(parts[2]) / conv**2
             dx = float(parts[3])
             e_dx = float(parts[4])
             dy = float(parts[5])
