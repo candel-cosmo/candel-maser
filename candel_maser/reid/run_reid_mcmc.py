@@ -707,7 +707,12 @@ def numpyro_summary_text(samples: dict[str, np.ndarray]) -> str:
     return "\n".join(lines)
 
 
-def collect_chain_batch(chain_dirs: list[Path], output_dir: Path, plot_params: list[str]) -> None:
+def collect_chain_batch(
+    chain_dirs: list[Path],
+    output_dir: Path,
+    plot_params: list[str],
+    output_prefix: str = "global",
+) -> None:
     chains = []
     for chain_dir in chain_dirs:
         fort7 = chain_dir / "fort.7"
@@ -732,12 +737,13 @@ def collect_chain_batch(chain_dirs: list[Path], output_dir: Path, plot_params: l
         name: np.stack([chain[name][-min_draws:] for chain in chains], axis=0)
         for name in summary_names
     }
+    output_prefix = output_prefix.strip() or "global"
     summary_text = numpyro_summary_text(samples)
-    summary_path = output_dir / "global_summary.txt"
+    summary_path = output_dir / f"{output_prefix}_summary.txt"
     summary_path.write_text(summary_text + "\n")
 
     combined = np.concatenate([chain[-min_draws:] for chain in chains])
-    corner_path = output_dir / "global_corner.png"
+    corner_path = output_dir / f"{output_prefix}_corner.png"
     plot_corner(combined, plot_params, corner_path)
 
     print("\nGlobal parameter summary (combined Reid chains):", flush=True)
@@ -815,6 +821,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Collect completed chain directories and write a combined summary/corner plot.",
     )
+    parser.add_argument(
+        "--collect-output-prefix",
+        default="global",
+        help="Prefix for collected summary/corner filenames.",
+    )
     args = parser.parse_args(argv)
 
     params = [x.strip() for x in args.plot_params.split(",") if x.strip()]
@@ -822,7 +833,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.output_dir is None:
             parser.error("--output-dir is required with --collect-chain-dirs")
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        collect_chain_batch(args.collect_chain_dirs, args.output_dir, params)
+        collect_chain_batch(
+            args.collect_chain_dirs,
+            args.output_dir,
+            params,
+            args.collect_output_prefix,
+        )
         return 0
 
     if args.trials < 500000:
