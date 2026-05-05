@@ -31,6 +31,7 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 fallback
 
 
 ROOT = Path(__file__).resolve().parents[3]
+SCRIPT_DIR = Path(__file__).resolve().parent
 REID_DIR = ROOT / "background_info/fit_disk_Reid"
 REID_SOURCE = REID_DIR / "fit_disk_v24d_unblinded.f"
 REID_CONTROL_TEMPLATE = REID_DIR / "fit_disk_control.inp"
@@ -172,9 +173,45 @@ def load_reid_init(path: Path, vcor: float | None = None) -> ReidInit:
     return ReidInit(values=values, source=f"reid-init:{path}")
 
 
-def load_config_init(config_path: Path, galaxy: str, vcor: float) -> ReidInit:
+def resolve_init_toml(name: str) -> Path:
+    path = Path(name)
+    if path.name != name or path.is_absolute():
+        raise ValueError("--init must be a TOML filename in scripts/megamaser/check_reid")
+    if path.suffix != ".toml":
+        raise ValueError("--init must end with .toml")
+    path = SCRIPT_DIR / path.name
+    if not path.exists():
+        raise FileNotFoundError(f"Missing init TOML: {path}")
+    return path
+
+
+def load_galaxy_config(config_path: Path, galaxy: str) -> dict:
     cfg = load_toml(config_path)
-    gcfg = cfg["model"]["galaxies"][galaxy]
+    gcfg = dict(cfg["model"]["galaxies"][galaxy])
+    if "v_sys_obs" in gcfg:
+        return gcfg
+
+    default_cfg = load_toml(DEFAULT_CONFIG)
+    default_gcfg = dict(default_cfg["model"]["galaxies"][galaxy])
+    default_gcfg.update(gcfg)
+    return default_gcfg
+
+
+def load_toml_init(path: Path, galaxy: str, vcor: float) -> ReidInit:
+    cfg = load_toml(path)
+    if "globals" in cfg:
+        return load_reid_init(path, vcor)
+    try:
+        cfg["model"]["galaxies"][galaxy]["init"]
+    except KeyError as exc:
+        raise ValueError(
+            f"{path} must contain [globals] or [model.galaxies.{galaxy}.init]"
+        ) from exc
+    return load_config_init(path, galaxy, vcor)
+
+
+def load_config_init(config_path: Path, galaxy: str, vcor: float) -> ReidInit:
+    gcfg = load_galaxy_config(config_path, galaxy)
     init = dict(gcfg["init"])
     v_sys = float(gcfg["v_sys_obs"]) + float(init.get("dv_sys", 0.0))
     distance = float(init["D_c"])
@@ -223,64 +260,6 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float) -> ReidInit:
         },
         source=f"config:{config_path}",
     )
-
-
-def load_de_npz_init(path: Path, config_path: Path, galaxy: str, vcor: float) -> ReidInit:
-    base = load_config_init(config_path, galaxy, vcor)
-    z = np.load(path, allow_pickle=True)
-    names = [str(x) for x in z["names"]]
-    lo = np.asarray(z["lo"], dtype=float)
-    hi = np.asarray(z["hi"], dtype=float)
-    x = np.asarray(z["best_solution"], dtype=float)
-    opt = {name: float(lo[i] + x[i] * (hi[i] - lo[i])) for i, name in enumerate(names)}
-
-    cfg = load_toml(config_path)
-    gcfg = cfg["model"]["galaxies"][galaxy]
-    v_sys = float(gcfg["v_sys_obs"]) + float(opt.get("dv_sys", base.values["Vsys_km_s"] - gcfg["v_sys_obs"]))
-    distance = float(opt.get("D_c", base.values["_D_c"]))
-    eta = float(opt.get("eta", math.log10(base.values["Mbh_1e7Msun"] * 1e7 / distance)))
-    m_bh = 10.0 ** (eta + math.log10(distance) - 7.0)
-    h0 = (v_sys + vcor) / distance
-
-    merged = dict(base.values)
-    merged.update(
-        {
-            "H0": h0,
-            "Mbh_1e7Msun": m_bh,
-            "Vsys_km_s": v_sys,
-            "x0_mas": float(opt.get("x0", merged["x0_mas"] * 1000.0)) / 1000.0,
-            "y0_mas": float(opt.get("y0", merged["y0_mas"] * 1000.0)) / 1000.0,
-            "i0_deg": float(opt.get("i0", merged["i0_deg"])),
-            "di_dr_deg_mas": float(opt.get("di_dr", merged["di_dr_deg_mas"])),
-            "d2i_dr2_deg_mas2": float(opt.get("d2i_dr2", merged["d2i_dr2_deg_mas2"])),
-            "PA_deg": float(opt.get("Omega0", merged["PA_deg"])),
-            "dPA_dr_deg_mas": float(opt.get("dOmega_dr", merged["dPA_dr_deg_mas"])),
-            "d2PA_dr2_deg_mas2": float(
-                opt.get("d2Omega_dr2", merged["d2PA_dr2_deg_mas2"])
-            ),
-            "Vcor_km_s": vcor,
-            "sigma_x_mas": float(opt.get("sigma_x_floor", merged["sigma_x_mas"] * 1000.0))
-            / 1000.0,
-            "sigma_y_mas": float(opt.get("sigma_y_floor", merged["sigma_y_mas"] * 1000.0))
-            / 1000.0,
-            "sigma_vsys_km_s": float(opt.get("sigma_v_sys", merged["sigma_vsys_km_s"])),
-            "sigma_vhv_km_s": float(opt.get("sigma_v_hv", merged["sigma_vhv_km_s"])),
-            "sigma_acc_km_s_yr": float(
-                opt.get("sigma_a_floor", merged["sigma_acc_km_s_yr"])
-            ),
-            "_D_c": distance,
-        }
-    )
-    if "e_x" in opt and "e_y" in opt:
-        merged["ecc"] = math.hypot(opt["e_x"], opt["e_y"])
-        merged["peri_az_deg"] = math.degrees(math.atan2(opt["e_y"], opt["e_x"])) % 360.0
-    else:
-        merged["ecc"] = float(opt.get("ecc", merged["ecc"]))
-        merged["peri_az_deg"] = float(opt.get("periapsis", merged["peri_az_deg"]))
-    merged["dperi_dr_deg_mas"] = float(
-        opt.get("dperiapsis_dr", merged["dperi_dr_deg_mas"])
-    )
-    return ReidInit(values=merged, source=f"de-npz:{path}")
 
 
 def compute_reid_r_ref(rows: np.ndarray, header: dict[str, float | str], init: dict[str, float]) -> float:
@@ -581,21 +560,50 @@ def write_chain_csv(arr: np.ndarray, path: Path) -> None:
             writer.writerow([row[name].item() for name in names])
 
 
+def write_lnp_csv(arr: np.ndarray, path: Path, chain_label: str | None = None) -> None:
+    names = ["iter", "walker", "lnP"]
+    if chain_label is not None:
+        names = ["chain"] + names
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(names)
+        for row in arr:
+            values = [row["iter"].item(), row["walker"].item(), row["lnP"].item()]
+            if chain_label is not None:
+                values = [chain_label] + values
+            writer.writerow(values)
+
+
+def lnp_summary(arr: np.ndarray) -> dict:
+    best_i = best_index(arr)
+    finite = arr["lnP"][np.isfinite(arr["lnP"])]
+    return {
+        "n_stored": int(len(arr)),
+        "n_finite": int(len(finite)),
+        "best_stored": (
+            {
+                "iter": int(arr["iter"][best_i]),
+                "walker": int(arr["walker"][best_i]),
+                "lnP": float(arr["lnP"][best_i]),
+            }
+            if best_i is not None else {}
+        ),
+        "max": float(np.max(finite)) if len(finite) else math.nan,
+        "median": float(np.median(finite)) if len(finite) else math.nan,
+        "p05": float(np.percentile(finite, 5)) if len(finite) else math.nan,
+        "p95": float(np.percentile(finite, 95)) if len(finite) else math.nan,
+    }
+
+
 def summary_from_chain(arr: np.ndarray, stdout_path: Path) -> dict:
     best_i = best_index(arr)
-    finite_lnP = arr["lnP"][np.isfinite(arr["lnP"])]
     summary = {
         "n_stored": int(len(arr)),
         "best_stored": (
             {name: float(arr[name][best_i]) for name in arr.dtype.names or []}
             if best_i is not None else {}
         ),
-        "lnP": {
-            "max": float(np.max(finite_lnP)) if len(finite_lnP) else math.nan,
-            "median": float(np.median(finite_lnP)) if len(finite_lnP) else math.nan,
-            "p05": float(np.percentile(finite_lnP, 5)) if len(finite_lnP) else math.nan,
-            "p95": float(np.percentile(finite_lnP, 95)) if len(finite_lnP) else math.nan,
-        },
+        "lnP": lnp_summary(arr),
         "parameters": {},
         "stdout": str(stdout_path),
     }
@@ -645,6 +653,27 @@ def plot_corner(arr: np.ndarray, params: list[str], path: Path) -> None:
     if best_i is not None:
         truths = [arr[name][best_i] for name in params]
 
+    if data.shape[1] == 1:
+        fig, ax = plt.subplots(figsize=(4.8, 3.2))
+        ax.hist(data[:, 0], bins=40, color="0.25", histtype="stepfilled", alpha=0.65)
+        ax.set_xlabel(PARAM_LABELS.get(params[0], params[0]))
+        ax.set_ylabel("stored samples")
+        if truths is not None:
+            ax.axvline(truths[0], color="crimson")
+            fig.text(
+                0.995,
+                0.995,
+                r"red line: max stored $\ln P$ sample",
+                ha="right",
+                va="top",
+                fontsize=10,
+                color="crimson",
+            )
+        fig.tight_layout()
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        return
+
     ranges = []
     for j in range(data.shape[1]):
         lo = float(np.min(data[:, j]))
@@ -660,7 +689,7 @@ def plot_corner(arr: np.ndarray, params: list[str], path: Path) -> None:
         labels=[PARAM_LABELS.get(name, name) for name in params],
         range=ranges,
         bins=40,
-        color="#4c72b0",
+        color="0.25",
         truths=truths,
         truth_color="crimson",
         plot_datapoints=False,
@@ -714,11 +743,14 @@ def collect_chain_batch(
     output_prefix: str = "global",
 ) -> None:
     chains = []
+    chain_labels = []
     for chain_dir in chain_dirs:
         fort7 = chain_dir / "fort.7"
         if not fort7.exists():
             raise FileNotFoundError(f"Missing Reid chain file: {fort7}")
-        chains.append(load_chain(fort7))
+        chain = load_chain(fort7)
+        chains.append(chain)
+        chain_labels.append(chain_dir.name)
 
     if not chains:
         raise ValueError("No chain directories supplied for collection")
@@ -743,12 +775,46 @@ def collect_chain_batch(
     summary_path.write_text(summary_text + "\n")
 
     combined = np.concatenate([chain[-min_draws:] for chain in chains])
+    lnp_by_chain = {
+        label: lnp_summary(chain[-min_draws:])
+        for label, chain in zip(chain_labels, chains)
+    }
+    lnp_csv_path = output_dir / f"{output_prefix}_lnP.csv"
+    with lnp_csv_path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["chain", "iter", "walker", "lnP"])
+        for label, chain in zip(chain_labels, chains):
+            for row in chain[-min_draws:]:
+                writer.writerow(
+                    [
+                        label,
+                        row["iter"].item(),
+                        row["walker"].item(),
+                        row["lnP"].item(),
+                    ]
+                )
+    lnp_summary_path = output_dir / f"{output_prefix}_lnP_summary.json"
+    lnp_summary_path.write_text(
+        json.dumps(
+            {
+                "common_stored_draws_per_chain": int(min_draws),
+                "combined": lnp_summary(combined),
+                "chains": lnp_by_chain,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
     corner_path = output_dir / f"{output_prefix}_corner.png"
     plot_corner(combined, plot_params, corner_path)
 
     print("\nGlobal parameter summary (combined Reid chains):", flush=True)
     print(summary_text, flush=True)
     print(f"Global summary: {summary_path}", flush=True)
+    print(f"Global lnP values: {lnp_csv_path}", flush=True)
+    print(f"Global lnP summary: {lnp_summary_path}", flush=True)
     print(f"Global corner plot: {corner_path}", flush=True)
 
 
@@ -768,18 +834,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--galaxy", default="NGC4258")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
-    parser.add_argument("--init", choices=["reid", "config", "de-npz"], default="reid")
     parser.add_argument(
-        "--reid-init",
-        type=Path,
-        default=DEFAULT_REID_INIT,
-        help="TOML file with Reid-style global initial values for --init reid.",
-    )
-    parser.add_argument(
-        "--init-npz",
-        type=Path,
-        default=ROOT / "results/Megamaser/de_checkpoints/NGC4258/de_ckpt.npz",
-        help="DE checkpoint used when --init de-npz.",
+        "--init",
+        default=DEFAULT_REID_INIT.name,
+        help=(
+            "Init TOML filename in scripts/megamaser/check_reid. "
+            "The file may be Reid-style [globals] or a "
+            "[model.galaxies.<NAME>.init] config fragment."
+        ),
     )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument(
@@ -853,12 +915,11 @@ def main(argv: list[str] | None = None) -> int:
     if status_interval < 1:
         raise ValueError("--status-interval must be >=1, or 0 for automatic")
 
-    if args.init == "reid":
-        reid_init = load_reid_init(args.reid_init, args.vcor)
-    elif args.init == "config":
-        reid_init = load_config_init(args.config, args.galaxy, args.vcor)
-    else:
-        reid_init = load_de_npz_init(args.init_npz, args.config, args.galaxy, args.vcor)
+    try:
+        init_toml = resolve_init_toml(args.init)
+        reid_init = load_toml_init(init_toml, args.galaxy, args.vcor)
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
 
     header, data_rows = parse_data_rows(args.data)
     run_init = shift_warp_pivots(reid_init.values, compute_reid_r_ref(data_rows, header, reid_init.values))
@@ -872,7 +933,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = DEFAULT_RESULTS / f"{args.galaxy}_{args.init}_{stamp}"
+        run_dir = DEFAULT_RESULTS / f"{args.galaxy}_{init_toml.stem}_{stamp}"
     else:
         run_dir = args.output_dir
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -933,10 +994,12 @@ def main(argv: list[str] | None = None) -> int:
 
     chain = load_chain(fort7)
     write_chain_csv(chain, run_dir / "global_chain.csv")
+    write_lnp_csv(chain, run_dir / "lnP.csv")
     summary = summary_from_chain(chain, stdout)
     (run_dir / "likelihood_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     plot_corner(chain, params, run_dir / "global_corner.png")
     print(f"Chain CSV: {run_dir / 'global_chain.csv'}", flush=True)
+    print(f"lnP CSV: {run_dir / 'lnP.csv'}", flush=True)
     print(f"Likelihood summary: {run_dir / 'likelihood_summary.json'}", flush=True)
     print(f"Global contour plot: {run_dir / 'global_corner.png'}", flush=True)
     print(f"Best stored lnP: {summary['lnP']['max']:.6g}", flush=True)
