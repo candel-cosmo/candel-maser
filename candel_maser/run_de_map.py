@@ -39,7 +39,8 @@ import time
 import tomli
 
 # DE is derivative-free so float32 is sufficient; use --f64 to override.
-if "--f64" in sys.argv:
+_enable_f64 = "--f64" in sys.argv
+if _enable_f64:
     sys.argv.remove("--f64")
     import jax
     jax.config.update("jax_enable_x64", True)
@@ -74,6 +75,8 @@ parser.add_argument("--devices", type=str, default=None,
                          "only when they are visible.")
 parser.add_argument("--resume", action="store_true",
                     help="Resume from latest checkpoint if one exists")
+parser.add_argument("--f64", action="store_true", default=_enable_f64,
+                    help="Enable JAX float64. Default is float32.")
 parser.add_argument("--no-ecc", action="store_true",
                     help="Disable eccentricity model")
 parser.add_argument("--no-quadratic-warp", action="store_true",
