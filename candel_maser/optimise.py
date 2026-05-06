@@ -709,6 +709,40 @@ def _load_de_checkpoint(path, lo, hi, names, sizes):
     return d
 
 
+def _resolve_devices(devices_arg):
+    """Return local devices for DE population sharding."""
+    devices = list(jax.local_devices())
+    if not devices:
+        return []
+
+    if devices_arg is None:
+        devices_arg = "auto"
+    if isinstance(devices_arg, str):
+        value = devices_arg.strip().lower()
+        if value in ("auto", ""):
+            non_cpu = [d for d in devices if d.platform != "cpu"]
+            return non_cpu if len(non_cpu) > 1 else devices[:1]
+        if value in ("1", "one", "single", "false", "off", "none", "no"):
+            return devices[:1]
+        try:
+            n_requested = int(value)
+        except ValueError as exc:
+            raise ValueError(
+                "`devices` must be 'auto', 1, or an integer.") from exc
+    else:
+        n_requested = int(devices_arg)
+
+    if n_requested < 1:
+        raise ValueError("`devices` must be at least 1.")
+    if n_requested == 1:
+        return devices[:1]
+    n_available = len(devices)
+    if n_available < n_requested:
+        fprint(f"DE: requested {n_requested} local devices but only "
+               f"{n_available} visible; using {n_available}.")
+    return devices[:min(n_requested, n_available)]
+
+
 def de_optimize(model, model_args=(), model_kwargs=None,
                 log2_N=16, pop_size=1000, max_generations=1000,
                 patience=100, eval_chunk=64,
@@ -716,7 +750,7 @@ def de_optimize(model, model_args=(), model_kwargs=None,
                 sobol_bounds_override=None,
                 log_every=100, seed=42, verbose=True,
                 checkpoint_dir=None, checkpoint_path=None, resume_path=None,
-                checkpoint_interval=600):
+                checkpoint_interval=600, devices="auto"):
     """Derivative-free MAP optimizer using Differential Evolution.
 
     Strategy:
@@ -750,7 +784,7 @@ def de_optimize(model, model_args=(), model_kwargs=None,
     patience : int
         Stop if no improvement (> 0.1 nats) for this many generations.
     eval_chunk : int
-        Batch size for fitness evaluations (GPU memory control).
+        Per-device batch size for fitness evaluations (GPU memory control).
     sobol_n_sigma : float
         Sobol bounds width (mean +/- n_sigma * std, clipped to support).
     min_dist_frac : float
@@ -776,6 +810,10 @@ def de_optimize(model, model_args=(), model_kwargs=None,
         survey and resumes the DE loop.
     checkpoint_interval : float
         Minimum time in seconds between periodic checkpoint writes.
+    devices : {"auto", int}
+        Number of visible local devices to use for population-axis fitness
+        evaluation. ``"auto"`` uses all non-CPU local devices only when more
+        than one is visible; otherwise the original single-device path is used.
 
     Returns
     -------
@@ -848,9 +886,26 @@ def de_optimize(model, model_args=(), model_kwargs=None,
         x = lo + x_normed * scale
         return -logp_fn(x)
 
-    _fitness_raw = jax.jit(jax.vmap(_fitness_single))
+    local_devices = _resolve_devices(devices)
+    use_pmap = len(local_devices) > 1
+    n_devices = len(local_devices) if local_devices else 1
+    if use_pmap:
+        mesh = jax.sharding.Mesh(np.asarray(local_devices), ("device",))
+        pmap_input_sharding = jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec("device"))
+        _fitness_pmap = jax.pmap(
+            jax.vmap(_fitness_single), devices=local_devices)
+        if verbose:
+            fprint("DE: population fitness sharded over "
+                   f"{n_devices} local devices "
+                   f"({eval_chunk}/device, "
+                   f"{eval_chunk * n_devices} total/chunk).")
+    else:
+        _fitness_raw = jax.jit(jax.vmap(_fitness_single))
+        if verbose:
+            fprint("DE: single-device population fitness evaluation")
 
-    def _eval_padded(fn, x, chunk, desc=None):
+    def _eval_padded_single(fn, x, chunk, desc=None):
         """Evaluate fn on x in chunks of exactly `chunk`, padding if needed."""
         n = x.shape[0]
         n_pad = (-n) % chunk
@@ -866,12 +921,38 @@ def de_optimize(model, model_args=(), model_kwargs=None,
         out = jnp.concatenate(parts)
         return out[:n]
 
+    def _eval_padded_pmap(fn, x, chunk, desc=None):
+        """Evaluate fn on x in device-sharded chunks, padding if needed."""
+        n = x.shape[0]
+        block = n_devices * chunk
+        n_pad = (-n) % block
+        if n_pad:
+            pad = jnp.broadcast_to(x[:1], (n_pad,) + x.shape[1:])
+            x = jnp.concatenate([x, pad])
+        n_blocks = x.shape[0] // block
+        parts = []
+        for i in trange(0, x.shape[0], block, total=n_blocks,
+                        desc=desc, disable=(desc is None or not verbose)):
+            xb = x[i:i + block].reshape(
+                (n_devices, chunk) + x.shape[1:])
+            xb = np.asarray(jax.device_get(xb))
+            xb = jax.device_put(xb, pmap_input_sharding)
+            yb = fn(xb).reshape((block,))
+            parts.append(yb)
+            jax.block_until_ready(parts[-1])
+        out = jnp.concatenate(parts)
+        return out[:n]
+
     def fitness_batch(x_normed, desc=None):
-        return _eval_padded(_fitness_raw, x_normed, eval_chunk, desc=desc)
+        if use_pmap:
+            return _eval_padded_pmap(
+                _fitness_pmap, x_normed, eval_chunk, desc=desc)
+        return _eval_padded_single(
+            _fitness_raw, x_normed, eval_chunk, desc=desc)
 
     # Compile (single JIT — Sobol survey reuses the same fitness function)
     t0 = time.time()
-    _ = fitness_batch(jnp.full((eval_chunk, D), 0.5))
+    _ = fitness_batch(jnp.full((eval_chunk * n_devices, D), 0.5))
     jax.block_until_ready(_)
     if verbose:
         fprint(f"JIT compiled in {time.time() - t0:.1f}s")
@@ -1089,6 +1170,7 @@ def find_MAP(model, model_kwargs=None, seed=42,
             checkpoint_dir=checkpoint_dir,
             checkpoint_path=checkpoint_path,
             resume_path=resume_path,
+            devices=opt_cfg.get("devices", "auto"),
         )
         best_params, best_logp, results = de_optimize(model, **kwargs)
     else:

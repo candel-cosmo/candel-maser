@@ -68,6 +68,10 @@ with open(os.path.join(os.path.dirname(__file__), "config_maser.toml"), "rb") as
 parser = argparse.ArgumentParser()
 parser.add_argument("galaxy", type=str)
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--devices", type=str, default=None,
+                    help="Local devices used for sampler parallel work: "
+                         "auto, 1, or N. auto uses multiple non-CPU devices "
+                         "only when they are visible.")
 parser.add_argument("--resume", action="store_true",
                     help="Resume from latest checkpoint if one exists")
 parser.add_argument("--no-ecc", action="store_true",
@@ -103,6 +107,8 @@ if "D_lo" in gcfg and "D_hi" in gcfg:
 opt_cfg = dict(master_cfg.get("optimise", {}))
 if "eval_chunk" in gcfg:
     opt_cfg["eval_chunk"] = gcfg["eval_chunk"]
+if args.devices is not None:
+    opt_cfg["devices"] = args.devices
 
 config = {
     "inference": master_cfg["inference"],
@@ -132,6 +138,7 @@ model = MaserDiskModel(tmp.name, data)
 os.unlink(tmp.name)
 
 fprint(f"DE settings: eval_chunk={opt_cfg.get('eval_chunk', 'default')}, "
+       f"devices={opt_cfg.get('devices', 'auto')}, "
        f"mode2_spot_batch={model._mode2_spot_batch}")
 
 # ---- Run DE MAP ----
