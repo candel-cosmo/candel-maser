@@ -33,7 +33,7 @@ _GALAXY_VELOCITY_FRAME = {
     "NGC6323":     "lsr",         # Kuo+2015, footnote a
     "UGC3789":     "lsr",         # Reid+2009/2013, column header
     "CGCG074-064": "barycentric",  # Pesce+2020 MRT header
-    "NGC5765b":    "unknown",     # Gao+2016: not stated
+    "NGC5765b":    "lsr",         # Gao+2016: optical LSR throughout
     "NGC4258":     "lsr",         # Argon+2007
 }
 
