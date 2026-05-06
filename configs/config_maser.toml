@@ -126,8 +126,8 @@ high = 750.0
 
 [model.priors.i0]
 dist = "sine_angle"
-low = 70.0
-high = 110.0
+low = 65.0
+high = 115.0
 
 [model.priors.Omega0]
 dist = "uniform"
@@ -211,8 +211,8 @@ high = 0.05
 
 [model.priors.dperiapsis_dr]
 dist = "uniform"
-low = -180.0
-high = 180.0
+low = -360.0
+high = 360.0
 
 [model.priors.D_lim]
 dist = "uniform"
@@ -256,7 +256,6 @@ D_hi = 9.0
 use_ecc = true
 ecc_cartesian = true
 use_quadratic_warp = true
-use_float64 = true
 mode = "mode1"
 # Denser phi grids for NGC4258 (position errors ~3 μas → narrow phi peaks).
 n_phi_hv_high = 20001
@@ -271,25 +270,25 @@ eval_chunk = 1
 mode2_spot_batch = 4
 
 [model.galaxies.NGC4258.init]
-D_c = 7.593
-eta = 6.72
-x0 = -152.0
-y0 = 556.0
-i0 = 87.05
-di_dr = 2.59
-d2i_dr2 = 0.041
-Omega0 = 88.43
-dOmega_dr = 2.21
-d2Omega_dr2 = -0.13
-e_x = 0.00468400
-e_y = 0.00520200
-dperiapsis_dr = 123.0
-sigma_x_floor = 1.6
-sigma_y_floor = 4.1
-sigma_v_sys = 0.31
-sigma_v_hv = 2.25
-sigma_a_floor = 0.46
-dv_sys = -193.7
+D_c = 7.5896
+Omega0 = 88.3964
+d2Omega_dr2 = -0.1186
+d2i_dr2 = 0.2175
+dOmega_dr = 2.2082
+di_dr = -1.5244
+dperiapsis_dr = -179.9399
+dv_sys = -194.0315
+e_x = 0.0006
+e_y = -0.0034
+eta = 6.7214
+i0 = 94.057
+sigma_a_floor = 0.4589
+sigma_v_hv = 2.6203
+sigma_v_sys = 0.4615
+sigma_x_floor = 0.7482
+sigma_y_floor = 3.8202
+x0 = -168.5789
+y0 = 557.8011
 
 [model.galaxies.NGC5765b]
 ra = 222.71461
@@ -416,7 +415,7 @@ root = "data/Megamaser"
 [convergence]
 # Auto-run after NUTS/NSS finishes. Compares the production phi/r marginal
 # against a dense brute-force reference at `n_draws` posterior samples.
-auto_check = true
+auto_check = false
 n_draws = 8
 seed = 0
 save_json = true

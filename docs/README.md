@@ -47,6 +47,8 @@ bash scripts/megamaser/submit.sh --sampler nss --galaxy NGC5765b,UGC3789
 
 Options: `--mode {mode1|mode2}` (NSS/DE require mode2),
 `--f-grid F` (grid-density scaling, nss/nuts only),
+`--devices N` (single-node multi-GPU NSS or DE),
+`--f64` (explicit JAX float64; default is float32),
 `--init-method {config|median|sample}`,
 `-q QUEUE` (default `gpulong`).
 
@@ -73,7 +75,12 @@ GPU DE MAP optimizer is reached via `submit.sh --sampler de`:
 ```bash
 bash scripts/megamaser/submit.sh -q cmbgpu --sampler de --galaxy NGC5765b
 bash scripts/megamaser/submit.sh -q cmbgpu --sampler de --galaxy NGC5765b,UGC3789
+bash scripts/megamaser/submit.sh -q cmbgpu --sampler de --galaxy NGC5765b --devices 4
 ```
+
+With `--devices N`, the DE population fitness evaluation is sharded over the
+visible local devices on one node. `optimise/eval_chunk` remains the
+per-device batch size.
 
 ### `toy_joint_H0.sh` — joint `H0` from saved per-galaxy posteriors
 

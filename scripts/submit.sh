@@ -16,6 +16,7 @@ F_GRID=""
 NUM_CHAINS=1
 GALAXY=""
 INIT_METHOD=""
+DEVICES=""
 GPUTYPE=""
 GPU_MEM=""
 TIME=""
@@ -27,6 +28,7 @@ _WATCH_POLL=""
 RESUME=false
 NO_ECC=false
 NO_QUAD_WARP=false
+F64=false
 
 ALL_GALS="CGCG074-064 NGC4258 NGC5765b NGC6264 NGC6323 UGC3789"
 
@@ -48,6 +50,9 @@ Options:
                           ignored for DE which forces mode2)
   --f-grid F             Grid scaling factor (default: 1.0; nss/nuts only)
   --num-chains N         NUTS vectorised chains (default: $NUM_CHAINS)
+  --devices N            Sampler local devices for NSS or DE: auto, 1, or N.
+                         Numeric N>1 requests N GPUs on one node and passes
+                         --devices N to the runner.
   --init-method METHOD   NUTS init method: config | median | sample
                          (default: runner picks from config)
   --cpus N               CPU cores (default: 4 with --gpu)
@@ -61,6 +66,7 @@ Options:
   --no-quadratic-warp    Disable quadratic disk warp
   --dry                  Print submit command without submitting (default: off)
   --resume               Resume from latest checkpoint (nss/de; ignored for NUTS)
+  --f64                  Enable JAX float64 in the runner (default: float32)
   --max-retries N        Watch and resubmit up to N times on timeout
   --poll S               Seconds between squeue polls (default: 120)
   -h, --help
@@ -74,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         -q|--queue) QUEUE="$2"; shift 2 ;;
         --f-grid) F_GRID="$2"; shift 2 ;;
         --num-chains) NUM_CHAINS="$2"; shift 2 ;;
+        --devices) DEVICES="$2"; shift 2 ;;
         --init-method) INIT_METHOD="$2"; shift 2 ;;
         --galaxy) GALAXY="$2"; shift 2 ;;
         --gputype) GPUTYPE="$2"; shift 2 ;;
@@ -85,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --no-quadratic-warp) NO_QUAD_WARP=true; shift ;;
         --dry) DRY=true; shift ;;
         --resume) RESUME=true; shift ;;
+        --f64) F64=true; shift ;;
         --max-retries) _WATCH_RETRIES="$2"; shift 2 ;;
         --poll) _WATCH_POLL="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -94,6 +102,9 @@ done
 
 if [[ "$SAMPLER" != "nss" && "$SAMPLER" != "nuts" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler is required (nss|nuts|de)"; exit 1
+fi
+if [[ -n "$DEVICES" && "$SAMPLER" != "nss" && "$SAMPLER" != "de" ]]; then
+    echo "Error: --devices only applies with --sampler nss or --sampler de."; exit 1
 fi
 JOB_TAG=""
 $NO_ECC && JOB_TAG="${JOB_TAG}_noecc"
@@ -118,6 +129,7 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     _cmd=(bash "$0" --sampler "$SAMPLER" -q "$QUEUE" --mem "$MEM")
     [[ -n "$MODE" ]]        && _cmd+=(--mode "$MODE")
     [[ -n "$F_GRID" ]]      && _cmd+=(--f-grid "$F_GRID")
+    [[ -n "$DEVICES" ]]     && _cmd+=(--devices "$DEVICES")
     [[ -n "$INIT_METHOD" ]] && _cmd+=(--init-method "$INIT_METHOD")
     [[ -n "$GPUTYPE" ]]     && _cmd+=(--gputype "$GPUTYPE")
     [[ -n "$GPU_MEM" ]]     && _cmd+=(--gpu-mem "$GPU_MEM")
@@ -126,6 +138,7 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     [[ "$NUM_CHAINS" != "1" ]] && _cmd+=(--num-chains "$NUM_CHAINS")
     $NO_ECC && _cmd+=(--no-ecc)
     $NO_QUAD_WARP && _cmd+=(--no-quadratic-warp)
+    $F64 && _cmd+=(--f64)
     $DRY && _cmd+=(--dry)
     $RESUME && _cmd+=(--resume)
     _watcher_logdir="$CANDEL_WATCHER_DIR"
@@ -177,9 +190,11 @@ fi
 EXTRA_ARGS=""
 [[ -n "$MODE" && "$SAMPLER" != "de" ]]        && EXTRA_ARGS="$EXTRA_ARGS --mode $MODE"
 [[ -n "$F_GRID" ]]      && EXTRA_ARGS="$EXTRA_ARGS --f-grid $F_GRID"
+[[ -n "$DEVICES" ]]     && EXTRA_ARGS="$EXTRA_ARGS --devices $DEVICES"
 [[ -n "$INIT_METHOD" ]] && EXTRA_ARGS="$EXTRA_ARGS --init-method $INIT_METHOD"
 $NO_ECC && EXTRA_ARGS="$EXTRA_ARGS --no-ecc"
 $NO_QUAD_WARP && EXTRA_ARGS="$EXTRA_ARGS --no-quadratic-warp"
+$F64 && EXTRA_ARGS="$EXTRA_ARGS --f64"
 $RESUME && EXTRA_ARGS="$EXTRA_ARGS --resume"
 
 dry_flag=()
@@ -194,6 +209,9 @@ for GAL in $GALAXY; do
     esac
     extra_flags=()
     [[ -n "$CPUS" ]]    && extra_flags+=(--cpus "$CPUS")
+    if [[ "$SAMPLER" =~ ^(nss|de)$ && "$DEVICES" =~ ^[0-9]+$ && "$DEVICES" -gt 1 ]]; then
+        extra_flags+=(--gpu-count "$DEVICES")
+    fi
     [[ -n "$GPUTYPE" ]] && extra_flags+=(--gputype "$GPUTYPE")
     [[ -n "$GPU_MEM" ]] && extra_flags+=(--gpu-mem "$GPU_MEM")
     [[ -n "$TIME" ]]    && extra_flags+=(--time "$TIME")
