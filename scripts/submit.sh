@@ -16,6 +16,7 @@ F_GRID=""
 NUM_CHAINS=1
 GALAXY=""
 INIT_METHOD=""
+NSS_DEVICES=""
 GPUTYPE=""
 GPU_MEM=""
 TIME=""
@@ -48,6 +49,9 @@ Options:
                           ignored for DE which forces mode2)
   --f-grid F             Grid scaling factor (default: 1.0; nss/nuts only)
   --num-chains N         NUTS vectorised chains (default: $NUM_CHAINS)
+  --nss-devices N        NSS local devices: auto, 1, or N. Numeric N>1
+                         requests N GPUs on one node and passes
+                         --nss-devices N to the runner.
   --init-method METHOD   NUTS init method: config | median | sample
                          (default: runner picks from config)
   --cpus N               CPU cores (default: 4 with --gpu)
@@ -74,6 +78,7 @@ while [[ $# -gt 0 ]]; do
         -q|--queue) QUEUE="$2"; shift 2 ;;
         --f-grid) F_GRID="$2"; shift 2 ;;
         --num-chains) NUM_CHAINS="$2"; shift 2 ;;
+        --nss-devices) NSS_DEVICES="$2"; shift 2 ;;
         --init-method) INIT_METHOD="$2"; shift 2 ;;
         --galaxy) GALAXY="$2"; shift 2 ;;
         --gputype) GPUTYPE="$2"; shift 2 ;;
@@ -94,6 +99,9 @@ done
 
 if [[ "$SAMPLER" != "nss" && "$SAMPLER" != "nuts" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler is required (nss|nuts|de)"; exit 1
+fi
+if [[ -n "$NSS_DEVICES" && "$SAMPLER" != "nss" ]]; then
+    echo "Error: --nss-devices only applies with --sampler nss."; exit 1
 fi
 JOB_TAG=""
 $NO_ECC && JOB_TAG="${JOB_TAG}_noecc"
@@ -118,6 +126,7 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     _cmd=(bash "$0" --sampler "$SAMPLER" -q "$QUEUE" --mem "$MEM")
     [[ -n "$MODE" ]]        && _cmd+=(--mode "$MODE")
     [[ -n "$F_GRID" ]]      && _cmd+=(--f-grid "$F_GRID")
+    [[ -n "$NSS_DEVICES" ]] && _cmd+=(--nss-devices "$NSS_DEVICES")
     [[ -n "$INIT_METHOD" ]] && _cmd+=(--init-method "$INIT_METHOD")
     [[ -n "$GPUTYPE" ]]     && _cmd+=(--gputype "$GPUTYPE")
     [[ -n "$GPU_MEM" ]]     && _cmd+=(--gpu-mem "$GPU_MEM")
@@ -177,6 +186,7 @@ fi
 EXTRA_ARGS=""
 [[ -n "$MODE" && "$SAMPLER" != "de" ]]        && EXTRA_ARGS="$EXTRA_ARGS --mode $MODE"
 [[ -n "$F_GRID" ]]      && EXTRA_ARGS="$EXTRA_ARGS --f-grid $F_GRID"
+[[ -n "$NSS_DEVICES" ]] && EXTRA_ARGS="$EXTRA_ARGS --nss-devices $NSS_DEVICES"
 [[ -n "$INIT_METHOD" ]] && EXTRA_ARGS="$EXTRA_ARGS --init-method $INIT_METHOD"
 $NO_ECC && EXTRA_ARGS="$EXTRA_ARGS --no-ecc"
 $NO_QUAD_WARP && EXTRA_ARGS="$EXTRA_ARGS --no-quadratic-warp"
@@ -194,6 +204,9 @@ for GAL in $GALAXY; do
     esac
     extra_flags=()
     [[ -n "$CPUS" ]]    && extra_flags+=(--cpus "$CPUS")
+    if [[ "$SAMPLER" == "nss" && "$NSS_DEVICES" =~ ^[0-9]+$ && "$NSS_DEVICES" -gt 1 ]]; then
+        extra_flags+=(--gpu-count "$NSS_DEVICES")
+    fi
     [[ -n "$GPUTYPE" ]] && extra_flags+=(--gputype "$GPUTYPE")
     [[ -n "$GPU_MEM" ]] && extra_flags+=(--gpu-mem "$GPU_MEM")
     [[ -n "$TIME" ]]    && extra_flags+=(--time "$TIME")
