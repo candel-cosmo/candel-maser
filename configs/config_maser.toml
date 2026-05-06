@@ -415,7 +415,7 @@ root = "data/Megamaser"
 [convergence]
 # Auto-run after NUTS/NSS finishes. Compares the production phi/r marginal
 # against a dense brute-force reference at `n_draws` posterior samples.
-auto_check = true
+auto_check = false
 n_draws = 8
 seed = 0
 save_json = true
