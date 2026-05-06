@@ -211,8 +211,8 @@ high = 0.05
 
 [model.priors.dperiapsis_dr]
 dist = "uniform"
-low = -180.0
-high = 180.0
+low = -360.0
+high = 360.0
 
 [model.priors.D_lim]
 dist = "uniform"
