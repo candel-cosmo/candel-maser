@@ -69,7 +69,8 @@ Options:
   --no-quadratic-warp    Disable quadratic disk warp
   --dry                  Print submit command without submitting (default: off)
   --resume               Resume from latest checkpoint (nss/de; ignored for NUTS)
-  --f64                  Enable JAX float64 in the runner (default: float32)
+  --f64                  Enable JAX float64 in the runner
+                         (automatic for NGC4258 mode1)
   --max-retries N        Watch and resubmit up to N times on timeout
   --poll S               Seconds between squeue polls (default: 120)
   -h, --help

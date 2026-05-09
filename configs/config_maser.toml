@@ -3,7 +3,7 @@ sampler = "nss"
 seed = 42
 
 # NUTS / HMC
-num_warmup = 2000
+num_warmup = 2500
 num_samples = 2000
 num_chains = 1
 dense_mass_blocks = [
@@ -26,10 +26,13 @@ dense_mass_blocks = [
         "sigma_x_floor",
     ],
 ]
+dense_mass_single_block = true
+dense_mass_include_r_ang = true
 init_maxiter = 0
 init_method = "config"
-r_ang_init_method = "data"
+r_ang_init_method = "peak"
 max_tree_depth = 10
+target_accept_prob = 0.9
 
 # Nested sampling (NSS)
 n_live = 5000
@@ -285,7 +288,7 @@ eta = 6.7212
 i0 = 94.085
 sigma_a_floor = 0.4638
 sigma_v_hv = 2.578
-sigma_v_sys = 0.009
+sigma_v_sys = 0.5
 sigma_x_floor = 0.8215
 sigma_y_floor = 3.7699
 x0 = -202.3622
