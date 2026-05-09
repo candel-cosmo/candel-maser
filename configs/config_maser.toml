@@ -28,6 +28,7 @@ dense_mass_blocks = [
 ]
 init_maxiter = 0
 init_method = "config"
+r_ang_init_method = "data"
 max_tree_depth = 10
 
 # Nested sampling (NSS)

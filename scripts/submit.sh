@@ -16,6 +16,7 @@ F_GRID=""
 NUM_CHAINS=1
 GALAXY=""
 INIT_METHOD=""
+R_ANG_INIT=""
 DEVICES=""
 GPUTYPE=""
 GPU_MEM=""
@@ -55,6 +56,8 @@ Options:
                          --devices N to the runner.
   --init-method METHOD   NUTS init method: config | median | sample
                          (default: runner picks from config)
+  --r-ang-init METHOD    Mode 1 r_ang init: data | peak
+                         (default: runner picks from config)
   --cpus N               CPU cores (default: 4 with --gpu)
   --gputype TYPE         GPU type (default: any; e.g. h100, l40s)
   --gpu-mem GB           Min GPU VRAM in GB (arc only; queries sinfo)
@@ -82,6 +85,7 @@ while [[ $# -gt 0 ]]; do
         --num-chains) NUM_CHAINS="$2"; shift 2 ;;
         --devices) DEVICES="$2"; shift 2 ;;
         --init-method) INIT_METHOD="$2"; shift 2 ;;
+        --r-ang-init) R_ANG_INIT="$2"; shift 2 ;;
         --galaxy) GALAXY="$2"; shift 2 ;;
         --gputype) GPUTYPE="$2"; shift 2 ;;
         --gpu-mem) GPU_MEM="$2"; shift 2 ;;
@@ -131,6 +135,7 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     [[ -n "$F_GRID" ]]      && _cmd+=(--f-grid "$F_GRID")
     [[ -n "$DEVICES" ]]     && _cmd+=(--devices "$DEVICES")
     [[ -n "$INIT_METHOD" ]] && _cmd+=(--init-method "$INIT_METHOD")
+    [[ -n "$R_ANG_INIT" ]]  && _cmd+=(--r-ang-init "$R_ANG_INIT")
     [[ -n "$GPUTYPE" ]]     && _cmd+=(--gputype "$GPUTYPE")
     [[ -n "$GPU_MEM" ]]     && _cmd+=(--gpu-mem "$GPU_MEM")
     [[ -n "$TIME" ]]        && _cmd+=(--time "$TIME")
@@ -160,6 +165,7 @@ if [[ "$SAMPLER" == "de" ]]; then
     [[ -n "$F_GRID" ]] && { echo "Error: --f-grid not applicable with --sampler de"; exit 1; }
     [[ "$NUM_CHAINS" != "1" ]] && { echo "Error: --num-chains not applicable with --sampler de"; exit 1; }
     [[ -n "$INIT_METHOD" ]] && { echo "Error: --init-method not applicable with --sampler de"; exit 1; }
+    [[ -n "$R_ANG_INIT" ]] && { echo "Error: --r-ang-init not applicable with --sampler de"; exit 1; }
     [[ -n "$MODE" && "$MODE" != "mode2" ]] && { echo "Error: DE only supports mode2."; exit 1; }
 fi
 if [[ -z "$GALAXY" ]]; then
@@ -192,6 +198,7 @@ EXTRA_ARGS=""
 [[ -n "$F_GRID" ]]      && EXTRA_ARGS="$EXTRA_ARGS --f-grid $F_GRID"
 [[ -n "$DEVICES" ]]     && EXTRA_ARGS="$EXTRA_ARGS --devices $DEVICES"
 [[ -n "$INIT_METHOD" ]] && EXTRA_ARGS="$EXTRA_ARGS --init-method $INIT_METHOD"
+[[ -n "$R_ANG_INIT" ]]  && EXTRA_ARGS="$EXTRA_ARGS --r-ang-init $R_ANG_INIT"
 $NO_ECC && EXTRA_ARGS="$EXTRA_ARGS --no-ecc"
 $NO_QUAD_WARP && EXTRA_ARGS="$EXTRA_ARGS --no-quadratic-warp"
 $F64 && EXTRA_ARGS="$EXTRA_ARGS --f64"
