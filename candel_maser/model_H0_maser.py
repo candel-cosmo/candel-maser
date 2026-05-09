@@ -770,11 +770,12 @@ class MaserDiskModel(ModelBase):
         return r_est, s_prop, r_min, r_max
 
     def _scan_on_global_grid(self, type_key, idx, r_global,
-                             phys_args, phys_kw, r_chunk=32):
+                             phys_args, phys_kw, r_chunk=32,
+                             spot_chunk=None):
         """Per-spot argmax on the global grid for one spot group.
 
         Returns (r_best, ll_best) of shape (n_group,), or (None, None)
-        if the group is empty. R-axis is chunked for memory.
+        if the group is empty. R and spot axes are chunked for memory.
         """
         n = int(idx.shape[0])
         if n == 0:
@@ -782,25 +783,32 @@ class MaserDiskModel(ModelBase):
         n_r = int(r_global.shape[0])
         pc = self._phi_concat[type_key]
         has_any_accel = self._group_has_any_accel(type_key)
+        if spot_chunk is None:
+            spot_chunk = n
+        spot_chunk = max(1, int(spot_chunk))
 
-        parts = []
-        for start in range(0, n_r, r_chunk):
-            r_chunk_arr = r_global[start:start + r_chunk]
-            r_pre = self._r_precompute(
-                r_chunk_arr, idx, *phys_args, **phys_kw,
-                has_any_accel=has_any_accel)
-            nhc = self._phi_eval_shared_r(
-                r_pre, pc["sin_phi"], pc["cos_phi"])
-            ll_chunk = logsumexp(
-                nhc + pc["log_w_phi"][None, None, :], axis=-1)
-            parts.append(ll_chunk)
-        ll_scan = jnp.concatenate(parts, axis=-1)
+        r_parts = []
+        ll_parts = []
+        for i0 in range(0, n, spot_chunk):
+            idx_chunk = idx[i0:i0 + spot_chunk]
+            scan_parts = []
+            for r0 in range(0, n_r, r_chunk):
+                r_chunk_arr = r_global[r0:r0 + r_chunk]
+                r_pre = self._r_precompute(
+                    r_chunk_arr, idx_chunk, *phys_args, **phys_kw,
+                    has_any_accel=has_any_accel)
+                nhc = self._phi_eval_shared_r(
+                    r_pre, pc["sin_phi"], pc["cos_phi"])
+                ll_chunk = logsumexp(
+                    nhc + pc["log_w_phi"][None, None, :], axis=-1)
+                scan_parts.append(ll_chunk)
+            ll_scan = jnp.concatenate(scan_parts, axis=-1)
 
-        best = jnp.argmax(ll_scan, axis=-1)
-        r_best = r_global[best]
-        ll_best = jnp.take_along_axis(
-            ll_scan, best[:, None], axis=-1).squeeze(-1)
-        return r_best, ll_best
+            best = jnp.argmax(ll_scan, axis=-1)
+            r_parts.append(r_global[best])
+            ll_parts.append(jnp.take_along_axis(
+                ll_scan, best[:, None], axis=-1).squeeze(-1))
+        return jnp.concatenate(r_parts), jnp.concatenate(ll_parts)
 
     def _compute_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2,
                        i0, var_v_hv, phys_args, phys_kw, r_global):
@@ -816,7 +824,8 @@ class MaserDiskModel(ModelBase):
                               ("red", self._idx_red),
                               ("blue", self._idx_blue)]:
             r_scan, ll_scan_best = self._scan_on_global_grid(
-                type_key, idx, r_global, phys_args, phys_kw)
+                type_key, idx, r_global, phys_args, phys_kw,
+                spot_chunk=self._mode2_spot_batch)
             if r_scan is None:
                 continue
             r_cf = r_est[idx]
@@ -1026,6 +1035,26 @@ class MaserDiskModel(ModelBase):
             sys=_one("sys", self._idx_sys, self._n_sys),
             red=_one("red", self._idx_red, self._n_red),
             blue=_one("blue", self._idx_blue, self._n_blue))
+
+    def mode1_r_ang_conditional_peak(self, sample):
+        """Return Mode 1 ``r_ang`` init at per-spot conditional peaks.
+
+        The peaks use the same phi-marginalised seed -> scan -> Brent
+        recipe as Mode 2 grid centring, conditional on the supplied
+        global sample values.
+        """
+        phys_args, phys_kw, diag = self.phys_from_sample(sample)
+        centres = self.get_mode2_centres(phys_args, phys_kw)
+
+        dtype = jnp.asarray(phys_args[2]).dtype
+        r_ang = jnp.zeros((self.n_spots,), dtype=dtype)
+        for type_key in ("sys", "red", "blue"):
+            group = centres[type_key]
+            if group is None:
+                continue
+            idx = getattr(self, f"_idx_{type_key}")
+            r_ang = r_ang.at[idx].set(group["r_c"])
+        return r_ang, diag
 
     def _refine_r_center_group(self, type_key, idx, r_est_group,
                                s_fallback, r_min, r_max,
@@ -1650,6 +1679,9 @@ class MaserDiskModel(ModelBase):
             if "ecc" in sample and "periapsis" in sample:
                 phys_kw["ecc"] = g("ecc")
                 phys_kw["periapsis0"] = _np.deg2rad(g("periapsis"))
+            elif "ecc" in sample and "periapsis_rad" in sample:
+                phys_kw["ecc"] = g("ecc")
+                phys_kw["periapsis0"] = g("periapsis_rad")
             elif "e_x" in sample and "e_y" in sample:
                 e_x = g("e_x")
                 e_y = g("e_y")
