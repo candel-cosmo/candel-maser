@@ -76,7 +76,7 @@ Options:
   --checkpoint-interval-minutes M
                          Checkpoint interval in minutes (default: 15)
   --f64                  Enable JAX float64 in the runner
-                         (automatic for NGC4258 mode1)
+                         (automatic for mode1 NUTS)
   --max-retries N        Watch and resubmit up to N times on timeout
   --poll S               Seconds between squeue polls (default: 120)
   -h, --help

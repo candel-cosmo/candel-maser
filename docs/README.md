@@ -48,7 +48,7 @@ bash scripts/megamaser/submit.sh --sampler nss --galaxy NGC5765b,UGC3789
 Options: `--mode {mode1|mode2}` (NSS/DE require mode2),
 `--f-grid F` (grid-density scaling, nss/nuts only),
 `--devices N` (single-node multi-GPU NSS or DE),
-`--f64` (explicit JAX float64; default is float32),
+`--f64` (explicit JAX float64; automatic for mode1 NUTS),
 `--init-method {config|median|sample}`,
 `--resume` (continue NUTS warmup/sampling or NSS/DE from the latest checkpoint),
 `--checkpoint-interval-minutes M` (checkpoint interval; NUTS checkpoints are per-chain),
