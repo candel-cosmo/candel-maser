@@ -55,8 +55,8 @@ Examples:
   bash watch_and_resubmit.sh --marker "saved samples to" -- \
       bash scripts/megamaser/submit.sh --sampler nss -q cmbgpu --galaxy NGC5765b
 
-  # NUTS (no resume support)
-  bash watch_and_resubmit.sh --marker "saved samples to" --no-resume -- \
+  # NUTS
+  bash watch_and_resubmit.sh --marker "saved samples to" -- \
       bash scripts/megamaser/submit.sh --sampler nuts -q cmbgpu --galaxy NGC5765b
 
   # Custom poll and retries

@@ -17,6 +17,7 @@ NUM_CHAINS=1
 GALAXY=""
 INIT_METHOD=""
 R_ANG_INIT=""
+CHECKPOINT_INTERVAL_MINUTES=""
 DEVICES=""
 GPUTYPE=""
 GPU_MEM=""
@@ -50,7 +51,8 @@ Options:
                          (default: runner picks — mode2 for NSS;
                           ignored for DE which forces mode2)
   --f-grid F             Grid scaling factor (default: 1.0; nss/nuts only)
-  --num-chains N         NUTS vectorised chains (default: $NUM_CHAINS)
+  --num-chains N         NUTS chains, processed sequentially
+                         (default: $NUM_CHAINS)
   --devices N            Sampler local devices for NSS or DE: auto, 1, or N.
                          Numeric N>1 requests N GPUs on one node and passes
                          --devices N to the runner.
@@ -68,7 +70,9 @@ Options:
   --no-ecc               Disable eccentricity model
   --no-quadratic-warp    Disable quadratic disk warp
   --dry                  Print submit command without submitting (default: off)
-  --resume               Resume from latest checkpoint (nss/de; ignored for NUTS)
+  --resume               Resume from latest checkpoint (nuts/nss/de)
+  --checkpoint-interval-minutes M
+                         NUTS checkpoint interval in minutes (default: 15)
   --f64                  Enable JAX float64 in the runner
                          (automatic for NGC4258 mode1)
   --max-retries N        Watch and resubmit up to N times on timeout
@@ -87,6 +91,7 @@ while [[ $# -gt 0 ]]; do
         --devices) DEVICES="$2"; shift 2 ;;
         --init-method) INIT_METHOD="$2"; shift 2 ;;
         --r-ang-init) R_ANG_INIT="$2"; shift 2 ;;
+        --checkpoint-interval-minutes) CHECKPOINT_INTERVAL_MINUTES="$2"; shift 2 ;;
         --galaxy) GALAXY="$2"; shift 2 ;;
         --gputype) GPUTYPE="$2"; shift 2 ;;
         --gpu-mem) GPU_MEM="$2"; shift 2 ;;
@@ -107,6 +112,9 @@ done
 
 if [[ "$SAMPLER" != "nss" && "$SAMPLER" != "nuts" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler is required (nss|nuts|de)"; exit 1
+fi
+if [[ -n "$CHECKPOINT_INTERVAL_MINUTES" && "$SAMPLER" != "nuts" ]]; then
+    echo "Error: --checkpoint-interval-minutes only applies with --sampler nuts."; exit 1
 fi
 if [[ -n "$DEVICES" && "$SAMPLER" != "nss" && "$SAMPLER" != "de" ]]; then
     echo "Error: --devices only applies with --sampler nss or --sampler de."; exit 1
@@ -129,7 +137,6 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     fi
     _wargs=(--marker "$_marker" --max-retries "$_WATCH_RETRIES")
     [[ -n "$_WATCH_POLL" ]] && _wargs+=(--poll "$_WATCH_POLL")
-    [[ "$SAMPLER" == "nuts" ]] && _wargs+=(--no-resume)
     # Per-galaxy submit command (--galaxy is appended in the loop below).
     _cmd=(bash "$0" --sampler "$SAMPLER" -q "$QUEUE" --mem "$MEM")
     [[ -n "$MODE" ]]        && _cmd+=(--mode "$MODE")
@@ -137,6 +144,7 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     [[ -n "$DEVICES" ]]     && _cmd+=(--devices "$DEVICES")
     [[ -n "$INIT_METHOD" ]] && _cmd+=(--init-method "$INIT_METHOD")
     [[ -n "$R_ANG_INIT" ]]  && _cmd+=(--r-ang-init "$R_ANG_INIT")
+    [[ "$SAMPLER" == "nuts" && -n "$CHECKPOINT_INTERVAL_MINUTES" ]] && _cmd+=(--checkpoint-interval-minutes "$CHECKPOINT_INTERVAL_MINUTES")
     [[ -n "$GPUTYPE" ]]     && _cmd+=(--gputype "$GPUTYPE")
     [[ -n "$GPU_MEM" ]]     && _cmd+=(--gpu-mem "$GPU_MEM")
     [[ -n "$TIME" ]]        && _cmd+=(--time "$TIME")
@@ -200,6 +208,7 @@ EXTRA_ARGS=""
 [[ -n "$DEVICES" ]]     && EXTRA_ARGS="$EXTRA_ARGS --devices $DEVICES"
 [[ -n "$INIT_METHOD" ]] && EXTRA_ARGS="$EXTRA_ARGS --init-method $INIT_METHOD"
 [[ -n "$R_ANG_INIT" ]]  && EXTRA_ARGS="$EXTRA_ARGS --r-ang-init $R_ANG_INIT"
+[[ "$SAMPLER" == "nuts" && -n "$CHECKPOINT_INTERVAL_MINUTES" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint-interval-minutes $CHECKPOINT_INTERVAL_MINUTES"
 $NO_ECC && EXTRA_ARGS="$EXTRA_ARGS --no-ecc"
 $NO_QUAD_WARP && EXTRA_ARGS="$EXTRA_ARGS --no-quadratic-warp"
 $F64 && EXTRA_ARGS="$EXTRA_ARGS --f64"
