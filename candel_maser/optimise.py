@@ -750,7 +750,7 @@ def de_optimize(model, model_args=(), model_kwargs=None,
                 sobol_bounds_override=None,
                 log_every=100, seed=42, verbose=True,
                 checkpoint_dir=None, checkpoint_path=None, resume_path=None,
-                checkpoint_interval=600, devices="auto"):
+                checkpoint_interval=900, devices="auto"):
     """Derivative-free MAP optimizer using Differential Evolution.
 
     Strategy:
@@ -1114,7 +1114,8 @@ def _use_de(model):
 
 
 def find_MAP(model, model_kwargs=None, seed=42,
-             checkpoint_dir=None, checkpoint_path=None, resume_path=None):
+             checkpoint_dir=None, checkpoint_path=None, resume_path=None,
+             checkpoint_interval=None):
     """Find MAP estimate, automatically selecting the optimizer.
 
     Uses DE for maser disk models with r+phi marginalization
@@ -1124,8 +1125,9 @@ def find_MAP(model, model_kwargs=None, seed=42,
     Drop-in replacement for ``find_initial_point``. Reads optimizer
     settings from ``model.config["optimise"]`` (optional).
 
-    ``checkpoint_dir``, ``checkpoint_path``, and ``resume_path`` are passed
-    through to the DE optimizer when DE is selected; Sobol+Adam ignores them.
+    ``checkpoint_dir``, ``checkpoint_path``, ``resume_path``, and
+    ``checkpoint_interval`` are passed through to the DE optimizer when DE is
+    selected; Sobol+Adam ignores them.
 
     Returns
     -------
@@ -1172,6 +1174,8 @@ def find_MAP(model, model_kwargs=None, seed=42,
             resume_path=resume_path,
             devices=opt_cfg.get("devices", "auto"),
         )
+        if checkpoint_interval is not None:
+            kwargs["checkpoint_interval"] = checkpoint_interval
         best_params, best_logp, results = de_optimize(model, **kwargs)
     else:
         kwargs = dict(

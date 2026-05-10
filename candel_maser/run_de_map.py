@@ -75,6 +75,8 @@ parser.add_argument("--devices", type=str, default=None,
                          "only when they are visible.")
 parser.add_argument("--resume", action="store_true",
                     help="Resume from latest checkpoint if one exists")
+parser.add_argument("--checkpoint-interval-minutes", type=float, default=15.0,
+                    help="Checkpoint interval in minutes (default: 15).")
 parser.add_argument("--f64", action="store_true", default=_enable_f64,
                     help="Enable JAX float64. Default is float32.")
 parser.add_argument("--no-ecc", action="store_true",
@@ -158,12 +160,15 @@ elif args.resume:
     fprint(f"--resume: no checkpoint found at {ckpt_path}, starting fresh")
 fprint(f"Checkpoints: {ckpt_dir}")
 fprint(f"Checkpoint file: {ckpt_path}")
+_checkpoint_interval_seconds = args.checkpoint_interval_minutes * 60.0
+fprint(f"Checkpoint interval: {args.checkpoint_interval_minutes:g} minutes")
 
 fsection(f"DE MAP optimization ({galaxy}, {data['n_spots']} spots)")
 t0 = time.time()
 init_params = find_MAP(model, model_kwargs={}, seed=seed,
                        checkpoint_dir=ckpt_dir, checkpoint_path=ckpt_path,
-                       resume_path=resume_path)
+                       resume_path=resume_path,
+                       checkpoint_interval=_checkpoint_interval_seconds)
 dt = time.time() - t0
 
 # ---- Print results ----

@@ -51,7 +51,7 @@ Options: `--mode {mode1|mode2}` (NSS/DE require mode2),
 `--f64` (explicit JAX float64; default is float32),
 `--init-method {config|median|sample}`,
 `--resume` (continue NUTS warmup/sampling or NSS/DE from the latest checkpoint),
-`--checkpoint-interval-minutes M` (NUTS only; per-chain checkpoints),
+`--checkpoint-interval-minutes M` (checkpoint interval; NUTS checkpoints are per-chain),
 `-q QUEUE` (default `gpulong`).
 
 ### `submit_ngc4258.sh` — NGC4258 NUTS

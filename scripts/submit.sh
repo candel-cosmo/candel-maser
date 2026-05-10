@@ -63,7 +63,9 @@ Options:
   --cpus N               CPU cores (default: 4 with --gpu)
   --gputype TYPE         GPU type (default: any; e.g. h100, l40s)
   --gpu-mem GB           Min GPU VRAM in GB (arc only; queries sinfo)
-  --time T               Wall time. Bare integer = hours (arc only).
+  --time T               Wall time. Bare integer = hours (arc only);
+                         decimals are invalid, use HH:MM:SS instead
+                         (e.g. 00:12:00 for 0.2 hours).
                          (default on arc: short=12, medium=48, long=required;
                           ignored on glamdring)
   --mem GB               Memory in GB (default: $MEM)
@@ -72,7 +74,7 @@ Options:
   --dry                  Print submit command without submitting (default: off)
   --resume               Resume from latest checkpoint (nuts/nss/de)
   --checkpoint-interval-minutes M
-                         NUTS checkpoint interval in minutes (default: 15)
+                         Checkpoint interval in minutes (default: 15)
   --f64                  Enable JAX float64 in the runner
                          (automatic for NGC4258 mode1)
   --max-retries N        Watch and resubmit up to N times on timeout
@@ -113,9 +115,6 @@ done
 if [[ "$SAMPLER" != "nss" && "$SAMPLER" != "nuts" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler is required (nss|nuts|de)"; exit 1
 fi
-if [[ -n "$CHECKPOINT_INTERVAL_MINUTES" && "$SAMPLER" != "nuts" ]]; then
-    echo "Error: --checkpoint-interval-minutes only applies with --sampler nuts."; exit 1
-fi
 if [[ -n "$DEVICES" && "$SAMPLER" != "nss" && "$SAMPLER" != "de" ]]; then
     echo "Error: --devices only applies with --sampler nss or --sampler de."; exit 1
 fi
@@ -144,7 +143,7 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     [[ -n "$DEVICES" ]]     && _cmd+=(--devices "$DEVICES")
     [[ -n "$INIT_METHOD" ]] && _cmd+=(--init-method "$INIT_METHOD")
     [[ -n "$R_ANG_INIT" ]]  && _cmd+=(--r-ang-init "$R_ANG_INIT")
-    [[ "$SAMPLER" == "nuts" && -n "$CHECKPOINT_INTERVAL_MINUTES" ]] && _cmd+=(--checkpoint-interval-minutes "$CHECKPOINT_INTERVAL_MINUTES")
+    [[ -n "$CHECKPOINT_INTERVAL_MINUTES" ]] && _cmd+=(--checkpoint-interval-minutes "$CHECKPOINT_INTERVAL_MINUTES")
     [[ -n "$GPUTYPE" ]]     && _cmd+=(--gputype "$GPUTYPE")
     [[ -n "$GPU_MEM" ]]     && _cmd+=(--gpu-mem "$GPU_MEM")
     [[ -n "$TIME" ]]        && _cmd+=(--time "$TIME")
@@ -208,7 +207,7 @@ EXTRA_ARGS=""
 [[ -n "$DEVICES" ]]     && EXTRA_ARGS="$EXTRA_ARGS --devices $DEVICES"
 [[ -n "$INIT_METHOD" ]] && EXTRA_ARGS="$EXTRA_ARGS --init-method $INIT_METHOD"
 [[ -n "$R_ANG_INIT" ]]  && EXTRA_ARGS="$EXTRA_ARGS --r-ang-init $R_ANG_INIT"
-[[ "$SAMPLER" == "nuts" && -n "$CHECKPOINT_INTERVAL_MINUTES" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint-interval-minutes $CHECKPOINT_INTERVAL_MINUTES"
+[[ -n "$CHECKPOINT_INTERVAL_MINUTES" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint-interval-minutes $CHECKPOINT_INTERVAL_MINUTES"
 $NO_ECC && EXTRA_ARGS="$EXTRA_ARGS --no-ecc"
 $NO_QUAD_WARP && EXTRA_ARGS="$EXTRA_ARGS --no-quadratic-warp"
 $F64 && EXTRA_ARGS="$EXTRA_ARGS --f64"
