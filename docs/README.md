@@ -87,12 +87,13 @@ per-device batch size.
 ### `toy_joint_H0.sh` — joint `H0` from saved per-galaxy posteriors
 
 Submits `toy_joint_H0.py` with 1000 warmup + 4000 samples × 8 chains on
-GPU. Produces a GetDist corner plot overlaying the with/without-selection
-runs.
+GPU. By default runs no selection, distance selection, and redshift selection.
+Passing `--selection` runs only that one configuration.
 
 ```bash
-bash scripts/megamaser/toy_joint_H0.sh              # volumetric D^2 prior
-bash scripts/megamaser/toy_joint_H0.sh --flat-dist  # flat D prior
+bash scripts/megamaser/toy_joint_H0.sh -q QUEUE                         # all three
+bash scripts/megamaser/toy_joint_H0.sh -q QUEUE --flat-dist             # all three, flat D prior
+bash scripts/megamaser/toy_joint_H0.sh -q QUEUE --selection redshift    # redshift only
 ```
 
 ### `python.sh`
