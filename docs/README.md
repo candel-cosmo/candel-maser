@@ -24,7 +24,7 @@ All settings (priors, sampler, grid sizes, per-galaxy overrides) live in
 |---|---|
 | `run_maser_disk.py` | Generic single-galaxy runner (NUTS or NSS). Driven by `config_maser.toml`. |
 | `run_n4258_mode1.py` | NGC4258 Mode 1 NUTS with dense 100k φ grid (no ecc, no quadratic warp). Historical/dev. |
-| `run_de_map.py` | DE MAP optimizer (mode2 only) for one galaxy, saves result to TOML. |
+| `run_de_map.py` | DE MAP optimizer (mode2 only) for one galaxy; prints TOML init values. |
 | `run_mock_maser.py` | Short single-mock closure test on one synthetic galaxy. |
 | `run_mock_maser_disk.py` | Batch mock closure tests over many seeds, with NUTS and KS-style summary. |
 | `toy_joint_H0.py` | Joint `H0` inference from per-galaxy NSS `D_c` posteriors via KDE + numpyro hierarchical model (with/without phenomenological selection). |

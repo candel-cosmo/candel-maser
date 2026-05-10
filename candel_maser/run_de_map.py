@@ -12,7 +12,7 @@
 # You should have received a copy of the GNU General Public License along
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-"""Run DE MAP optimization for a maser disk galaxy and save results to TOML.
+"""Run DE MAP optimization for a maser disk galaxy and print TOML init values.
 
 Usage:
     python run_de_map.py <galaxy_name> [--seed 42]
