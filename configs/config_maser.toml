@@ -39,6 +39,10 @@ n_live = 5000
 num_mcmc_steps = 0
 num_delete = 5
 termination = -3
+max_steps = 10
+max_shrinkage = 100
+stale_retries = 1
+cov_jitter = 1e-6
 
 [model]
 Om = 0.315
