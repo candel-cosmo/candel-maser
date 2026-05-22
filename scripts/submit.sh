@@ -22,14 +22,16 @@ DEVICES=""
 GPUTYPE=""
 GPU_MEM=""
 TIME=""
-MEM=7
+MEM=16
 CPUS=""
 DRY=false
 _WATCH_RETRIES=""
 _WATCH_POLL=""
 RESUME=false
 NO_ECC=false
+ADD_ECC=false
 NO_QUAD_WARP=false
+ADD_QUAD_WARP=false
 F64=false
 
 ALL_GALS="CGCG074-064 NGC4258 NGC5765b NGC6264 NGC6323 UGC3789"
@@ -70,7 +72,9 @@ Options:
                           ignored on glamdring)
   --mem GB               Memory in GB (default: $MEM)
   --no-ecc               Disable eccentricity model
+  --add-ecc              Enable eccentricity model
   --no-quadratic-warp    Disable quadratic disk warp
+  --add-quadratic        Enable quadratic disk warp
   --dry                  Print submit command without submitting (default: off)
   --resume               Resume from latest checkpoint (nuts/nss/de)
   --checkpoint-interval-minutes M
@@ -101,7 +105,9 @@ while [[ $# -gt 0 ]]; do
         --mem) MEM="$2"; shift 2 ;;
         --cpus) CPUS="$2"; shift 2 ;;
         --no-ecc) NO_ECC=true; shift ;;
+        --add-ecc|-add-ecc) ADD_ECC=true; shift ;;
         --no-quadratic-warp) NO_QUAD_WARP=true; shift ;;
+        --add-quadratic|--add-quadratic-warp|-add-quadratic) ADD_QUAD_WARP=true; shift ;;
         --dry) DRY=true; shift ;;
         --resume) RESUME=true; shift ;;
         --f64) F64=true; shift ;;
@@ -118,9 +124,17 @@ fi
 if [[ -n "$DEVICES" && "$SAMPLER" != "nss" && "$SAMPLER" != "de" ]]; then
     echo "Error: --devices only applies with --sampler nss or --sampler de."; exit 1
 fi
+if $NO_ECC && $ADD_ECC; then
+    echo "Error: --no-ecc and --add-ecc are mutually exclusive."; exit 1
+fi
+if $NO_QUAD_WARP && $ADD_QUAD_WARP; then
+    echo "Error: --no-quadratic-warp and --add-quadratic are mutually exclusive."; exit 1
+fi
 JOB_TAG=""
 $NO_ECC && JOB_TAG="${JOB_TAG}_noecc"
+$ADD_ECC && JOB_TAG="${JOB_TAG}_ecc"
 $NO_QUAD_WARP && JOB_TAG="${JOB_TAG}_noqw"
+$ADD_QUAD_WARP && JOB_TAG="${JOB_TAG}_qw"
 
 # If --max-retries is set, delegate to the watcher and exit. One watcher
 # per galaxy so each retries independently as soon as its own job ends.
@@ -150,7 +164,9 @@ if [[ -n "$_WATCH_RETRIES" ]]; then
     [[ -n "$CPUS" ]]        && _cmd+=(--cpus "$CPUS")
     [[ "$NUM_CHAINS" != "1" ]] && _cmd+=(--num-chains "$NUM_CHAINS")
     $NO_ECC && _cmd+=(--no-ecc)
+    $ADD_ECC && _cmd+=(--add-ecc)
     $NO_QUAD_WARP && _cmd+=(--no-quadratic-warp)
+    $ADD_QUAD_WARP && _cmd+=(--add-quadratic)
     $F64 && _cmd+=(--f64)
     $DRY && _cmd+=(--dry)
     $RESUME && _cmd+=(--resume)
@@ -209,7 +225,9 @@ EXTRA_ARGS=""
 [[ -n "$R_ANG_INIT" ]]  && EXTRA_ARGS="$EXTRA_ARGS --r-ang-init $R_ANG_INIT"
 [[ -n "$CHECKPOINT_INTERVAL_MINUTES" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint-interval-minutes $CHECKPOINT_INTERVAL_MINUTES"
 $NO_ECC && EXTRA_ARGS="$EXTRA_ARGS --no-ecc"
+$ADD_ECC && EXTRA_ARGS="$EXTRA_ARGS --add-ecc"
 $NO_QUAD_WARP && EXTRA_ARGS="$EXTRA_ARGS --no-quadratic-warp"
+$ADD_QUAD_WARP && EXTRA_ARGS="$EXTRA_ARGS --add-quadratic"
 $F64 && EXTRA_ARGS="$EXTRA_ARGS --f64"
 $RESUME && EXTRA_ARGS="$EXTRA_ARGS --resume"
 
