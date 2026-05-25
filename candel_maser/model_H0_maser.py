@@ -68,7 +68,7 @@ from .base_model import ModelBase
 from .integration import ln_trapz_precomputed, trapz_log_weights
 from .optim1d import brent_1d
 from .pv_utils import rsample
-from .utils import normal_logpdf_var
+from .utils import load_priors, normal_logpdf_var
 
 # -----------------------------------------------------------------------
 # Disk physics constants
@@ -375,7 +375,17 @@ class MaserDiskModel(ModelBase):
     # ---- priors / per-galaxy ----
 
     def _resolve_per_galaxy_priors(self, data):
-        """Set per-galaxy D prior from data dict."""
+        """Set per-galaxy D prior and optional prior overrides."""
+        gname = data.get("galaxy_name")
+        gal_cfg = get_nested(self.config, f"model/galaxies/{gname}", {})
+        gal_priors = gal_cfg.get("priors", {})
+        if gal_priors:
+            priors, prior_dist_name = load_priors(gal_priors)
+            self.priors.update(priors)
+            self.prior_dist_name.update(prior_dist_name)
+            fprint(f"prior overrides for {gname}: "
+                   f"{', '.join(sorted(gal_priors))}")
+
         self._D_c_volume = False
         if "D_lo" in data and "D_hi" in data:
             lo, hi = float(data["D_lo"]), float(data["D_hi"])

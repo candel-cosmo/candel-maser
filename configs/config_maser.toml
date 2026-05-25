@@ -351,6 +351,16 @@ v_sys_obs = 7662
 D_lo = 60.0
 D_hi = 350.0
 
+[model.galaxies.NGC6323.priors.d2i_dr2]
+dist = "uniform"
+low = -180.0
+high = 180.0
+
+[model.galaxies.NGC6323.priors.d2Omega_dr2]
+dist = "uniform"
+low = -180.0
+high = 180.0
+
 [model.galaxies.NGC6323.init]
 D_c = 129.6377
 Omega0 = 189.5884
