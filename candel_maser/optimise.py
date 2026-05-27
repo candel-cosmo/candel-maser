@@ -130,36 +130,52 @@ def _get_bounds_from_trace(model, model_args, model_kwargs, sobol_n_sigma=5,
 # -----------------------------------------------------------------------
 
 
-def _build_logp_flat(model, model_args, model_kwargs, names, sizes):
+def _build_logp_flat(model, model_args, model_kwargs, names, sizes,
+                     dynamic_model_kwargs=False):
     """Build a flat-vector log-density function in constrained space."""
-    def logp(x):
+    def _logp(x, kwargs):
         params = {}
         offset = 0
         for name, size in zip(names, sizes):
             params[name] = x[offset:offset + size].reshape(()) \
                 if size == 1 else x[offset:offset + size]
             offset += size
-        ld, _ = log_density(model, model_args, model_kwargs, params)
+        ld, _ = log_density(model, model_args, kwargs, params)
         return ld
+
+    if dynamic_model_kwargs:
+        return _logp
+
+    def logp(x):
+        return _logp(x, model_kwargs)
+
     return logp
 
 
-def _build_neg_potential_flat(model, model_args, model_kwargs, names, sizes):
+def _build_neg_potential_flat(model, model_args, model_kwargs, names, sizes,
+                              dynamic_model_kwargs=False):
     """Build a flat-vector negative potential energy in unconstrained space.
 
     Uses ``potential_energy`` which automatically includes the Jacobian
     correction for the constrained->unconstrained bijection.
     Returns -U(z) = log p(constrain(z)) + log|det J|.
     """
-    def neg_U(z):
+    def _neg_U(z, kwargs):
         params = {}
         offset = 0
         for name, size in zip(names, sizes):
             params[name] = z[offset:offset + size].reshape(()) \
                 if size == 1 else z[offset:offset + size]
             offset += size
-        U = potential_energy(model, model_args, model_kwargs, params)
+        U = potential_energy(model, model_args, kwargs, params)
         return -U
+
+    if dynamic_model_kwargs:
+        return _neg_U
+
+    def neg_U(z):
+        return _neg_U(z, model_kwargs)
+
     return neg_U
 
 
@@ -394,7 +410,7 @@ def _print_modes(modes, names, sizes, max_params=20):
 
 
 def _run_adam(z0, neg_U_fn, n_steps, lr, lr_end, n_restarts, seed,
-              verbose):
+              verbose, model_kwargs=None, dynamic_model_kwargs=False):
     """Run parallel Adam optimization in unconstrained space.
 
     Full state reset (m_t, v_t) at each warm restart prevents stale
@@ -410,7 +426,13 @@ def _run_adam(z0, neg_U_fn, n_steps, lr, lr_end, n_restarts, seed,
             "`pip install optax`."
         ) from e
 
-    neg_U_batch = jax.jit(jax.vmap(neg_U_fn))
+    if dynamic_model_kwargs:
+        neg_U_batch_raw = jax.jit(jax.vmap(neg_U_fn, in_axes=(0, None)))
+
+        def neg_U_batch(z):
+            return neg_U_batch_raw(z, model_kwargs)
+    else:
+        neg_U_batch = jax.jit(jax.vmap(neg_U_fn))
     steps_per_cycle = n_steps // n_restarts
 
     def _make_optimizer(lr_init):
@@ -421,20 +443,33 @@ def _run_adam(z0, neg_U_fn, n_steps, lr, lr_end, n_restarts, seed,
 
     optimizer = _make_optimizer(lr)
 
-    @jax.jit
-    def step(z, opt_state):
-        def _single(zi, osi):
-            g = jax.grad(lambda zz: -neg_U_fn(zz))(zi)
-            updates, new_osi = optimizer.update(g, osi)
-            zi_new = optax.apply_updates(zi, updates)
-            return zi_new, new_osi
-        return jax.vmap(_single)(z, opt_state)
+    if dynamic_model_kwargs:
+        @jax.jit
+        def step(z, opt_state, kwargs):
+            def _single(zi, osi):
+                g = jax.grad(lambda zz: -neg_U_fn(zz, kwargs))(zi)
+                updates, new_osi = optimizer.update(g, osi)
+                zi_new = optax.apply_updates(zi, updates)
+                return zi_new, new_osi
+            return jax.vmap(_single)(z, opt_state)
+    else:
+        @jax.jit
+        def step(z, opt_state):
+            def _single(zi, osi):
+                g = jax.grad(lambda zz: -neg_U_fn(zz))(zi)
+                updates, new_osi = optimizer.update(g, osi)
+                zi_new = optax.apply_updates(zi, updates)
+                return zi_new, new_osi
+            return jax.vmap(_single)(z, opt_state)
 
     opt_state = jax.vmap(optimizer.init)(z0)
 
     # Compile
     t0 = time.time()
-    z_cur, opt_state = step(z0, opt_state)
+    if dynamic_model_kwargs:
+        z_cur, opt_state = step(z0, opt_state, model_kwargs)
+    else:
+        z_cur, opt_state = step(z0, opt_state)
     jax.block_until_ready(z_cur)
     if verbose:
         fprint(f"Adam JIT compiled in {time.time() - t0:.1f}s "
@@ -458,7 +493,10 @@ def _run_adam(z0, neg_U_fn, n_steps, lr, lr_end, n_restarts, seed,
         pbar = trange(start_step, end_step, desc=desc, disable=not verbose)
 
         for s in pbar:
-            z_cur, opt_state = step(z_cur, opt_state)
+            if dynamic_model_kwargs:
+                z_cur, opt_state = step(z_cur, opt_state, model_kwargs)
+            else:
+                z_cur, opt_state = step(z_cur, opt_state)
             if (s + 1) % 100 == 0:
                 jax.block_until_ready(z_cur)
                 negU_now = np.asarray(neg_U_batch(z_cur))
@@ -491,7 +529,8 @@ def sobol_optimize(model, model_args=(), model_kwargs=None,
                    log2_N=14, M=10, n_steps=5000,
                    lr=0.1, lr_end=0.005, n_restarts=3,
                    sobol_n_sigma=1, sobol_batch=1024,
-                   min_dist_frac=0.01, seed=42, verbose=True):
+                   min_dist_frac=0.01, seed=42, verbose=True,
+                   dynamic_model_kwargs=False):
     """Multi-start MAP optimizer: Sobol survey + parallel Adam.
 
     Optimization runs in **unconstrained space** using NumPyro's bijective
@@ -530,6 +569,9 @@ def sobol_optimize(model, model_args=(), model_kwargs=None,
         Random seed.
     verbose : bool
         Print progress.
+    dynamic_model_kwargs : bool
+        Pass ``model_kwargs`` as dynamic JAX arguments instead of closing over
+        them in JIT-compiled model evaluations.
 
     Returns
     -------
@@ -566,22 +608,51 @@ def sobol_optimize(model, model_args=(), model_kwargs=None,
 
     # --- Build log-density functions ---
     logp_fn = _build_logp_flat(
-        model, model_args, model_kwargs, names, sizes)
-    logp_batch = jax.jit(jax.vmap(logp_fn))
+        model, model_args, model_kwargs, names, sizes,
+        dynamic_model_kwargs=dynamic_model_kwargs)
+    if dynamic_model_kwargs:
+        logp_batch_raw = jax.jit(jax.vmap(logp_fn, in_axes=(0, None)))
+
+        def logp_batch(x):
+            return logp_batch_raw(x, model_kwargs)
+    else:
+        logp_batch = jax.jit(jax.vmap(logp_fn))
 
     neg_U_fn = _build_neg_potential_flat(
-        model, model_args, model_kwargs, names, sizes)
+        model, model_args, model_kwargs, names, sizes,
+        dynamic_model_kwargs=dynamic_model_kwargs)
 
     # Vectorized constrained <-> unconstrained transforms
-    def _to_unconst(x):
-        return _unconstrain_flat(
-            x, model, model_args, model_kwargs, names, sizes)
+    if dynamic_model_kwargs:
+        def _to_unconst(x, kwargs):
+            return _unconstrain_flat(
+                x, model, model_args, kwargs, names, sizes)
 
-    def _to_const(z):
-        return _constrain_flat(
-            z, model, model_args, model_kwargs, names, sizes)
-    to_unconst_batch = jax.jit(jax.vmap(_to_unconst))
-    to_const_batch = jax.jit(jax.vmap(_to_const))
+        def _to_const(z, kwargs):
+            return _constrain_flat(
+                z, model, model_args, kwargs, names, sizes)
+
+        to_unconst_batch_raw = jax.jit(
+            jax.vmap(_to_unconst, in_axes=(0, None)))
+        to_const_batch_raw = jax.jit(
+            jax.vmap(_to_const, in_axes=(0, None)))
+
+        def to_unconst_batch(x):
+            return to_unconst_batch_raw(x, model_kwargs)
+
+        def to_const_batch(z):
+            return to_const_batch_raw(z, model_kwargs)
+    else:
+        def _to_unconst(x):
+            return _unconstrain_flat(
+                x, model, model_args, model_kwargs, names, sizes)
+
+        def _to_const(z):
+            return _constrain_flat(
+                z, model, model_args, model_kwargs, names, sizes)
+
+        to_unconst_batch = jax.jit(jax.vmap(_to_unconst))
+        to_const_batch = jax.jit(jax.vmap(_to_const))
 
     # --- Compile ---
     t0 = time.time()
@@ -636,13 +707,20 @@ def sobol_optimize(model, model_args=(), model_kwargs=None,
     # --- Run optimizer ---
     z_final = _run_adam(
         z0, neg_U_fn, n_steps=n_steps, lr=lr, lr_end=lr_end,
-        n_restarts=n_restarts, seed=seed, verbose=verbose)
+        n_restarts=n_restarts, seed=seed, verbose=verbose,
+        model_kwargs=model_kwargs, dynamic_model_kwargs=dynamic_model_kwargs)
 
     # --- Transform back to constrained space ---
     x_final = np.asarray(to_const_batch(z_final))
 
     # Evaluate both constrained logP and unconstrained -U
-    neg_U_batch = jax.jit(jax.vmap(neg_U_fn))
+    if dynamic_model_kwargs:
+        neg_U_batch_raw = jax.jit(jax.vmap(neg_U_fn, in_axes=(0, None)))
+
+        def neg_U_batch(z):
+            return neg_U_batch_raw(z, model_kwargs)
+    else:
+        neg_U_batch = jax.jit(jax.vmap(neg_U_fn))
     logp_final = np.asarray(logp_batch(jnp.array(x_final)))
     negU_final = np.asarray(neg_U_batch(z_final))
 
@@ -750,7 +828,8 @@ def de_optimize(model, model_args=(), model_kwargs=None,
                 sobol_bounds_override=None,
                 log_every=100, seed=42, verbose=True,
                 checkpoint_dir=None, checkpoint_path=None, resume_path=None,
-                checkpoint_interval=900, devices="auto"):
+                checkpoint_interval=900, devices="auto",
+                dynamic_model_kwargs=False):
     """Derivative-free MAP optimizer using Differential Evolution.
 
     Strategy:
@@ -814,6 +893,9 @@ def de_optimize(model, model_args=(), model_kwargs=None,
         Number of visible local devices to use for population-axis fitness
         evaluation. ``"auto"`` uses all non-CPU local devices only when more
         than one is visible; otherwise the original single-device path is used.
+    dynamic_model_kwargs : bool
+        Pass ``model_kwargs`` as dynamic JAX arguments instead of closing over
+        them in JIT-compiled model evaluations.
 
     Returns
     -------
@@ -880,11 +962,22 @@ def de_optimize(model, model_args=(), model_kwargs=None,
 
     # Build log-density (scalar logp_fn for progress logging; batched
     # fitness for Sobol survey + DE loop — single JIT compilation).
-    logp_fn = _build_logp_flat(model, model_args, model_kwargs, names, sizes)
+    logp_fn = _build_logp_flat(
+        model, model_args, model_kwargs, names, sizes,
+        dynamic_model_kwargs=dynamic_model_kwargs)
+    if dynamic_model_kwargs:
+        def logp_eval(x):
+            return logp_fn(x, model_kwargs)
 
-    def _fitness_single(x_normed):
-        x = lo + x_normed * scale
-        return -logp_fn(x)
+        def _fitness_single(x_normed, kwargs):
+            x = lo + x_normed * scale
+            return -logp_fn(x, kwargs)
+    else:
+        logp_eval = logp_fn
+
+        def _fitness_single(x_normed):
+            x = lo + x_normed * scale
+            return -logp_fn(x)
 
     local_devices = _resolve_devices(devices)
     use_pmap = len(local_devices) > 1
@@ -893,15 +986,24 @@ def de_optimize(model, model_args=(), model_kwargs=None,
         mesh = jax.sharding.Mesh(np.asarray(local_devices), ("device",))
         pmap_input_sharding = jax.sharding.NamedSharding(
             mesh, jax.sharding.PartitionSpec("device"))
-        _fitness_pmap = jax.pmap(
-            jax.vmap(_fitness_single), devices=local_devices)
+        if dynamic_model_kwargs:
+            _fitness_pmap = jax.pmap(
+                jax.vmap(_fitness_single, in_axes=(0, None)),
+                in_axes=(0, None), devices=local_devices)
+        else:
+            _fitness_pmap = jax.pmap(
+                jax.vmap(_fitness_single), devices=local_devices)
         if verbose:
             fprint("DE: population fitness sharded over "
                    f"{n_devices} local devices "
                    f"({eval_chunk}/device, "
                    f"{eval_chunk * n_devices} total/chunk).")
     else:
-        _fitness_raw = jax.jit(jax.vmap(_fitness_single))
+        if dynamic_model_kwargs:
+            _fitness_raw = jax.jit(
+                jax.vmap(_fitness_single, in_axes=(0, None)))
+        else:
+            _fitness_raw = jax.jit(jax.vmap(_fitness_single))
         if verbose:
             fprint("DE: single-device population fitness evaluation")
 
@@ -916,7 +1018,10 @@ def de_optimize(model, model_args=(), model_kwargs=None,
         parts = []
         for i in trange(0, x.shape[0], chunk, total=n_chunks,
                         desc=desc, disable=(desc is None or not verbose)):
-            parts.append(fn(x[i:i + chunk]))
+            if dynamic_model_kwargs:
+                parts.append(fn(x[i:i + chunk], model_kwargs))
+            else:
+                parts.append(fn(x[i:i + chunk]))
             jax.block_until_ready(parts[-1])
         out = jnp.concatenate(parts)
         return out[:n]
@@ -937,7 +1042,10 @@ def de_optimize(model, model_args=(), model_kwargs=None,
                 (n_devices, chunk) + x.shape[1:])
             xb = np.asarray(jax.device_get(xb))
             xb = jax.device_put(xb, pmap_input_sharding)
-            yb = fn(xb).reshape((block,))
+            if dynamic_model_kwargs:
+                yb = fn(xb, model_kwargs).reshape((block,))
+            else:
+                yb = fn(xb).reshape((block,))
             parts.append(yb)
             jax.block_until_ready(parts[-1])
         out = jnp.concatenate(parts)
@@ -1042,7 +1150,7 @@ def de_optimize(model, model_args=(), model_kwargs=None,
 
         if verbose and (gen + 1) % log_every == 0:
             x_best = np.asarray(lo + state.best_solution * scale)
-            true_logp = float(logp_fn(jnp.array(x_best)))
+            true_logp = float(logp_eval(jnp.array(x_best)))
             fprint(f"  gen {gen+1:5d}: logP = {true_logp:.2f}, "
                    f"stale = {gens_without_improvement}/{patience}")
             offset = 0
@@ -1073,7 +1181,7 @@ def de_optimize(model, model_args=(), model_kwargs=None,
 
     # Extract best
     x_best = np.asarray(lo + state.best_solution * scale)
-    best_logp = float(logp_fn(jnp.array(x_best)))
+    best_logp = float(logp_eval(jnp.array(x_best)))
     best_params = _flat_to_dict(jnp.array(x_best), names, sizes)
     best_params = {
         k: float(v) if jnp.ndim(v) == 0 else v
@@ -1115,7 +1223,7 @@ def _use_de(model):
 
 def find_MAP(model, model_kwargs=None, seed=42,
              checkpoint_dir=None, checkpoint_path=None, resume_path=None,
-             checkpoint_interval=None):
+             checkpoint_interval=None, dynamic_model_kwargs=False):
     """Find MAP estimate, automatically selecting the optimizer.
 
     Uses DE for maser disk models with r+phi marginalization
@@ -1128,6 +1236,7 @@ def find_MAP(model, model_kwargs=None, seed=42,
     ``checkpoint_dir``, ``checkpoint_path``, ``resume_path``, and
     ``checkpoint_interval`` are passed through to the DE optimizer when DE is
     selected; Sobol+Adam ignores them.
+    ``dynamic_model_kwargs`` passes model kwargs as dynamic JAX arguments.
 
     Returns
     -------
@@ -1173,6 +1282,7 @@ def find_MAP(model, model_kwargs=None, seed=42,
             checkpoint_path=checkpoint_path,
             resume_path=resume_path,
             devices=opt_cfg.get("devices", "auto"),
+            dynamic_model_kwargs=dynamic_model_kwargs,
         )
         if checkpoint_interval is not None:
             kwargs["checkpoint_interval"] = checkpoint_interval
@@ -1190,6 +1300,7 @@ def find_MAP(model, model_kwargs=None, seed=42,
             sobol_batch=opt_cfg.get("sobol_batch", 128),
             min_dist_frac=opt_cfg.get("min_dist_frac", 0.01),
             seed=seed,
+            dynamic_model_kwargs=dynamic_model_kwargs,
         )
         best_params, best_logp, results = sobol_optimize(model, **kwargs)
 
