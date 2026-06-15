@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Submit BlackJAX Gibbs sampler or DE MAP megamaser jobs.
+# Submit BlackJAX Gibbs sampler or profiled MAP megamaser jobs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -22,7 +22,7 @@ ALL_GALS="CGCG074-064 NGC4258 NGC5765b NGC6264 NGC6323 UGC3789"
 
 usage() {
     cat <<EOF
-Usage: $0 (--local | -q QUEUE) --galaxy GAL[,GAL,...] [--sampler gibbs|de] [options]
+Usage: $0 (--local | -q QUEUE) --galaxy GAL[,GAL,...] [--sampler gibbs|de|lbfgs] [options]
 
 Required:
   --local                Run in the current terminal instead of submitting
@@ -32,17 +32,24 @@ Required:
                          arc: short|medium|long).
   --galaxy GAL[,GAL,...] Galaxy/galaxies to submit.
                          Choices: $ALL_GALS
-  --sampler gibbs|de     Job type (default: gibbs).
+  --sampler gibbs|de|lbfgs
+                         Job type (default: gibbs).
 
-Gibbs options passed to run_maser.py:
-  --num-warmup N
-  --num-samples N
-  --n-inner N
+Common options passed to run_maser.py:
   --seed N
   --spot-batch N
   --n-sys N
   --n-red N
   --n-blue N
+  --no-ecc | --add-ecc
+  --no-quadratic-warp | --add-quadratic-warp
+  --mass-parameterization eta|log_mbh
+  --f64
+
+Gibbs options passed to run_maser.py:
+  --num-warmup N
+  --num-samples N
+  --n-inner N
   --target-accept-nuts X
   --target-accept-r X
   --initial-step-size X
@@ -50,9 +57,7 @@ Gibbs options passed to run_maser.py:
   --diagonal-mass
   --no-progress
   --no-jit-steps
-  --no-ecc | --add-ecc
-  --no-quadratic-warp | --add-quadratic-warp
-  --f64
+  --output PATH
 
 DE options passed to run_maser.py --sampler de:
   --resume
@@ -62,6 +67,17 @@ DE options passed to run_maser.py --sampler de:
   --max-generations N
   --patience N
   --eval-chunk N
+  --log-every N
+
+Profile L-BFGS options passed to run_maser.py --sampler lbfgs:
+  --lbfgs-maxiter N
+  --lbfgs-ftol X
+  --lbfgs-gtol X
+  --lbfgs-maxls N
+  --lbfgs-n-starts N
+  --lbfgs-sobol-candidates N
+  --lbfgs-start-strategy sobol|random|jitter
+  --lbfgs-jitter-scale X
 
 Cluster options:
   --cpus N
@@ -87,7 +103,7 @@ while [[ $# -gt 0 ]]; do
         --local) LOCAL=true; shift ;;
         --dry) DRY=true; shift ;;
         --f64) EXTRA_ARGS+=("--f64"); shift ;;
-        --num-warmup|--num-samples|--n-inner|--seed|--spot-batch|--n-sys|--n-red|--n-blue|--target-accept-nuts|--target-accept-r|--initial-step-size|--max-tree-depth|--checkpoint-interval-minutes|--log2-N|--pop-size|--max-generations|--patience|--eval-chunk)
+        --num-warmup|--num-samples|--n-inner|--seed|--spot-batch|--n-sys|--n-red|--n-blue|--target-accept-nuts|--target-accept-r|--initial-step-size|--max-tree-depth|--output|--checkpoint-interval-minutes|--log2-N|--pop-size|--max-generations|--patience|--eval-chunk|--log-every|--lbfgs-maxiter|--lbfgs-ftol|--lbfgs-gtol|--lbfgs-maxls|--lbfgs-n-starts|--lbfgs-sobol-candidates|--lbfgs-start-strategy|--lbfgs-jitter-scale|--mass-parameterization)
             EXTRA_ARGS+=("$1" "$2"); shift 2 ;;
         --diagonal-mass|--no-progress|--no-jit-steps|--no-ecc|--add-ecc|--no-quadratic-warp|--add-quadratic-warp|--resume)
             EXTRA_ARGS+=("$1"); shift ;;
@@ -99,8 +115,8 @@ done
 if [[ -z "$GALAXY" ]]; then
     echo "[ERROR] --galaxy is required. Choices: $ALL_GALS"; exit 1
 fi
-if [[ "$SAMPLER" != "gibbs" && "$SAMPLER" != "de" ]]; then
-    echo "[ERROR] --sampler must be gibbs or de"; exit 1
+if [[ "$SAMPLER" != "gibbs" && "$SAMPLER" != "de" && "$SAMPLER" != "lbfgs" ]]; then
+    echo "[ERROR] --sampler must be gibbs, de, or lbfgs"; exit 1
 fi
 if [[ "$LOCAL" == false && -z "$QUEUE" ]]; then
     echo "[ERROR] pass --local or -q QUEUE (cluster=$CANDEL_CLUSTER)"; exit 1
@@ -114,11 +130,11 @@ for gal in $GALAXY; do
 done
 
 RUNNER="$ROOT/scripts/megamaser/run_maser.py"
-if [[ "$SAMPLER" == "de" ]]; then
-    JOB_PREFIX="maser_de"
-else
-    JOB_PREFIX="maser_gibbs"
-fi
+case "$SAMPLER" in
+    de) JOB_PREFIX="maser_de" ;;
+    lbfgs) JOB_PREFIX="maser_lbfgs" ;;
+    *) JOB_PREFIX="maser_gibbs" ;;
+esac
 dry_flag=()
 [[ "$DRY" == true ]] && dry_flag=(--dry)
 
@@ -131,7 +147,10 @@ extra_flags=()
 for gal in $GALAXY; do
     if [[ "$LOCAL" == true ]]; then
         echo "Running $gal ($SAMPLER) locally"
-        cmd=("$CANDEL_PYTHON" -u "$RUNNER" "$gal" --sampler "$SAMPLER" "${EXTRA_ARGS[@]}")
+        cmd=("$CANDEL_PYTHON" -u "$RUNNER" "$gal" --sampler "$SAMPLER")
+        if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+            cmd+=("${EXTRA_ARGS[@]}")
+        fi
         if [[ "$DRY" == true ]]; then
             printf '[dry]'; printf ' %q' "${cmd[@]}"; printf '\n'
         else
@@ -141,7 +160,10 @@ for gal in $GALAXY; do
     fi
 
     echo "Submitting $gal ($SAMPLER) -> $CANDEL_CLUSTER:$QUEUE"
-    pycmd="$CANDEL_PYTHON -u $RUNNER $gal --sampler $SAMPLER ${EXTRA_ARGS[*]}"
+    pycmd="$CANDEL_PYTHON -u $RUNNER $gal --sampler $SAMPLER"
+    if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+        pycmd+=" ${EXTRA_ARGS[*]}"
+    fi
     submit_args=(--gpu --queue "$QUEUE" --mem "$MEM"
                  --name "${JOB_PREFIX}_${gal}")
     if [[ ${#extra_flags[@]} -gt 0 ]]; then

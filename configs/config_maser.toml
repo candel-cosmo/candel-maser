@@ -346,12 +346,12 @@ n_phi = 50001
 spot_batch = 4
 
 [optimise]
-log2_N = 12
-pop_size = 128
-max_generations = 300
-patience = 40
-eval_chunk = 10
-log_every = 5
+log2_N = 16
+pop_size = 1000
+max_generations = 5000
+patience = 100
+eval_chunk = 5
+log_every = 1
 sobol_n_sigma = 5
 min_dist_frac = 0.005
 H0_for_D_estimate = 70.0
