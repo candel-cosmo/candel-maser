@@ -24,7 +24,7 @@ import tomli
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
-from candel.model.maser_convergence import build_model
+from convergence_utils import build_model
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
 DEFAULT_GALAXIES = ["UGC3789", "NGC6323"]
