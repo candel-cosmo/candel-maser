@@ -2,9 +2,11 @@
 seed = 42
 num_warmup = 2500
 num_samples = 2000
+init_strategy = "config"
+init_num_samples = 100
 n_inner = 25
 max_tree_depth = 10
-target_accept_prob = 0.8
+target_accept_prob = 0.9
 target_accept_r = 0.44
 blackjax_initial_step_size = 0.01
 
@@ -245,7 +247,7 @@ y0 = -99.28
 ra = 254.3172
 dec = 27.8496
 v_sys_obs = 10145
-D_lo = 70.0
+D_lo = 30.0
 D_hi = 500.0
 
 [model.galaxies.NGC6264.init]
@@ -338,6 +340,7 @@ pop_size = 1000
 max_generations = 5000
 patience = 100
 eval_chunk = 5
+log_every = 1
 sobol_n_sigma = 5
 min_dist_frac = 0.005
 H0_for_D_estimate = 70.0
