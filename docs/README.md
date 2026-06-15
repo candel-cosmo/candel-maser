@@ -60,7 +60,7 @@ conditional_spot_batch = 16
 
 `n_phi_*` controls the numerical `phi` marginalisation. `n_r_local`, `n_r_global`, and `conditional_spot_batch` are used by the DE initialiser and conditional-`r` diagnostics; production Gibbs sampling still samples `r_ang` directly.
 
-The `[convergence.*]` blocks provide high-resolution numerical references for the diagnostic scripts.
+The `[convergence.fixed_r_*]` blocks provide high-resolution numerical references for the phi-marginal diagnostic scripts.
 
 ## Numerical Diagnostics
 
@@ -68,7 +68,6 @@ Numerical diagnostic scripts:
 
 ```bash
 python scripts/megamaser/convergence/convergence_phi_marginal.py --galaxies NGC6264 --no-grad
-python scripts/megamaser/convergence/convergence_grids.py --galaxies NGC6264 --timing-attempts 0
 python scripts/megamaser/convergence/check_conditional_r_grad_vs_numerical.py --galaxy NGC6264
 python scripts/megamaser/convergence/r_ang_posteriors.py --galaxies NGC6264
 python scripts/megamaser/convergence/check_conditional_r_delta.py --galaxies NGC6264
