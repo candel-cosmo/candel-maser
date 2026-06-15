@@ -15,6 +15,7 @@ Om = 0.315
 use_selection = false
 sigma_v_default = 0.25
 D_c_prior = "uniform"
+mass_parameterization = "eta"  # choices: "eta", "log_mbh"
 R_phys_lo = 0.01
 R_phys_hi = 1.5
 
@@ -35,8 +36,8 @@ phi_sys_ranges_deg = [[-45, 45], [135, 225]]
 n_phi_sys = 5001
 
 # Conditional r_ang MAP grid used by the DE objective and numerical
-# quadrature diagnostics. The production sampler still samples r_ang
-# directly with Gibbs steps.
+# quadrature diagnostics. The production Gibbs sampler samples the
+# non-centred log residual z_r = log(r_ang / r_hat(theta)).
 n_r_local = 256
 n_r_global = 128
 K_sigma = 10.0
@@ -168,6 +169,8 @@ D_hi = 150.0
 [model.galaxies.CGCG074-064.init]
 D_c = 88.2221
 Omega0 = 101.4636
+d2Omega_dr2 = 0.0
+d2i_dr2 = 0.0
 dOmega_dr = 4.8959
 di_dr = -1.855
 dv_sys = -265.5803
@@ -202,8 +205,8 @@ conditional_spot_batch = 4
 [model.galaxies.NGC4258.init]
 D_c = 7.6368
 Omega0 = 88.5123
-d2Omega_dr2 = -0.1565
-d2i_dr2 = 0.2354
+d2Omega_dr2 = 0.0
+d2i_dr2 = 0.0
 dOmega_dr = 2.2066
 di_dr = -1.5802
 dperiapsis_dr = 3.6712
@@ -230,6 +233,8 @@ D_hi = 200.0
 [model.galaxies.NGC5765b.init]
 D_c = 122.7176
 Omega0 = 146.8322
+d2Omega_dr2 = 0.0
+d2i_dr2 = 0.0
 dOmega_dr = -3.3126
 di_dr = 11.5741
 dv_sys = -131.1841
@@ -253,6 +258,8 @@ D_hi = 500.0
 [model.galaxies.NGC6264.init]
 D_c = 154.3069
 Omega0 = 94.2149
+d2Omega_dr2 = 0.0
+d2i_dr2 = 0.0
 dOmega_dr = 18.4328
 di_dr = -1.2724
 dv_sys = 66.3185
@@ -270,8 +277,8 @@ y0 = 6.9434
 ra = 258.32519
 dec = 43.78244
 v_sys_obs = 7662
-D_lo = 60.0
-D_hi = 350.0
+D_lo = 30.0
+D_hi = 500.0
 
 [model.galaxies.NGC6323.priors.d2i_dr2]
 dist = "uniform"
@@ -286,6 +293,8 @@ high = 180.0
 [model.galaxies.NGC6323.init]
 D_c = 129.6377
 Omega0 = 189.5884
+d2Omega_dr2 = 0.0
+d2i_dr2 = 0.0
 dOmega_dr = 13.7816
 di_dr = -1.1462
 dv_sys = 190.7366
@@ -313,6 +322,8 @@ n_phi_sys = 5001
 [model.galaxies.UGC3789.init]
 D_c = 53.2636
 Omega0 = 222.9935
+d2Omega_dr2 = 0.0
+d2i_dr2 = 0.0
 dOmega_dr = -3.3206
 di_dr = 8.4371
 dv_sys = 15.4967
@@ -335,17 +346,25 @@ n_phi = 50001
 spot_batch = 4
 
 [optimise]
-log2_N = 16
-pop_size = 1000
-max_generations = 5000
-patience = 100
+log2_N = 12
+pop_size = 128
+max_generations = 300
+patience = 40
 eval_chunk = 5
-log_every = 1
+log_every = 5
 sobol_n_sigma = 5
 min_dist_frac = 0.005
 H0_for_D_estimate = 70.0
 D_sobol_sigma_v = 500.0
 D_sobol_n_sigma = 5
+lbfgs_maxiter = 500
+lbfgs_ftol = 1e-6
+lbfgs_gtol = 1e-5
+lbfgs_maxls = 50
+lbfgs_n_starts = 1
+lbfgs_sobol_candidates = 0
+lbfgs_start_strategy = "sobol"
+lbfgs_jitter_scale = 0.0
 
 [joint.priors.sigma_pec]
 dist = "maxwell"
