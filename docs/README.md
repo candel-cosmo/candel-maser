@@ -1,12 +1,10 @@
 # Megamaser Scripts
 
-This directory now keeps only the supported megamaser workflow:
+Supported megamaser workflow:
 
-- `run_maser_blackjax.py`: production BlackJAX collapsed-Gibbs sampler. The global disk block is sampled with BlackJAX, while each spot radius `r_ang` is updated by direct Gibbs/Metropolis steps and `phi` is marginalised numerically.
-- `run_maser_disk.py`: compatibility wrapper that forwards supported options to `run_maser_blackjax.py`.
-- `run_de_map.py`: differential-evolution MAP optimiser used for initialisation and deterministic conditional-`r_ang` diagnostics.
+- `run_maser.py`: unified megamaser runner. It defaults to the BlackJAX collapsed-Gibbs sampler; use `--sampler de` for the differential-evolution MAP optimiser.
 - `submit.sh`: cluster submission helper for `--sampler gibbs` or `--sampler de`.
-- `toy_joint_H0.py` and `toy_joint_H0.sh`: retained toy post-processing combiner for saved per-galaxy distance posteriors.
+- `toy_joint_H0.py` and `toy_joint_H0.sh`: toy post-processing combiner for saved per-galaxy distance posteriors.
 - `convergence/`: numerical accuracy diagnostics for the `phi` and conditional-`r` integrals.
 - `check_reid/`: standalone comparison against the Reid-style parameterisation.
 
@@ -15,23 +13,18 @@ This directory now keeps only the supported megamaser workflow:
 Run a single galaxy locally:
 
 ```bash
-python scripts/megamaser/run_maser_blackjax.py NGC5765b
+python scripts/megamaser/run_maser.py NGC5765b
 ```
 
 Useful development flags:
 
 ```bash
-python scripts/megamaser/run_maser_blackjax.py NGC6264 \
+python scripts/megamaser/run_maser.py NGC6264 \
     --num-warmup 100 --num-samples 100 --n-sys 6 --n-red 7 --n-blue 7
 ```
 
-The compatibility wrapper is still available for existing job templates:
-
-```bash
-python scripts/megamaser/run_maser_disk.py NGC5765b
-```
-
-Use `run_maser_blackjax.py --help` for the supported production options.
+Use `run_maser.py --help` for the default Gibbs options and
+`run_maser.py --sampler de --help` for DE options.
 
 ## Cluster Jobs
 
@@ -67,18 +60,18 @@ conditional_spot_batch = 16
 
 `n_phi_*` controls the numerical `phi` marginalisation. `n_r_local`, `n_r_global`, and `conditional_spot_batch` are used by the DE initialiser and conditional-`r` diagnostics; production Gibbs sampling still samples `r_ang` directly.
 
-The `[convergence.*]` blocks are kept because the diagnostic scripts use them for high-resolution numerical references.
+The `[convergence.*]` blocks provide high-resolution numerical references for the diagnostic scripts.
 
 ## Numerical Diagnostics
 
-The following scripts are intentionally retained:
+Numerical diagnostic scripts:
 
 ```bash
 python scripts/megamaser/convergence/convergence_phi_marginal.py --galaxies NGC6264 --no-grad
 python scripts/megamaser/convergence/convergence_grids.py --galaxies NGC6264 --timing-attempts 0
-python scripts/megamaser/convergence/test_mode2_grad_vs_numerical.py --galaxy NGC6264
+python scripts/megamaser/convergence/check_conditional_r_grad_vs_numerical.py --galaxy NGC6264
 python scripts/megamaser/convergence/r_ang_posteriors.py --galaxies NGC6264
-python scripts/megamaser/convergence/diagnose_mode2_delta.py --galaxies NGC6264
+python scripts/megamaser/convergence/check_conditional_r_delta.py --galaxies NGC6264
 ```
 
-Despite some historical filenames, these are now diagnostic-only checks for quadrature and gradients. They are not alternative megamaser samplers.
+These are diagnostic-only checks for quadrature and gradients. They are not alternative megamaser samplers.
