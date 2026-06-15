@@ -215,8 +215,7 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float) -> ReidInit:
     init = dict(gcfg["init"])
     v_sys = float(gcfg["v_sys_obs"]) + float(init.get("dv_sys", 0.0))
     distance = float(init["D_c"])
-    eta = float(init["eta"])
-    m_bh = 10.0 ** (eta + math.log10(distance) - 7.0)
+    m_bh = 10.0 ** (float(init["log_MBH"]) - 7.0)
     h0 = (v_sys + vcor) / distance
 
     ecc = float(init.get("ecc", 0.0))
