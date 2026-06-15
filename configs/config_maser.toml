@@ -1,67 +1,26 @@
 [inference]
-sampler = "nss"
 seed = 42
-
-# NUTS / HMC
 num_warmup = 2500
 num_samples = 2000
-num_chains = 1
-dense_mass_blocks = [
-    [
-        "H0",
-        "D_c",
-        "eta",
-        "dv_sys",
-        "i0",
-        "di_dr",
-        "Omega0",
-        "dOmega_dr",
-        "x0",
-        "y0",
-    ],
-    [
-        "sigma_v_sys",
-        "sigma_y_floor",
-        "sigma_a_floor",
-        "sigma_x_floor",
-    ],
-]
-dense_mass_single_block = true
-dense_mass_include_r_ang = true
-init_maxiter = 0
-init_method = "config"
-r_ang_init_method = "peak"
+n_inner = 20
 max_tree_depth = 10
 target_accept_prob = 0.9
-
-# Nested sampling (NSS)
-n_live = 5000
-num_mcmc_steps = 0
-num_delete = 5
-termination = -3
-max_steps = 10
-max_shrinkage = 100
-stale_retries = 1
-cov_jitter = 1e-6
+target_accept_r = 0.44
+blackjax_initial_step_size = 0.01
 
 [model]
 Om = 0.315
 use_selection = false
-mode = "mode2"
 sigma_v_default = 0.25
 D_c_prior = "uniform"
 R_phys_lo = 0.01
 R_phys_hi = 1.5
 
-# Unified phi grid knobs (identical in Mode 1 and Mode 2).
 # HV (red/blue): 3 uniform sub-ranges centred on the peak:
 #   [peak-outer, peak-inner]  (n_phi_hv_low points)
 #   [peak-inner, peak+inner]  (n_phi_hv_high points, dense)
 #   [peak+inner, peak+outer]  (n_phi_hv_low points)
 # Reid convention: red peak at phi=+pi/2, blue peak at phi=-pi/2.
-# Values chosen from the 2026-04-18 convergence tests: |Δ|<0.25 nats
-# vs 200001-pt full-2π ref across all 5 MCP galaxies (Mode 2) and
-# Mode 1 at r_ang_scale=1.
 phi_hv_inner_deg = 30.0
 phi_hv_outer_deg = 90.0
 n_phi_hv_high = 5001
@@ -73,45 +32,20 @@ n_phi_hv_low = 2501
 phi_sys_ranges_deg = [[-45, 45], [135, 225]]
 n_phi_sys = 5001
 
-# Mode 2 r-grid knobs.
-#   n_r_local:  sinh-spaced per-spot grid centred on the posterior
-#               peak (Brent-refined from best-of scan vs closed-form).
-#   n_r_global: shared log-uniform grid with data-driven range
-#               (closed-form seed min/max × padding). Also doubles as
-#               the scan grid: its phi-marginal is evaluated to find
-#               per-spot seeds before Brent refinement.
-#   K_sigma:    half-width (in multiples of the per-spot σ_r) for
-#               the local sinh transform.
+# Conditional r_ang MAP grid used by the DE initializer and numerical
+# quadrature diagnostics. The production sampler still samples r_ang
+# directly with Gibbs steps.
 n_r_local = 256
 n_r_global = 128
 K_sigma = 10.0
-
-# Per-spot Brent refinement within ±3 global-grid bins of the seed.
-# Brent combines parabolic interpolation with golden-section
-# fallback.
 refine_r_center = true
 n_refine_steps = 32
+conditional_spot_batch = 16
 
-# Spot-axis chunking for the likelihood evaluation. Both NSS
-# (num_delete parallel chains) and DE (eval_chunk parallel evals)
-# vmap over the same number of candidates, so per-galaxy
-# mode2_spot_batch settings apply to both uniformly. This must be set
-# explicitly for mode2 runs; 16 is the recommended default.
-mode2_spot_batch = 16
-
-[model.priors.H0]
+[model.priors.log_MBH]
 dist = "uniform"
-low = 10.0
-high = 200.0
-
-[model.priors.sigma_pec]
-dist = "delta"
-value = 300
-
-[model.priors.eta]
-dist = "uniform"
-low = 3.0
-high = 9.0
+low = 4.0
+high = 10.0
 
 [model.priors.dv_sys]
 dist = "normal"
@@ -222,16 +156,6 @@ dist = "uniform"
 low = -360.0
 high = 360.0
 
-[model.priors.D_lim]
-dist = "uniform"
-low = 50.0
-high = 300.0
-
-[model.priors.D_width]
-dist = "uniform"
-low = 5.0
-high = 100.0
-
 [model.galaxies.CGCG074-064]
 ra = 210.768491
 dec = 8.947582
@@ -245,7 +169,7 @@ Omega0 = 101.4636
 dOmega_dr = 4.8959
 di_dr = -1.855
 dv_sys = -265.5803
-eta = 5.4411
+log_MBH = 7.3774
 i0 = 90.6084
 sigma_a_floor = 0.2321
 sigma_v_hv = 2.0975
@@ -264,18 +188,14 @@ D_hi = 9.0
 use_ecc = true
 ecc_cartesian = true
 use_quadratic_warp = true
-mode = "mode1"
-# Denser phi grids for NGC4258 (position errors ~3 μas → narrow phi peaks).
+# Denser phi grids for NGC4258 (position errors ~3 uas -> narrow phi peaks).
 n_phi_hv_high = 20001
 n_phi_hv_low = 5001
 n_phi_sys = 20001
 r_ang_ref_i = 6.1
 r_ang_ref_Omega = 6.1
 r_ang_ref_periapsis = 3.0
-dense_mass_globals = true
-target_accept_prob = 0.9
-eval_chunk = 1
-mode2_spot_batch = 4
+conditional_spot_batch = 4
 
 [model.galaxies.NGC4258.init]
 D_c = 7.6368
@@ -288,7 +208,7 @@ dperiapsis_dr = 3.6712
 dv_sys = -188.1621
 e_x = 0.0173
 e_y = -0.0118
-eta = 6.7212
+log_MBH = 7.6033
 i0 = 94.085
 sigma_a_floor = 0.4638
 sigma_v_hv = 2.578
@@ -311,7 +231,7 @@ Omega0 = 146.8322
 dOmega_dr = -3.3126
 di_dr = 11.5741
 dv_sys = -131.1841
-eta = 5.573
+log_MBH = 7.6490
 i0 = 84.9069
 sigma_a_floor = 0.0787
 sigma_v_hv = 2.8282
@@ -334,7 +254,7 @@ Omega0 = 94.2149
 dOmega_dr = 18.4328
 di_dr = -1.2724
 dv_sys = 66.3185
-eta = 5.3225
+log_MBH = 7.4947
 i0 = 90.4007
 sigma_a_floor = 0.1375
 sigma_v_hv = 2.9881
@@ -367,7 +287,7 @@ Omega0 = 189.5884
 dOmega_dr = 13.7816
 di_dr = -1.1462
 dv_sys = 190.7366
-eta = 4.9676
+log_MBH = 7.0667
 i0 = 91.7804
 sigma_a_floor = 0.1382
 sigma_v_hv = 1.7355
@@ -383,10 +303,7 @@ dec = 59.35513
 v_sys_obs = 3245
 D_lo = 10.0
 D_hi = 100.0
-# Denser HV-inner phi grid than the other MCP galaxies — sigma_x_floor
-# gradient fails 1e-3 tolerance at 5001/2501/5001 in the 2026-04-26
-# Mode 1 convergence sweep. NOTE: per-galaxy keys are unsuffixed and
-# also apply to Mode 2 if this galaxy is ever run there.
+# Denser HV-inner phi grid than the other MCP galaxies.
 n_phi_hv_high = 10001
 n_phi_hv_low = 2501
 n_phi_sys = 5001
@@ -397,7 +314,7 @@ Omega0 = 222.9935
 dOmega_dr = -3.3206
 di_dr = 8.4371
 dv_sys = 15.4967
-eta = 5.3634
+log_MBH = 7.0842
 i0 = 85.6456
 sigma_a_floor = 0.2382
 sigma_v_hv = 2.0396
@@ -407,8 +324,22 @@ sigma_y_floor = 7.9717
 x0 = -402.4226
 y0 = -461.1449
 
+[convergence.conditional_r_reference]
+n_r = 20001
+n_phi = 10001
+r_chunk = 32
+spot_batch = 4
+dtype = "float64"
+
+[convergence.fixed_r_reference]
+n_phi = 200001
+spot_batch = 8
+
+[convergence.fixed_r_gradient_reference]
+n_phi = 50001
+spot_batch = 4
+
 [optimise]
-# Differential evolution (DE) MAP optimizer
 log2_N = 16
 pop_size = 1000
 max_generations = 5000
@@ -429,45 +360,3 @@ root_output = "results/Megamaser"
 
 [io.maser_data]
 root = "data/Megamaser"
-
-[convergence]
-# Auto-run after NUTS/NSS finishes. Compares the production phi/r marginal
-# against a dense brute-force reference at `n_draws` posterior samples.
-auto_check = false
-n_draws = 8
-seed = 0
-save_json = true
-
-[convergence.mode2_reference]
-# Full-2pi phi x log-r brute force. The reference is the gold standard
-# the convergence sweep is measured against, so it uses float64 — a
-# float32 reference's own ~10⁻⁷ rounding accumulated over n_r × n_phi
-# ≈ 2.5×10⁹ logsumexp terms can leave a sub-nat systematic that
-# every test row inherits.
-# spot_batch trades dispatch overhead for live memory. The kernel
-# holds ~6 simultaneous (spot_batch, r_chunk, n_phi) × dtype arrays
-# (X, Y, V, A from predict_* plus the running chi2 tally), so the
-# peak request is ~6 × spot_batch × r_chunk × n_phi × 8B. With the
-# defaults below that is ~6 × 4 × 1000 × 50001 × 8B ≈ 9.6 GB —
-# safe on a 16 GB GPU. Push higher via --ref-spot-batch on bigger
-# cards (24 GB → ~8, 40 GB → ~16).
-n_r = 50000
-n_phi = 50001
-r_chunk = 1000
-spot_batch = 4
-dtype = "float64"
-
-[convergence.mode1_reference]
-# Per-type full-2pi phi brute force at the sampled r_ang.
-n_phi = 200001
-spot_batch = 200
-dtype = "float64"
-
-[convergence.mode1_gradient_reference]
-# Full-2pi phi reference at sampled r_ang, used for the AD gradient
-# check in convergence_phi_marginal.py. Shares n_phi / spot_batch
-# with [convergence.mode1_reference] but lists them here explicitly
-# so the two tests can diverge if needed.
-n_phi = 200001
-spot_batch = 200
-dtype = "float64"
