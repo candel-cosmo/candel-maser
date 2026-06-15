@@ -26,7 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 import tomli
 
-from candel.model.maser_convergence import (
+from convergence_utils import (
     bruteforce_ll_fixed_r, build_model, ensure_grad_sample,
     extend_grad_params, grad_diff_report, grad_fixed_r_production,
     grad_fixed_r_reference,
