@@ -2,9 +2,9 @@
 seed = 42
 num_warmup = 2500
 num_samples = 2000
-n_inner = 20
+n_inner = 25
 max_tree_depth = 10
-target_accept_prob = 0.9
+target_accept_prob = 0.8
 target_accept_r = 0.44
 blackjax_initial_step_size = 0.01
 
@@ -32,7 +32,7 @@ n_phi_hv_low = 2501
 phi_sys_ranges_deg = [[-45, 45], [135, 225]]
 n_phi_sys = 5001
 
-# Conditional r_ang MAP grid used by the DE initializer and numerical
+# Conditional r_ang MAP grid used by the DE objective and numerical
 # quadrature diagnostics. The production sampler still samples r_ang
 # directly with Gibbs steps.
 n_r_local = 256
@@ -246,7 +246,7 @@ ra = 254.3172
 dec = 27.8496
 v_sys_obs = 10145
 D_lo = 70.0
-D_hi = 250.0
+D_hi = 500.0
 
 [model.galaxies.NGC6264.init]
 D_c = 154.3069
@@ -323,13 +323,6 @@ sigma_x_floor = 4.7198
 sigma_y_floor = 7.9717
 x0 = -402.4226
 y0 = -461.1449
-
-[convergence.conditional_r_reference]
-n_r = 20001
-n_phi = 10001
-r_chunk = 32
-spot_batch = 4
-dtype = "float64"
 
 [convergence.fixed_r_reference]
 n_phi = 200001
