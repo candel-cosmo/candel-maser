@@ -117,10 +117,10 @@ def compute_posteriors(galaxy, master_cfg, n_r, r_batch, f_grid):
     print(f"  φ grid: {overrides}", flush=True)
     model = build_model(galaxy, master_cfg, **overrides)
     try:
-        model_m2 = build_model(galaxy, master_cfg, **overrides)
-        phys_args_m2, phys_kw_m2, _ = _phys_from_init(
-            model_m2, galaxies_cfg, galaxy)
-        centres = model_m2.get_mode2_centres(phys_args_m2, phys_kw_m2)
+        model_cr = build_model(galaxy, master_cfg, **overrides)
+        phys_args_cr, phys_kw_cr, _ = _phys_from_init(
+            model_cr, galaxies_cfg, galaxy)
+        centres = model_cr.get_conditional_r_centres(phys_args_cr, phys_kw_cr)
     except (ValueError, KeyError):
         centres = None
 
