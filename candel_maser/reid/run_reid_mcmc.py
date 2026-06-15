@@ -329,7 +329,9 @@ def write_control(
     seed: int,
     step_fraction: float,
     fit_data: tuple[bool, bool, bool, bool],
+    fixed_params: set[str] | None = None,
 ) -> None:
+    fixed_params = fixed_params or set()
     lines = template_control_lines()
     lines[1] = set_control_numbers(lines[1], [burnin])
     lines[2] = set_control_numbers(lines[2], [trials, walkers, h0_low, h0_high])
@@ -363,6 +365,9 @@ def write_control(
         parts = lines[i].split("!", 1)[0].split()
         prior = float(parts[1])
         post = float(parts[2])
+        if name in fixed_params:
+            prior = 0.0
+            post = 0.0
         lines[i] = set_control_numbers(lines[i], [init[name], prior, post])
     path.write_text("\n".join(lines) + "\n")
 
@@ -826,6 +831,20 @@ def parse_bool_quad(value: str) -> tuple[bool, bool, bool, bool]:
     return tuple(c.lower() in {"t", "true", "1", "yes", "y"} for c in chars)  # type: ignore[return-value]
 
 
+def parse_param_names(value: str) -> set[str]:
+    names: set[str] = set()
+    for raw in re.split(r"[\s,]+", value.strip()):
+        if not raw:
+            continue
+        if raw not in GLOBAL_NAMES:
+            valid = ", ".join(GLOBAL_NAMES)
+            raise argparse.ArgumentTypeError(
+                f"unknown global parameter '{raw}'. Valid names: {valid}"
+            )
+        names.add(raw)
+    return names
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Prepare, run, and plot Mark Reid fit_disk MCMC without editing the Reid source."
@@ -876,6 +895,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-run", action="store_true")
     parser.add_argument("--plot-params", default=",".join(DEFAULT_CONTOUR_PARAMS))
     parser.add_argument(
+        "--fix-params",
+        default="",
+        help=(
+            "Comma/space-separated Reid global parameter names to freeze by "
+            "setting their control-file prior and proposal widths to zero."
+        ),
+    )
+    parser.add_argument(
+        "--fix-circular",
+        action="store_true",
+        help="Freeze eccentricity, periapsis, and periapsis-gradient globals.",
+    )
+    parser.add_argument(
+        "--linear-warp",
+        action="store_true",
+        help="Freeze the quadratic inclination and PA warp globals.",
+    )
+    parser.add_argument(
         "--collect-chain-dirs",
         nargs="+",
         type=Path,
@@ -890,6 +927,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     params = [x.strip() for x in args.plot_params.split(",") if x.strip()]
+    try:
+        fixed_params = parse_param_names(args.fix_params)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
+    if args.fix_circular:
+        fixed_params.update({"ecc", "peri_az_deg", "dperi_dr_deg_mas"})
+    if args.linear_warp:
+        fixed_params.update({"d2i_dr2_deg_mas2", "d2PA_dr2_deg_mas2"})
+
     if args.collect_chain_dirs is not None:
         if args.output_dir is None:
             parser.error("--output-dir is required with --collect-chain-dirs")
@@ -949,6 +995,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         step_fraction=args.step_fraction,
         fit_data=args.fit_data,
+        fixed_params=fixed_params,
     )
     if args.burnin <= 0:
         write_burnin_values(run_dir / "burnin_values.dat", run_init, initial_r_phi(data_rows, header, run_init))
@@ -965,6 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
         "status_interval": status_interval,
         "h0_low": h0_low,
         "h0_high": h0_high,
+        "fixed_params": sorted(fixed_params),
         "initial_globals": {name: run_init[name] for name in GLOBAL_NAMES},
     }
     (run_dir / "run_metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
