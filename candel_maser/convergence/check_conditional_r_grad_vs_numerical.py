@@ -36,7 +36,7 @@ from jax.scipy.special import logsumexp             # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
-from candel.model.maser_convergence import (        # noqa: E402
+from convergence_utils import (                     # noqa: E402
     build_model,
     ensure_grad_sample,
     extend_grad_params,

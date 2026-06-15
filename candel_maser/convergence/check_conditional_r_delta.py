@@ -21,7 +21,7 @@ import tomli
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
-from candel.model.maser_convergence import build_model, resolve_grid_for_galaxy
+from convergence_utils import build_model, resolve_grid_for_galaxy
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
 OUT_DIR = "/mnt/users/rstiskalek/CANDEL/results/Megamaser/convergence"
