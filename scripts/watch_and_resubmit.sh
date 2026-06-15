@@ -13,7 +13,7 @@
 #       bash scripts/megamaser/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b
 #
 #   bash watch_and_resubmit.sh --marker "saved samples to" -- \
-#       bash scripts/megamaser/submit.sh --sampler nss -q cmbgpu --galaxy NGC5765b
+#       bash scripts/megamaser/submit.sh --sampler gibbs -q cmbgpu --galaxy NGC5765b
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -51,13 +51,9 @@ Examples:
   bash watch_and_resubmit.sh --marker "MAP init" -- \
       bash scripts/megamaser/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b,NGC6264
 
-  # NSS (one galaxy)
+  # Gibbs sampler (one galaxy)
   bash watch_and_resubmit.sh --marker "saved samples to" -- \
-      bash scripts/megamaser/submit.sh --sampler nss -q cmbgpu --galaxy NGC5765b
-
-  # NUTS
-  bash watch_and_resubmit.sh --marker "saved samples to" -- \
-      bash scripts/megamaser/submit.sh --sampler nuts -q cmbgpu --galaxy NGC5765b
+      bash scripts/megamaser/submit.sh --sampler gibbs -q cmbgpu --galaxy NGC5765b
 
   # Custom poll and retries
   bash watch_and_resubmit.sh --marker "MAP init" --max-retries 10 --poll 60 -- \
