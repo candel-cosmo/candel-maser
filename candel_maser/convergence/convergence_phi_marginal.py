@@ -1,5 +1,5 @@
 """
-Mode 1 phi-marginal convergence test.
+Fixed-r phi-marginal convergence test.
 
 For each galaxy, build the unified phi grid at several (n_phi_hv_high,
 n_phi_hv_low, n_phi_sys) settings and compare to a full-2π brute-force
@@ -27,8 +27,9 @@ import numpy as np
 import tomli
 
 from candel.model.maser_convergence import (
-    bruteforce_ll_mode1, build_model, ensure_grad_sample, extend_grad_params,
-    grad_diff_report, grad_mode1_production, grad_mode1_reference,
+    bruteforce_ll_fixed_r, build_model, ensure_grad_sample,
+    extend_grad_params, grad_diff_report, grad_fixed_r_production,
+    grad_fixed_r_reference,
     resolve_grid_for_galaxy, vector_diff_report,
 )
 
@@ -44,10 +45,8 @@ CONFIG_PATH = "scripts/megamaser/config_maser.toml"
 ALL_GALAXIES = ["CGCG074-064", "NGC5765b", "NGC6264", "NGC6323",
                 "UGC3789", "NGC4258"]
 
-# Mode 1 is the production case for NGC4258, which needs a denser phi
-# grid than the Mode 2 default. Anchor the phi-marginal test at this
-# setting (rather than the config default) so the sweep brackets the
-# NGC4258 regime.
+# NGC4258 needs a denser phi grid than the other maser galaxies. Anchor the
+# fixed-r phi-marginal test at this setting so the sweep brackets that regime.
 PHI_MARGINAL_ANCHOR = (2001, 501, 3001)
 
 # Extra test grids (n_phi_hv_high, n_phi_hv_low, n_phi_sys) around the
@@ -115,7 +114,7 @@ def eval_grid_logl(model, master_cfg, galaxy, n_high, n_low, n_sys,
     """Build a model at (n_high, n_low, n_sys), evaluate per-type logL
     at fixed r_ang, return the per_type_logl dict and the test model."""
     m_t = build_model(
-        galaxy, master_cfg, mode="mode1",
+        galaxy, master_cfg,
         n_phi_hv_high=n_high, n_phi_hv_low=n_low,
         n_phi_sys=n_sys)
     spot_groups = []
@@ -170,14 +169,14 @@ def main():
     with open(CONFIG_PATH, "rb") as f:
         master_cfg = tomli.load(f)
     galaxies_cfg = master_cfg["model"]["galaxies"]
-    ref_cfg = master_cfg["convergence"]["mode1_reference"]
+    ref_cfg = master_cfg["convergence"]["fixed_r_reference"]
     grad_ref_cfg = master_cfg["convergence"].get(
-        "mode1_gradient_reference", ref_cfg)
+        "fixed_r_gradient_reference", ref_cfg)
 
     do_grad = not args.no_grad
 
     print("=" * 80)
-    print("Mode 1 phi-marginal convergence")
+    print("Fixed-r phi-marginal convergence")
     print(f"Reference (ll): full-2π uniform grid, "
           f"n_phi = {ref_cfg['n_phi']}")
     if do_grad:
@@ -196,11 +195,9 @@ def main():
         print(f"Galaxy: {galaxy}")
         print(f"{'─' * 70}")
 
-        # Per-galaxy production grid (per-galaxy block → _mode1 fallback
-        # → generic [model]). NGC4258 carries 20001/4001/20001, the
-        # other galaxies fall to _mode1 (2001/501/3001).
+        # Per-galaxy production grid (per-galaxy block -> generic [model]).
         galaxy_default = resolve_grid_for_galaxy(
-            master_cfg, galaxy, "mode1")
+            master_cfg, galaxy, "fixed_r")
         galaxy_grids = build_test_grids(galaxy_default)
         galaxy_grids_map[galaxy] = galaxy_grids
         print(f"  production φ grid: "
@@ -209,9 +206,9 @@ def main():
               f"{galaxy_default['n_sys']})")
         print(f"  test grids: {galaxy_grids}")
 
-        # Build model once with Mode 1 forced on. Defaults used; we
+        # Build model once for fixed-r diagnostics. Defaults used; we
         # override per-iteration via rebuild for the test grids.
-        model = build_model(galaxy, master_cfg, mode="mode1")
+        model = build_model(galaxy, master_cfg)
         phys_args, phys_kw, diag = _phys_from_init(
             model, galaxies_cfg, galaxy)
         D_A, M_BH, v_sys = diag["D_A"], diag["M_BH"], diag["v_sys"]
@@ -239,7 +236,7 @@ def main():
                   f"(median r = {med_r:.4f} mas)")
 
             # Reference: single full-2π uniform grid per type (log-L).
-            ref = bruteforce_ll_mode1(
+            ref = bruteforce_ll_fixed_r(
                 model, phys_args, phys_kw, r_ang, ref_cfg)
             print(f"    full-2π ref (ll): sys={ref['sys']:.4f}, "
                   f"red={ref['red']:.4f}, blue={ref['blue']:.4f}, "
@@ -248,7 +245,7 @@ def main():
             # Reference gradient (computed once per scale and reused).
             if do_grad:
                 print(f"    computing full-2π ref gradient...", flush=True)
-                grad_ref_glob, grad_ref_r = grad_mode1_reference(
+                grad_ref_glob, grad_ref_r = grad_fixed_r_reference(
                     model, sample, r_ang, grad_ref_cfg)
             else:
                 grad_ref_glob = None
@@ -279,7 +276,7 @@ def main():
                     d_blue=d_blue)
 
                 if do_grad:
-                    grad_test_glob, grad_test_r = grad_mode1_production(
+                    grad_test_glob, grad_test_r = grad_fixed_r_production(
                         m_t, sample, r_ang)
                     rep_g = grad_diff_report(
                         grad_test_glob, grad_ref_glob, grad_param_keys)

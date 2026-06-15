@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Mode 1 (brute-force phi) convergence test for all six MCP galaxies
+# Fixed-r brute-force phi convergence test for all six MCP galaxies
 # including NGC4258. Sweeps per-sub-range phi grid sizes against a
 # high-resolution reference AND compares configured per-type phi
 # ranges against a single full-2π integration.
@@ -12,7 +12,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: bash $0 [-q QUEUE] [ARGS...]"
             echo ""
-            echo "Tests the Mode 1 sub-range phi marginaliser against a"
+            echo "Tests the sub-range phi marginaliser against a"
             echo "full-2π reference. Per (galaxy, grid, scale) prints three"
             echo "narrow tables:"
             echo "  1. Δ logL per category (total, sys, red, blue)."
@@ -53,7 +53,7 @@ if [[ "$CANDEL_CLUSTER" != "glamdring" ]]; then
 fi
 PYTHON="$CANDEL_PYTHON"
 
-# Default: test all six galaxies, including NGC4258 (Mode 1 production case).
+# Default: test all six galaxies, including NGC4258.
 # Override by passing --galaxies ... on the command line.
 DEFAULT_GALAXIES=(CGCG074-064 NGC5765b NGC6264 NGC6323 UGC3789 NGC4258)
 

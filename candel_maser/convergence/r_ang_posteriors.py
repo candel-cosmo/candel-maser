@@ -1,7 +1,7 @@
 """
 Per-spot 1D posterior on r_ang after marginalising phi, with all global
 parameters pinned to the `init` block in config_maser.toml. No sampling
-— a diagnostic pass through the Mode 1 phi-marginal at a single point
+— a diagnostic pass through the fixed-r phi marginal at a single point
 in global-parameter space.
 
 For each galaxy: tile a shared dense r_ang grid across all spots, run
@@ -111,14 +111,13 @@ def _phi_overrides(galaxy, master_cfg, f_grid):
 
 
 def compute_posteriors(galaxy, master_cfg, n_r, r_batch, f_grid):
-    """Evaluate per-spot r posteriors + Mode 2 centring lines."""
+    """Evaluate per-spot r posteriors + conditional-r centring lines."""
     galaxies_cfg = master_cfg["model"]["galaxies"]
     overrides = _phi_overrides(galaxy, master_cfg, f_grid)
     print(f"  φ grid: {overrides}", flush=True)
-    model = build_model(galaxy, master_cfg, mode="mode1", **overrides)
+    model = build_model(galaxy, master_cfg, **overrides)
     try:
-        model_m2 = build_model(
-            galaxy, master_cfg, mode="mode2", **overrides)
+        model_m2 = build_model(galaxy, master_cfg, **overrides)
         phys_args_m2, phys_kw_m2, _ = _phys_from_init(
             model_m2, galaxies_cfg, galaxy)
         centres = model_m2.get_mode2_centres(phys_args_m2, phys_kw_m2)
@@ -234,7 +233,7 @@ def plot(results, selection, out_path, n_sigma=5.0):
     from matplotlib.lines import Line2D
     legend_handles = [
         Line2D([0], [0], color="k", linestyle=":",
-               lw=1.1, alpha=0.9, label=r"$r_c$ (Mode 2 centre)"),
+               lw=1.1, alpha=0.9, label=r"$r_c$ (conditional centre)"),
     ]
     axes[0, 0].legend(handles=legend_handles, loc="upper left",
                       frameon=False, fontsize=9)
