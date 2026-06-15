@@ -1,256 +1,154 @@
 #!/bin/bash -l
-# Submit maser disk runs for one or more galaxies. Supports NSS (nested
-# sampling, mode2 only), NUTS, and DE (differential-evolution MAP, mode2
-# only). Cluster (arc or glamdring) is picked up from `machine` in
-# local_config.toml via _submit_lib.sh.
+# Submit BlackJAX Gibbs sampler or DE MAP megamaser jobs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=../_submit_lib.sh
 source "$ROOT/scripts/_submit_lib.sh"
 
-SAMPLER=""
-MODE=""
 QUEUE=""
-F_GRID=""
-NUM_CHAINS=1
 GALAXY=""
-INIT_METHOD=""
-R_ANG_INIT=""
-CHECKPOINT_INTERVAL_MINUTES=""
-DEVICES=""
+SAMPLER="gibbs"
+MEM=16
+CPUS=""
 GPUTYPE=""
 GPU_MEM=""
 TIME=""
-MEM=16
-CPUS=""
 DRY=false
-_WATCH_RETRIES=""
-_WATCH_POLL=""
-RESUME=false
-NO_ECC=false
-ADD_ECC=false
-NO_QUAD_WARP=false
-ADD_QUAD_WARP=false
-F64=false
+LOCAL=false
 
+EXTRA_ARGS=()
 ALL_GALS="CGCG074-064 NGC4258 NGC5765b NGC6264 NGC6323 UGC3789"
 
 usage() {
     cat <<EOF
-Usage: $0 -q QUEUE --sampler nss|nuts|de --galaxy GAL[,GAL,...] [options]
+Usage: $0 (--local | -q QUEUE) --galaxy GAL[,GAL,...] [--sampler gibbs|de] [options]
 
 Required:
-  -q, --queue QUEUE      Queue/partition (glamdring: gpulong|cmbgpu|optgpu;
-                         arc: short|medium|long)
-  --sampler nss|nuts|de  Inference method.
-                         de = differential-evolution MAP (mode2 only).
-  --galaxy GAL[,GAL,...] Galaxy/galaxies to submit (comma-separated).
+  --local                Run in the current terminal instead of submitting
+                         to a batch backend.
+  -q, --queue QUEUE      Queue/partition for batch submission
+                         (glamdring: gpulong|cmbgpu|optgpu;
+                         arc: short|medium|long).
+  --galaxy GAL[,GAL,...] Galaxy/galaxies to submit.
                          Choices: $ALL_GALS
+  --sampler gibbs|de     Job type (default: gibbs).
 
-Options:
-  --mode MODE            Sampling mode: mode1, mode2
-                         (default: runner picks — mode2 for NSS;
-                          ignored for DE which forces mode2)
-  --f-grid F             Grid scaling factor (default: 1.0; nss/nuts only)
-  --num-chains N         NUTS chains, processed sequentially
-                         (default: $NUM_CHAINS)
-  --devices N            Sampler local devices for NSS or DE: auto, 1, or N.
-                         Numeric N>1 requests N GPUs on one node and passes
-                         --devices N to the runner.
-  --init-method METHOD   NUTS init method: config | median | sample
-                         (default: runner picks from config)
-  --r-ang-init METHOD    Mode 1 r_ang init: data | peak
-                         (default: runner picks from config)
-  --cpus N               CPU cores (default: 4 with --gpu)
-  --gputype TYPE         GPU type (default: any; e.g. h100, l40s)
-  --gpu-mem GB           Min GPU VRAM in GB (arc only; queries sinfo)
-  --time T               Wall time. Bare integer = hours (arc only);
-                         decimals are invalid, use HH:MM:SS instead
-                         (e.g. 00:12:00 for 0.2 hours).
-                         (default on arc: short=12, medium=48, long=required;
-                          ignored on glamdring)
-  --mem GB               Memory in GB (default: $MEM)
-  --no-ecc               Disable eccentricity model
-  --add-ecc              Enable eccentricity model
-  --no-quadratic-warp    Disable quadratic disk warp
-  --add-quadratic        Enable quadratic disk warp
-  --dry                  Print submit command without submitting (default: off)
-  --resume               Resume from latest checkpoint (nuts/nss/de)
+Gibbs options passed to run_maser.py:
+  --num-warmup N
+  --num-samples N
+  --n-inner N
+  --seed N
+  --spot-batch N
+  --n-sys N
+  --n-red N
+  --n-blue N
+  --target-accept-nuts X
+  --target-accept-r X
+  --initial-step-size X
+  --max-tree-depth N
+  --diagonal-mass
+  --no-progress
+  --no-jit-steps
+  --no-ecc | --add-ecc
+  --no-quadratic-warp | --add-quadratic-warp
+  --f64
+
+DE options passed to run_maser.py --sampler de:
+  --resume
   --checkpoint-interval-minutes M
-                         Checkpoint interval in minutes (default: 15)
-  --f64                  Enable JAX float64 in the runner
-                         (automatic for mode1 NUTS)
-  --max-retries N        Watch and resubmit up to N times on timeout
-  --poll S               Seconds between squeue polls (default: 120)
+  --log2-N N
+  --pop-size N
+  --max-generations N
+  --patience N
+  --eval-chunk N
+
+Cluster options:
+  --cpus N
+  --gputype TYPE
+  --gpu-mem GB
+  --time T
+  --mem GB              Memory in GB (default: $MEM)
+  --dry                 Print submit command without submitting.
   -h, --help
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --sampler) SAMPLER="$2"; shift 2 ;;
-        --mode) MODE="$2"; shift 2 ;;
         -q|--queue) QUEUE="$2"; shift 2 ;;
-        --f-grid) F_GRID="$2"; shift 2 ;;
-        --num-chains) NUM_CHAINS="$2"; shift 2 ;;
-        --devices) DEVICES="$2"; shift 2 ;;
-        --init-method) INIT_METHOD="$2"; shift 2 ;;
-        --r-ang-init) R_ANG_INIT="$2"; shift 2 ;;
-        --checkpoint-interval-minutes) CHECKPOINT_INTERVAL_MINUTES="$2"; shift 2 ;;
+        --sampler) SAMPLER="$2"; shift 2 ;;
         --galaxy) GALAXY="$2"; shift 2 ;;
+        --mem) MEM="$2"; shift 2 ;;
+        --cpus) CPUS="$2"; shift 2 ;;
         --gputype) GPUTYPE="$2"; shift 2 ;;
         --gpu-mem) GPU_MEM="$2"; shift 2 ;;
         --time) TIME="$2"; shift 2 ;;
-        --mem) MEM="$2"; shift 2 ;;
-        --cpus) CPUS="$2"; shift 2 ;;
-        --no-ecc) NO_ECC=true; shift ;;
-        --add-ecc|-add-ecc) ADD_ECC=true; shift ;;
-        --no-quadratic-warp) NO_QUAD_WARP=true; shift ;;
-        --add-quadratic|--add-quadratic-warp|-add-quadratic) ADD_QUAD_WARP=true; shift ;;
+        --local) LOCAL=true; shift ;;
         --dry) DRY=true; shift ;;
-        --resume) RESUME=true; shift ;;
-        --f64) F64=true; shift ;;
-        --max-retries) _WATCH_RETRIES="$2"; shift 2 ;;
-        --poll) _WATCH_POLL="$2"; shift 2 ;;
+        --f64) EXTRA_ARGS+=("--f64"); shift ;;
+        --num-warmup|--num-samples|--n-inner|--seed|--spot-batch|--n-sys|--n-red|--n-blue|--target-accept-nuts|--target-accept-r|--initial-step-size|--max-tree-depth|--checkpoint-interval-minutes|--log2-N|--pop-size|--max-generations|--patience|--eval-chunk)
+            EXTRA_ARGS+=("$1" "$2"); shift 2 ;;
+        --diagonal-mass|--no-progress|--no-jit-steps|--no-ecc|--add-ecc|--no-quadratic-warp|--add-quadratic-warp|--resume)
+            EXTRA_ARGS+=("$1"); shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
-if [[ "$SAMPLER" != "nss" && "$SAMPLER" != "nuts" && "$SAMPLER" != "de" ]]; then
-    echo "[ERROR] --sampler is required (nss|nuts|de)"; exit 1
-fi
-if [[ -n "$DEVICES" && "$SAMPLER" != "nss" && "$SAMPLER" != "de" ]]; then
-    echo "Error: --devices only applies with --sampler nss or --sampler de."; exit 1
-fi
-if $NO_ECC && $ADD_ECC; then
-    echo "Error: --no-ecc and --add-ecc are mutually exclusive."; exit 1
-fi
-if $NO_QUAD_WARP && $ADD_QUAD_WARP; then
-    echo "Error: --no-quadratic-warp and --add-quadratic are mutually exclusive."; exit 1
-fi
-JOB_TAG=""
-$NO_ECC && JOB_TAG="${JOB_TAG}_noecc"
-$ADD_ECC && JOB_TAG="${JOB_TAG}_ecc"
-$NO_QUAD_WARP && JOB_TAG="${JOB_TAG}_noqw"
-$ADD_QUAD_WARP && JOB_TAG="${JOB_TAG}_qw"
-
-# If --max-retries is set, delegate to the watcher and exit. One watcher
-# per galaxy so each retries independently as soon as its own job ends.
-if [[ -n "$_WATCH_RETRIES" ]]; then
-    if [[ -z "$GALAXY" ]]; then
-        echo "[ERROR] --galaxy is required"; exit 1
-    fi
-    _watcher="$ROOT/scripts/megamaser/watch_and_resubmit.sh"
-    if [[ "$SAMPLER" == "de" ]]; then
-        _marker="MAP init"
-    else
-        _marker="saved samples to"
-    fi
-    _wargs=(--marker "$_marker" --max-retries "$_WATCH_RETRIES")
-    [[ -n "$_WATCH_POLL" ]] && _wargs+=(--poll "$_WATCH_POLL")
-    # Per-galaxy submit command (--galaxy is appended in the loop below).
-    _cmd=(bash "$0" --sampler "$SAMPLER" -q "$QUEUE" --mem "$MEM")
-    [[ -n "$MODE" ]]        && _cmd+=(--mode "$MODE")
-    [[ -n "$F_GRID" ]]      && _cmd+=(--f-grid "$F_GRID")
-    [[ -n "$DEVICES" ]]     && _cmd+=(--devices "$DEVICES")
-    [[ -n "$INIT_METHOD" ]] && _cmd+=(--init-method "$INIT_METHOD")
-    [[ -n "$R_ANG_INIT" ]]  && _cmd+=(--r-ang-init "$R_ANG_INIT")
-    [[ -n "$CHECKPOINT_INTERVAL_MINUTES" ]] && _cmd+=(--checkpoint-interval-minutes "$CHECKPOINT_INTERVAL_MINUTES")
-    [[ -n "$GPUTYPE" ]]     && _cmd+=(--gputype "$GPUTYPE")
-    [[ -n "$GPU_MEM" ]]     && _cmd+=(--gpu-mem "$GPU_MEM")
-    [[ -n "$TIME" ]]        && _cmd+=(--time "$TIME")
-    [[ -n "$CPUS" ]]        && _cmd+=(--cpus "$CPUS")
-    [[ "$NUM_CHAINS" != "1" ]] && _cmd+=(--num-chains "$NUM_CHAINS")
-    $NO_ECC && _cmd+=(--no-ecc)
-    $ADD_ECC && _cmd+=(--add-ecc)
-    $NO_QUAD_WARP && _cmd+=(--no-quadratic-warp)
-    $ADD_QUAD_WARP && _cmd+=(--add-quadratic)
-    $F64 && _cmd+=(--f64)
-    $DRY && _cmd+=(--dry)
-    $RESUME && _cmd+=(--resume)
-    _watcher_logdir="$CANDEL_WATCHER_DIR"
-    mkdir -p "$_watcher_logdir"
-    _ts=$(date +%H%M%S)
-    _gals="${GALAXY//,/ }"
-    for _gal in $_gals; do
-        _sname="watcher_${SAMPLER}_${_gal}${JOB_TAG}_${_ts}"
-        launch_detached "$_sname" "$_watcher_logdir/${_sname}.log" \
-            bash "$_watcher" "${_wargs[@]}" -- "${_cmd[@]}" --galaxy "$_gal"
-    done
-    exit 0
-fi
-
-if [[ "$SAMPLER" == "nss" && -n "$MODE" && "$MODE" != "mode2" ]]; then
-    echo "Error: NSS only supports mode2."; exit 1
-fi
-if [[ "$SAMPLER" == "de" ]]; then
-    [[ -n "$F_GRID" ]] && { echo "Error: --f-grid not applicable with --sampler de"; exit 1; }
-    [[ "$NUM_CHAINS" != "1" ]] && { echo "Error: --num-chains not applicable with --sampler de"; exit 1; }
-    [[ -n "$INIT_METHOD" ]] && { echo "Error: --init-method not applicable with --sampler de"; exit 1; }
-    [[ -n "$R_ANG_INIT" ]] && { echo "Error: --r-ang-init not applicable with --sampler de"; exit 1; }
-    [[ -n "$MODE" && "$MODE" != "mode2" ]] && { echo "Error: DE only supports mode2."; exit 1; }
-fi
 if [[ -z "$GALAXY" ]]; then
     echo "[ERROR] --galaxy is required. Choices: $ALL_GALS"; exit 1
 fi
+if [[ "$SAMPLER" != "gibbs" && "$SAMPLER" != "de" ]]; then
+    echo "[ERROR] --sampler must be gibbs or de"; exit 1
+fi
+if [[ "$LOCAL" == false && -z "$QUEUE" ]]; then
+    echo "[ERROR] pass --local or -q QUEUE (cluster=$CANDEL_CLUSTER)"; exit 1
+fi
+
 GALAXY="${GALAXY//,/ }"
-for _g in $GALAXY; do
-    echo "$ALL_GALS" | grep -qw "$_g" || { echo "Error: unknown galaxy '$_g'. Choices: $ALL_GALS"; exit 1; }
+for gal in $GALAXY; do
+    echo "$ALL_GALS" | grep -qw "$gal" || {
+        echo "Error: unknown galaxy '$gal'. Choices: $ALL_GALS"; exit 1;
+    }
 done
-if [[ -z "$QUEUE" ]]; then
-    echo "[ERROR] -q QUEUE is required (cluster=$CANDEL_CLUSTER)"; exit 1
-fi
 
+RUNNER="$ROOT/scripts/megamaser/run_maser.py"
 if [[ "$SAMPLER" == "de" ]]; then
-    RUNNER="$ROOT/scripts/megamaser/run_de_map.py"
-    JOB_PREFIX="de_map"
-    # DE relies on async CUDA allocation; the other samplers do not need
-    # these and currently rely on JAX auto-detect. JAX_PLATFORMS=cuda is
-    # the correct value (not 'gpu') for JAX 0.8.x.
-    export XLA_PYTHON_CLIENT_PREALLOCATE=false
-    export TF_GPU_ALLOCATOR=cuda_malloc_async
-    export JAX_PLATFORMS=cuda
+    JOB_PREFIX="maser_de"
 else
-    RUNNER="$ROOT/scripts/megamaser/run_maser_disk.py"
-    JOB_PREFIX="maser"
+    JOB_PREFIX="maser_gibbs"
 fi
-
-EXTRA_ARGS=""
-[[ -n "$MODE" && "$SAMPLER" != "de" ]]        && EXTRA_ARGS="$EXTRA_ARGS --mode $MODE"
-[[ -n "$F_GRID" ]]      && EXTRA_ARGS="$EXTRA_ARGS --f-grid $F_GRID"
-[[ -n "$DEVICES" ]]     && EXTRA_ARGS="$EXTRA_ARGS --devices $DEVICES"
-[[ -n "$INIT_METHOD" ]] && EXTRA_ARGS="$EXTRA_ARGS --init-method $INIT_METHOD"
-[[ -n "$R_ANG_INIT" ]]  && EXTRA_ARGS="$EXTRA_ARGS --r-ang-init $R_ANG_INIT"
-[[ -n "$CHECKPOINT_INTERVAL_MINUTES" ]] && EXTRA_ARGS="$EXTRA_ARGS --checkpoint-interval-minutes $CHECKPOINT_INTERVAL_MINUTES"
-$NO_ECC && EXTRA_ARGS="$EXTRA_ARGS --no-ecc"
-$ADD_ECC && EXTRA_ARGS="$EXTRA_ARGS --add-ecc"
-$NO_QUAD_WARP && EXTRA_ARGS="$EXTRA_ARGS --no-quadratic-warp"
-$ADD_QUAD_WARP && EXTRA_ARGS="$EXTRA_ARGS --add-quadratic"
-$F64 && EXTRA_ARGS="$EXTRA_ARGS --f64"
-$RESUME && EXTRA_ARGS="$EXTRA_ARGS --resume"
-
 dry_flag=()
 [[ "$DRY" == true ]] && dry_flag=(--dry)
 
-for GAL in $GALAXY; do
-    echo "Submitting $GAL ($SAMPLER) -> $CANDEL_CLUSTER:$QUEUE"
-    case "$SAMPLER" in
-        nss)  pycmd="$CANDEL_PYTHON -u $RUNNER $GAL --sampler nss $EXTRA_ARGS" ;;
-        nuts) pycmd="$CANDEL_PYTHON -u $RUNNER $GAL --sampler nuts --num-chains $NUM_CHAINS $EXTRA_ARGS" ;;
-        de)   pycmd="$CANDEL_PYTHON -u $RUNNER $GAL $EXTRA_ARGS" ;;
-    esac
-    extra_flags=()
-    [[ -n "$CPUS" ]]    && extra_flags+=(--cpus "$CPUS")
-    if [[ "$SAMPLER" =~ ^(nss|de)$ && "$DEVICES" =~ ^[0-9]+$ && "$DEVICES" -gt 1 ]]; then
-        extra_flags+=(--gpu-count "$DEVICES")
+extra_flags=()
+[[ -n "$CPUS" ]] && extra_flags+=(--cpus "$CPUS")
+[[ -n "$GPUTYPE" ]] && extra_flags+=(--gputype "$GPUTYPE")
+[[ -n "$GPU_MEM" ]] && extra_flags+=(--gpu-mem "$GPU_MEM")
+[[ -n "$TIME" ]] && extra_flags+=(--time "$TIME")
+
+for gal in $GALAXY; do
+    if [[ "$LOCAL" == true ]]; then
+        echo "Running $gal ($SAMPLER) locally"
+        cmd=("$CANDEL_PYTHON" -u "$RUNNER" "$gal" --sampler "$SAMPLER" "${EXTRA_ARGS[@]}")
+        if [[ "$DRY" == true ]]; then
+            printf '[dry]'; printf ' %q' "${cmd[@]}"; printf '\n'
+        else
+            "${cmd[@]}"
+        fi
+        continue
     fi
-    [[ -n "$GPUTYPE" ]] && extra_flags+=(--gputype "$GPUTYPE")
-    [[ -n "$GPU_MEM" ]] && extra_flags+=(--gpu-mem "$GPU_MEM")
-    [[ -n "$TIME" ]]    && extra_flags+=(--time "$TIME")
-    submit_job --gpu --queue "$QUEUE" --mem "$MEM" --name "${JOB_PREFIX}_${GAL}${JOB_TAG}" \
-        "${extra_flags[@]}" \
-        "${dry_flag[@]}" \
-        -- $pycmd
+
+    echo "Submitting $gal ($SAMPLER) -> $CANDEL_CLUSTER:$QUEUE"
+    pycmd="$CANDEL_PYTHON -u $RUNNER $gal --sampler $SAMPLER ${EXTRA_ARGS[*]}"
+    submit_args=(--gpu --queue "$QUEUE" --mem "$MEM"
+                 --name "${JOB_PREFIX}_${gal}")
+    if [[ ${#extra_flags[@]} -gt 0 ]]; then
+        submit_args+=("${extra_flags[@]}")
+    fi
+    if [[ ${#dry_flag[@]} -gt 0 ]]; then
+        submit_args+=("${dry_flag[@]}")
+    fi
+    submit_job "${submit_args[@]}" -- $pycmd
 done
