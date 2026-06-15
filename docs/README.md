@@ -1,233 +1,84 @@
-# Megamaser disk inference
+# Megamaser Scripts
 
-Scripts for fitting the warped Keplerian disk model (`MaserDiskModel`) to
-VLBI maser spot data in order to infer angular-diameter distances and
-ultimately `H0`. Model code lives in `candel/model/model_H0_maser.py`;
-data loaders in `candel/pvdata/megamaser_data.py`.
+This directory now keeps only the supported megamaser workflow:
 
-All settings (priors, sampler, grid sizes, per-galaxy overrides) live in
-`config_maser.toml`. Most CLI flags below are overrides on top of that.
+- `run_maser_blackjax.py`: production BlackJAX collapsed-Gibbs sampler. The global disk block is sampled with BlackJAX, while each spot radius `r_ang` is updated by direct Gibbs/Metropolis steps and `phi` is marginalised numerically.
+- `run_maser_disk.py`: compatibility wrapper that forwards supported options to `run_maser_blackjax.py`.
+- `run_de_map.py`: differential-evolution MAP optimiser used for initialisation and deterministic conditional-`r_ang` diagnostics.
+- `submit.sh`: cluster submission helper for `--sampler gibbs` or `--sampler de`.
+- `toy_joint_H0.py` and `toy_joint_H0.sh`: retained toy post-processing combiner for saved per-galaxy distance posteriors.
+- `convergence/`: numerical accuracy diagnostics for the `phi` and conditional-`r` integrals.
+- `check_reid/`: standalone comparison against the Reid-style parameterisation.
 
-## Galaxies
+## Production Sampling
 
-- **MCP five** — CGCG074-064, NGC5765b, NGC6264, NGC6323, UGC3789. Run
-  in `mode2` (r and φ both marginalised analytically). Default sampler
-  is NSS (nested sampling, GPU).
-- **NGC4258** — anchor galaxy. Position errors are ~10× tighter than
-  the MCP five, so `mode2` (shared r, φ grids) cannot resolve the peaks.
-  Runs in `mode1` (sample `r_ang` per spot, marginalise φ on dense
-  per-type brute-force grids) with NUTS on GPU.
-
-## Python entry points
-
-| Script | Purpose |
-|---|---|
-| `run_maser_disk.py` | Generic single-galaxy runner (NUTS or NSS). Driven by `config_maser.toml`. |
-| `run_n4258_mode1.py` | NGC4258 Mode 1 NUTS with dense 100k φ grid (no ecc, no quadratic warp). Historical/dev. |
-| `run_de_map.py` | DE MAP optimizer (mode2 only) for one galaxy; prints TOML init values. |
-| `run_mock_maser.py` | Short single-mock closure test on one synthetic galaxy. |
-| `run_mock_maser_disk.py` | Batch mock closure tests over many seeds, with NUTS and KS-style summary. |
-| `toy_joint_H0.py` | Joint `H0` inference from per-galaxy NSS `D_c` posteriors via KDE + numpyro hierarchical model (with/without phenomenological selection). |
-
-## Shell submission scripts
-
-All submit through `addqueue` on glamdring. Jobs use the single
-`venv_candel` (JAX with CUDA, CPU fallback when no GPU is visible).
-
-### `submit.sh` — NSS, NUTS, or DE
-
-Submits one GPU job per `--galaxy` (comma-separated list). Both
-`--sampler` and `--galaxy` are required.
+Run a single galaxy locally:
 
 ```bash
-bash scripts/megamaser/submit.sh --sampler nss --galaxy NGC5765b
-bash scripts/megamaser/submit.sh --sampler nuts --galaxy NGC5765b --num-chains 4
-bash scripts/megamaser/submit.sh --sampler nss --galaxy NGC5765b,UGC3789
+python scripts/megamaser/run_maser_blackjax.py NGC5765b
 ```
 
-Options: `--mode {mode1|mode2}` (NSS/DE require mode2),
-`--f-grid F` (grid-density scaling, nss/nuts only),
-`--devices N` (single-node multi-GPU NSS or DE),
-`--f64` (explicit JAX float64; automatic for mode1 NUTS),
-`--init-method {config|median|sample}`,
-`--resume` (continue NUTS warmup/sampling or NSS/DE from the latest checkpoint),
-`--checkpoint-interval-minutes M` (checkpoint interval; NUTS checkpoints are per-chain),
-`-q QUEUE` (default `gpulong`).
-
-### `submit_ngc4258.sh` — NGC4258 NUTS
-
-GPU NUTS job for NGC4258 specifically. Defaults to `mode1` with per-type
-brute-force φ grids, full model (eccentricity + quadratic warp).
+Useful development flags:
 
 ```bash
-bash scripts/megamaser/submit_ngc4258.sh                                  # defaults
-bash scripts/megamaser/submit_ngc4258.sh --warmup 5000 --samples 4000
-bash scripts/megamaser/submit_ngc4258.sh --no-ecc --no-quadratic-warp     # circular + linear
+python scripts/megamaser/run_maser_blackjax.py NGC6264 \
+    --num-warmup 100 --num-samples 100 --n-sys 6 --n-red 7 --n-blue 7
 ```
 
-Flags: `-q QUEUE` (default `optgpu`), `--warmup`, `--samples`,
-`--init {config|median|sample}`, `--mode`, `--no-ecc`, `--no-quadratic-warp`.
-NSS is *not* supported here (358 per-spot `r_ang` parameters); DE MAP
-doesn't support mode1.
-
-### DE MAP on mode2 galaxies
-
-GPU DE MAP optimizer is reached via `submit.sh --sampler de`:
+The compatibility wrapper is still available for existing job templates:
 
 ```bash
-bash scripts/megamaser/submit.sh -q cmbgpu --sampler de --galaxy NGC5765b
-bash scripts/megamaser/submit.sh -q cmbgpu --sampler de --galaxy NGC5765b,UGC3789
-bash scripts/megamaser/submit.sh -q cmbgpu --sampler de --galaxy NGC5765b --devices 4
+python scripts/megamaser/run_maser_disk.py NGC5765b
 ```
 
-With `--devices N`, the DE population fitness evaluation is sharded over the
-visible local devices on one node. `optimise/eval_chunk` remains the
-per-device batch size.
+Use `run_maser_blackjax.py --help` for the supported production options.
 
-### `toy_joint_H0.sh` — joint `H0` from saved per-galaxy posteriors
+## Cluster Jobs
 
-Submits `toy_joint_H0.py` with 1000 warmup + 4000 samples × 8 chains on
-GPU. By default runs no selection, distance selection, and redshift selection.
-Passing `--selection` runs only that one configuration.
+Submit production Gibbs jobs:
 
 ```bash
-bash scripts/megamaser/toy_joint_H0.sh -q QUEUE                         # all three
-bash scripts/megamaser/toy_joint_H0.sh -q QUEUE --flat-dist             # all three, flat D prior
-bash scripts/megamaser/toy_joint_H0.sh -q QUEUE --selection redshift    # redshift only
+bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b --sampler gibbs
+bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --sampler gibbs
 ```
 
-### `python.sh`
-
-Legacy `addqueue`-generated wrapper. Not actively used; kept only for
-reference to the environment setup (IB locked-memory ulimit, PML/MTL
-transport flags).
-
-## Convergence tests
-
-Quick stability / integration checks for the refined Mode 2 path live in
-`convergence/test_mode2_stability.py`. This is the first test to run
-after changing the Mode 2 likelihood. It uses intentionally reduced
-grids by default, checks both `refine_r_center=false` and `true`,
-verifies finite log-likelihood gradients with `jax.value_and_grad`, and
-confirms refinement cannot silently run without the physical context
-used by the likelihood.
+Submit DE MAP jobs:
 
 ```bash
-/mnt/users/rstiskalek/CANDEL/venv_candel/bin/python \
-    scripts/megamaser/convergence/test_mode2_stability.py
+bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b --sampler de
 ```
 
-Submit the recommended two-galaxy GPU check on glamdring with:
+Common forwarded options are `--num-warmup`, `--num-samples`, `--n-inner`, `--seed`, `--spot-batch`, `--n-sys`, `--n-red`, `--n-blue`, `--f64`, `--no-progress`, `--no-ecc`, `--add-ecc`, `--no-quadratic-warp`, and `--add-quadratic-warp`.
+
+## Configuration
+
+The main config is `config_maser.toml`.
+
+Important grid controls:
+
+```toml
+n_phi_hv_high = 5001
+n_phi_hv_low = 2501
+n_phi_sys = 5001
+n_r_local = 256
+n_r_global = 128
+conditional_spot_batch = 16
+```
+
+`n_phi_*` controls the numerical `phi` marginalisation. `n_r_local`, `n_r_global`, and `conditional_spot_batch` are used by the DE initialiser and conditional-`r` diagnostics; production Gibbs sampling still samples `r_ang` directly.
+
+The `[convergence.*]` blocks are kept because the diagnostic scripts use them for high-resolution numerical references.
+
+## Numerical Diagnostics
+
+The following scripts are intentionally retained:
 
 ```bash
-bash scripts/megamaser/convergence/test_mode2_stability.sh
+python scripts/megamaser/convergence/convergence_phi_marginal.py --galaxies NGC6264 --no-grad
+python scripts/megamaser/convergence/convergence_grids.py --galaxies NGC6264 --timing-attempts 0
+python scripts/megamaser/convergence/test_mode2_grad_vs_numerical.py --galaxy NGC6264
+python scripts/megamaser/convergence/r_ang_posteriors.py --galaxies NGC6264
+python scripts/megamaser/convergence/diagnose_mode2_delta.py --galaxies NGC6264
 ```
 
-Optional finite-difference diagnostics are useful after changing the
-adaptive grid logic. These are diagnostics, not pass/fail convergence
-criteria: coarse grids can show AD/FD mismatch because AD treats the
-quadrature nodes as fixed while finite differences see the re-meshed
-value.
-
-```bash
-/mnt/users/rstiskalek/CANDEL/venv_candel/bin/python \
-    scripts/megamaser/convergence/test_mode2_stability.py --fd
-```
-
-On a GPU, disable JAX preallocation for this quick test so `nvidia-smi`
-does not report an artificial ~75% memory reservation:
-
-```bash
-XLA_PYTHON_CLIENT_PREALLOCATE=false \
-JAX_PLATFORMS=gpu \
-/mnt/users/rstiskalek/CANDEL/venv_candel/bin/python \
-    scripts/megamaser/convergence/test_mode2_stability.py
-```
-
-Default quick-test grids are deliberately smoke-test sized:
-
-```text
-n_r_local = 15
-n_phi_hv  = 41 + 2*9 = 59
-n_phi_sys = 2*41 = 82
-spot_batch = 8
-```
-
-The largest reduced-grid block is `8 * 15 * 82 = 9840` float64 elements.
-Measured CPU RSS was ~1.6 GB for the default test and ~2.7 GB with
-`--fd`; a 12 GB GPU is adequate. This test checks wiring,
-gradient-finiteness, and batching. It does not establish quadrature
-accuracy.
-
-Production Mode 2 settings in `config_maser.toml` are:
-
-```text
-n_r_local = 301
-n_phi_hv  = 4001 + 2*751 = 5503
-n_phi_sys = 2*4001 = 8002
-mode2_spot_batch = 8
-```
-
-The largest production likelihood block is therefore
-`8 * 301 * 8002 = 19,268,816` float64 elements, about 147 MiB for one
-array. `_phi_eval` and reverse-mode AD hold several arrays/temporaries
-of this shape, so real peak memory is several times larger, but this is
-far below the old unbatched whole-group tensors.
-
-Refined centering does not materially change the dominant likelihood
-memory relative to fixed grids of the same `(spot_batch, n_r, n_phi)`
-size. The refinement adds a per-spot Newton solve whose natural
-intermediates scale like `(N_group, n_phi)`, much smaller than the main
-likelihood block. Its cost is mainly compile/runtime, not peak memory.
-
-Before trusting production NumPyro NUTS with the refined Mode 2 path:
-
-- Run `test_mode2_stability.py` for at least UGC3789 and NGC5765b.
-- Run the optional `--fd` diagnostic and inspect large AD/FD mismatches.
-- Re-run `convergence/convergence_grids.py` with refinement enabled and
-  production grid sizes for the MCP five.
-- Run one short GPU NUTS warmup with `mode2_spot_batch = 8`; check peak
-  memory, divergences, and whether step-size adaptation completes.
-- Only then run long NUTS jobs; leave `mode2_spot_batch` explicit unless
-  profiling shows whole-group tensors fit comfortably.
-
-Shared-grid settings in `config_maser.toml` have been validated against
-brute-force references. Scripts live in `convergence/`
-(`convergence_grids.py`, `convergence_phi_marginal.py`, …). Summary:
-
-- **Mode 2, MCP five** — all within 0.08 nats of a 10001² brute-force
-  reference after Simpson HV + two-cluster systemic. Production grids
-  are adequate.
-- **NGC4258, Mode 2** — shared grids cannot resolve σ_φ ~ 0.001 rad
-  peaks; error is ≈ -4200 nats, almost entirely from the systemic
-  spots. This is why NGC4258 uses Mode 1.
-- **NGC4258, Mode 1** — per-type brute-force φ grids converge to the
-  dense reference when `r_ang` is sampled explicitly; NUTS handles the
-  r exploration.
-
-Reproduction commands live in the convergence scripts themselves.
-
-## Current status (2026-04-21)
-
-- **MCP five (NSS, mode2):** the production path. Per-galaxy posteriors
-  feed `toy_joint_H0.py`, which shares `H0` across galaxies with a
-  phenomenological selection model. Reproduces Pesce+2020-style `D_c`
-  posteriors.
-- **NGC4258:** still the most fragile piece.
-  - GPU NUTS `mode1` runs cleanly, but currently converges on the
-    inclination branch `i ≈ 94.9°` rather than Reid+2019's `i = 87.05°`
-    (the near-edge-on symmetry is only weakly broken by eccentricity
-    ≈ 0.007). D ≈ 7.51 Mpc vs Reid 7.58; periapsis offset by ~87°.
-    Fix candidates: tight prior on i, sign check on the `periapsis`
-    convention, dense-mass block over the warp parameters.
-- **Joint `H0`:** `toy_joint_H0.py` produces a first-pass combined
-  posterior from the per-galaxy NSS chains. Still a "toy" combiner —
-  per-galaxy `D_c` posteriors are KDE'd and the volumetric prior divided
-  out; a fully hierarchical joint fit is future work.
-- **Paper draft:** `/mnt/users/rstiskalek/Papers/MMH0/main.tex`.
-
-## Related docs
-
-- `docs/maser_numerical_accuracy.md` — quadrature/grid accuracy notes.
-- `instructions/maser_disk_jobs.md` — runner, config, submission.
-- `instructions/glamdring_gpu_jobs.md` — queues and `addqueue` syntax.
+Despite some historical filenames, these are now diagnostic-only checks for quadrature and gradients. They are not alternative megamaser samplers.
