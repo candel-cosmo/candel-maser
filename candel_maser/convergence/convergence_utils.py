@@ -14,15 +14,10 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 """Brute-force reference kernels for maser disk quadrature diagnostics.
 
-Two numerical checks are kept here:
-- ``bruteforce_ll_conditional_r``: full-2pi phi x log-r brute-force
-  reference for the conditional-r diagnostic grid.
-- ``bruteforce_ll_fixed_r``: full-2pi phi reference at a fixed ``r_ang``.
-
-Both batch over the r-axis and the spot-axis so the intermediate fits on a
-12 GB GPU.
+The retained convergence checks compare the production fixed-``r_ang`` phi
+marginal against a full-2pi phi reference. The helpers batch over the spot
+axis so the intermediate fits on a 12 GB GPU.
 """
-from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -31,111 +26,6 @@ from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
 from candel.util import get_nested
-
-
-@partial(jax.jit, static_argnames=("model", "n_phi", "has_accel", "ecc_on"))
-def _bruteforce_rchunk(
-        model, idx, has_accel, ecc_on,
-        x0, y0, D_A, M_BH, v_sys,
-        r_ang_ref_i, r_ang_ref_Omega, r_ang_ref_periapsis,
-        i0, di_dr, d2i_dr2, Omega0, dOmega_dr, d2Omega_dr2,
-        ecc, periapsis0, dperiapsis_dr,
-        sigma_x_floor2, sigma_y_floor2,
-        var_v_sys, var_v_hv, sigma_a_floor2,
-        r_chunk, log_w_r_chunk, n_phi):
-    """One r-chunk of the brute-force reference integral over [0, 2π] φ.
-
-    Reuses ``model._r_precompute`` + ``model._phi_eval_shared_r`` so the
-    integrand matches production exactly; only the integration grid
-    recipe differs (uniform [0, 2π] φ here vs adaptive sub-ranges in
-    production). Runs at the model's working dtype — controlled by
-    process-level ``jax_enable_x64`` (the convergence scripts enable
-    it unconditionally).
-    """
-    phi = jnp.linspace(0.0, 2 * jnp.pi, n_phi)
-    log_w_phi = trapz_log_weights(phi)
-    sin_phi = jnp.sin(phi)
-    cos_phi = jnp.cos(phi)
-
-    phys_args = (x0, y0, D_A, M_BH, v_sys,
-                 r_ang_ref_i, r_ang_ref_Omega, r_ang_ref_periapsis,
-                 i0, di_dr, Omega0, dOmega_dr,
-                 sigma_x_floor2, sigma_y_floor2,
-                 var_v_sys, var_v_hv, sigma_a_floor2)
-    phys_kw = dict(d2i_dr2=d2i_dr2, d2Omega_dr2=d2Omega_dr2)
-    if ecc_on:
-        phys_kw.update(ecc=ecc, periapsis0=periapsis0,
-                       dperiapsis_dr=dperiapsis_dr)
-
-    r_pre = model._r_precompute(
-        r_chunk, idx, *phys_args, **phys_kw,
-        has_any_accel=has_accel)
-    nhc = model._phi_eval_shared_r(r_pre, sin_phi, cos_phi)
-
-    log_f = (r_pre["lnorm"] + r_pre["lnorm_a"])[:, None, None] + nhc
-    log_w_2d = log_w_r_chunk[:, None] + log_w_phi[None, :]
-    return logsumexp(log_f + log_w_2d[None, :, :], axis=(-2, -1))
-
-
-def bruteforce_ll_conditional_r(model, phys_args, phys_kw, ref_cfg):
-    """Total log-likelihood reference via chunked r × full-2π φ.
-
-    ref_cfg: dict with keys n_r, n_phi, r_chunk, spot_batch.
-    Runs at the model's working dtype — controlled by process-level
-    ``jax_enable_x64`` (the convergence scripts enable it
-    unconditionally). The legacy ``dtype`` key in ref_cfg is ignored.
-    Returns a python float.
-    """
-    n_r = int(ref_cfg["n_r"])
-    n_phi = int(ref_cfg["n_phi"])
-    r_chunk_size = int(ref_cfg["r_chunk"])
-    spot_batch = int(ref_cfg["spot_batch"])
-
-    (x0, y0, D_A, M_BH, v_sys,
-     r_ang_ref_i, r_ang_ref_Omega, r_ang_ref_periapsis,
-     i0, di_dr, Omega0, dOmega_dr,
-     sigma_x_floor2, sigma_y_floor2,
-     var_v_sys, var_v_hv, sigma_a_floor2) = phys_args
-    d2i_dr2 = phys_kw.get("d2i_dr2", 0.0)
-    d2Omega_dr2 = phys_kw.get("d2Omega_dr2", 0.0)
-    ecc = phys_kw.get("ecc", None)
-    periapsis0 = phys_kw.get("periapsis0", 0.0)
-    dperiapsis_dr = phys_kw.get("dperiapsis_dr", 0.0)
-    ecc_on = ecc is not None
-    if not ecc_on:
-        ecc = 0.0
-
-    r_min, r_max = model.r_ang_range(D_A)
-    log_r = jnp.linspace(jnp.log(r_min), jnp.log(r_max), n_r)
-    r_grid = jnp.exp(log_r)
-    log_w_r = trapz_log_weights(r_grid)
-
-    has_accel_all = np.asarray(model._all_has_accel)
-
-    total = 0.0
-    for has_a in (True, False):
-        mask = has_accel_all if has_a else ~has_accel_all
-        idx_full = np.where(mask)[0]
-        if len(idx_full) == 0:
-            continue
-        for s in range(0, len(idx_full), spot_batch):
-            b = jnp.asarray(idx_full[s:s + spot_batch])
-            partials = []
-            for start in range(0, n_r, r_chunk_size):
-                end = min(start + r_chunk_size, n_r)
-                p = _bruteforce_rchunk(
-                    model, b, has_a, ecc_on,
-                    x0, y0, D_A, M_BH, v_sys,
-                    r_ang_ref_i, r_ang_ref_Omega, r_ang_ref_periapsis,
-                    i0, di_dr, d2i_dr2, Omega0, dOmega_dr, d2Omega_dr2,
-                    ecc, periapsis0, dperiapsis_dr,
-                    sigma_x_floor2, sigma_y_floor2,
-                    var_v_sys, var_v_hv, sigma_a_floor2,
-                    r_grid[start:end], log_w_r[start:end], n_phi)
-                partials.append(p)
-            ll = logsumexp(jnp.stack(partials, axis=0), axis=0)
-            total += float(jnp.sum(ll))
-    return total
 
 
 def bruteforce_ll_fixed_r(model, phys_args, phys_kw, r_ang, ref_cfg):
