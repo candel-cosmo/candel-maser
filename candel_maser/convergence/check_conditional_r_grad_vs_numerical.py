@@ -1,7 +1,7 @@
 """Conditional-r AD gradient vs numerical finite differences.
 
 Validates that gradients w.r.t. global disk parameters propagate correctly
-through the conditional-r (r+phi marginalised) likelihood, with r-grids frozen by
+through the conditional-r (r+phi marginalised) likelihood, with r-grids frozen by  # noqa: E501
 stop_gradient.  Tests ONE spot at a time to keep memory bounded.
 
 Two independent checks per test spot:
@@ -19,7 +19,7 @@ After passing, prints analytical and empirical memory estimates for
 production-scale gradient computation (one spot and all spots).
 
 Usage:
-    python check_conditional_r_grad_vs_numerical.py [--galaxy NGC5765b] [options]
+    python check_conditional_r_grad_vs_numerical.py [--galaxy NGC5765b] [options]  # noqa: E501
 """
 import argparse
 import os
@@ -28,21 +28,18 @@ import time
 
 os.environ.setdefault("JAX_PLATFORMS", "cuda")
 
-import jax                                          # noqa: E402
-import jax.numpy as jnp                             # noqa: E402
-import numpy as np                                  # noqa: E402
-import tomli                                        # noqa: E402
-from jax.scipy.special import logsumexp             # noqa: E402
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+import numpy as np  # noqa: E402
+import tomli  # noqa: E402
+from jax.scipy.special import logsumexp  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
-from convergence_utils import (                     # noqa: E402
-    build_model,
-    ensure_grad_sample,
-    extend_grad_params,
-    jax_phys_from_sample,
-    resolve_grid_for_galaxy,
-)
+from convergence_utils import (build_model, ensure_grad_sample,  # noqa: E402
+                               extend_grad_params, jax_phys_from_sample,
+                               resolve_grid_for_galaxy)
+
 from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
@@ -86,7 +83,9 @@ def subsample_data(data, n_total=_N_CHECKB_SPOTS, seed=0):
 def build_model_from_data(galaxy, master_cfg, data, **overrides):
     """Like ``build_model`` but accepts pre-loaded (subsampled) data."""
     import tempfile
+
     import tomli_w
+
     from candel.model.model_H0_maser import MaserDiskModel
 
     cfg = {k: (v.copy() if isinstance(v, dict) else v)

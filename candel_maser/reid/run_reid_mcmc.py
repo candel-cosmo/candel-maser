@@ -12,7 +12,6 @@ import argparse
 import csv
 import json
 import math
-import os
 import re
 import shutil
 import subprocess
@@ -38,8 +37,13 @@ REID_CONTROL_TEMPLATE = REID_DIR / "fit_disk_control.inp"
 DEFAULT_CONFIG = ROOT / "scripts/megamaser/config_maser.toml"
 DEFAULT_DATA = ROOT / "data/Megamaser/N4258_disk_data_MarkReid.final"
 DEFAULT_RESULTS = ROOT / "results/Megamaser/reid_mcmc"
-DEFAULT_REID_INIT = ROOT / "scripts/megamaser/check_reid/reid_ngc4258_init.toml"
+DEFAULT_REID_INIT = ROOT / "scripts/megamaser/check_reid/reid_ngc4258_init.toml"  # noqa: E501
 MAX_CORNER_SAMPLES = 20000
+FORT7_WIDTHS = [
+    10, 6, 10, 10, 9, 9, 9, 8, 8, 8, 8, 8, 8, 6,
+    8, 8, 8, 8, 8, 8, 8, 8, 13,
+]
+FORT7_ROW_WIDTH = sum(FORT7_WIDTHS)
 
 GLOBAL_NAMES = [
     "H0",
@@ -65,6 +69,18 @@ GLOBAL_NAMES = [
 ]
 
 DEFAULT_CONTOUR_PARAMS = [*GLOBAL_NAMES, "D_Mpc"]
+
+assert len(FORT7_WIDTHS) == 2 + len(GLOBAL_NAMES) + 1, (
+    "FORT7_WIDTHS must have one entry per fort.7 column (iter, walker, "
+    "GLOBAL_NAMES..., lnP)")
+
+# (prior_unc, post_unc) control-file columns used when a template-fixed global
+# is unfrozen via --free-params. prior_unc < 0 keeps Reid's flat-prior
+# convention (so the prior is unchanged); the step mirrors the analogous
+# quadratic-warp term d2PA/dr2 in the template.
+FREE_DEFAULTS = {
+    "d2i_dr2_deg_mas2": (-1.0, 0.015),
+}
 
 PARAM_LABELS = {
     "H0": r"$H_0\ [{\rm km\ s^{-1}\ Mpc^{-1}}]$",
@@ -131,8 +147,10 @@ def prepared_data_text(data_path: Path, fallback_header: str) -> str:
     return f"{header}\n{text}"
 
 
-def parse_data_rows(data_path: Path) -> tuple[dict[str, float | str], np.ndarray]:
-    text = prepared_data_text(data_path, "300 700 0.02 0.03 0.01 0.01 0.3 Radio")
+def parse_data_rows(
+        data_path: Path) -> tuple[dict[str, float | str], np.ndarray]:
+    text = prepared_data_text(
+        data_path, "300 700 0.02 0.03 0.01 0.01 0.3 Radio")
     rows: list[list[float]] = []
     header: dict[str, float | str] | None = None
     for line in text.splitlines():
@@ -163,20 +181,47 @@ def radio_to_optical(v_radio: np.ndarray | float) -> np.ndarray | float:
     return c_km_s * (v_radio / (c_km_s - v_radio))
 
 
-def load_reid_init(path: Path, vcor: float | None = None) -> ReidInit:
+def load_reid_init(path: Path, vcor: float | None = None,
+                   galaxy: str | None = None,
+                   variant: str = "init") -> ReidInit:
     init = load_toml(path)["globals"]
+    tag = str(path)
+    if any(isinstance(v, dict) for v in init.values()):
+        # Merged multi-galaxy file: [globals.<GALAXY>.<variant>].
+        if not isinstance(init.get(galaxy), dict):
+            available = sorted(k for k, v in init.items()
+                               if isinstance(v, dict))
+            raise ValueError(
+                f"{path} is a merged [globals.<GALAXY>.<variant>] file "
+                f"with no [globals.{galaxy}]; available galaxies: "
+                f"{available}")
+        by_variant = init[galaxy]
+        if variant not in by_variant:
+            raise ValueError(
+                f"{path} has no [globals.{galaxy}.{variant}]; "
+                f"available variants: {sorted(by_variant)}")
+        init = by_variant[variant]
+        tag = f"{path}:{galaxy}:{variant}"
     values = {name: float(init[name]) for name in GLOBAL_NAMES}
     if vcor is not None:
         values["Vcor_km_s"] = float(vcor)
-    values.update({"_D_c": (values["Vsys_km_s"] + values["Vcor_km_s"]) / values["H0"],
-                   "_r_ref_i": 0.0, "_r_ref_PA": 0.0, "_r_ref_peri": 0.0})
-    return ReidInit(values=values, source=f"reid-init:{path}")
+    values.update(
+        {
+            "_D_c": (
+                values["Vsys_km_s"] +
+                values["Vcor_km_s"]) /
+            values["H0"],
+            "_r_ref_i": 0.0,
+            "_r_ref_PA": 0.0,
+            "_r_ref_peri": 0.0})
+    return ReidInit(values=values, source=f"reid-init:{tag}")
 
 
 def resolve_init_toml(name: str) -> Path:
     path = Path(name)
     if path.name != name or path.is_absolute():
-        raise ValueError("--init must be a TOML filename in scripts/megamaser/check_reid")
+        raise ValueError(
+            "--init must be a TOML filename in scripts/megamaser/check_reid")
     if path.suffix != ".toml":
         raise ValueError("--init must end with .toml")
     path = SCRIPT_DIR / path.name
@@ -197,22 +242,25 @@ def load_galaxy_config(config_path: Path, galaxy: str) -> dict:
     return default_gcfg
 
 
-def load_toml_init(path: Path, galaxy: str, vcor: float) -> ReidInit:
+def load_toml_init(path: Path, galaxy: str, vcor: float,
+                   variant: str = "init") -> ReidInit:
     cfg = load_toml(path)
     if "globals" in cfg:
-        return load_reid_init(path, vcor)
+        return load_reid_init(path, vcor, galaxy=galaxy, variant=variant)
     try:
-        cfg["model"]["galaxies"][galaxy]["init"]
+        cfg["model"]["galaxies"][galaxy][variant]
     except KeyError as exc:
         raise ValueError(
-            f"{path} must contain [globals] or [model.galaxies.{galaxy}.init]"
+            f"{path} must contain [globals] or "
+            f"[model.galaxies.{galaxy}.{variant}]"
         ) from exc
-    return load_config_init(path, galaxy, vcor)
+    return load_config_init(path, galaxy, vcor, variant=variant)
 
 
-def load_config_init(config_path: Path, galaxy: str, vcor: float) -> ReidInit:
+def load_config_init(config_path: Path, galaxy: str, vcor: float,
+                     variant: str = "init") -> ReidInit:
     gcfg = load_galaxy_config(config_path, galaxy)
-    init = dict(gcfg["init"])
+    init = dict(gcfg[variant])
     v_sys = float(gcfg["v_sys_obs"]) + float(init.get("dv_sys", 0.0))
     distance = float(init["D_c"])
     m_bh = 10.0 ** (float(init["log_MBH"]) - 7.0)
@@ -233,9 +281,11 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float) -> ReidInit:
             "Vsys_km_s": v_sys,
             "x0_mas": float(init.get("x0", 0.0)) / 1000.0,
             "y0_mas": float(init.get("y0", 0.0)) / 1000.0,
-            "i0_deg": float(init.get("i0", 86.0)),
-            "di_dr_deg_mas": float(init.get("di_dr", 0.0)),
-            "d2i_dr2_deg_mas2": float(init.get("d2i_dr2", 0.0)),
+            # Reid inclination convention: i_Reid = 180 - i_CANDEL; the di/dr
+            # and d2i/dr2 warp gradients are correspondingly sign-flipped.
+            "i0_deg": 180.0 - float(init.get("i0", 94.0)),
+            "di_dr_deg_mas": -float(init.get("di_dr", 0.0)),
+            "d2i_dr2_deg_mas2": -float(init.get("d2i_dr2", 0.0)),
             "PA_deg": float(init.get("Omega0", 89.0)),
             "dPA_dr_deg_mas": float(init.get("dOmega_dr", 0.0)),
             "d2PA_dr2_deg_mas2": float(init.get("d2Omega_dr2", 0.0)),
@@ -249,7 +299,7 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float) -> ReidInit:
             "sigma_vhv_km_s": float(init.get("sigma_v_hv", 1.0)),
             "sigma_acc_km_s_yr": float(init.get("sigma_a_floor", 0.4)),
             "_D_c": distance,
-            "_r_ref_i": float(gcfg.get("r_ang_ref_i", init.get("r_ang_ref", 0.0))),
+            "_r_ref_i": float(gcfg.get("r_ang_ref_i", init.get("r_ang_ref", 0.0))),  # noqa: E501
             "_r_ref_PA": float(
                 gcfg.get("r_ang_ref_Omega", init.get("r_ang_ref", 0.0))
             ),
@@ -257,11 +307,15 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float) -> ReidInit:
                 gcfg.get("r_ang_ref_periapsis", init.get("r_ang_ref", 0.0))
             ),
         },
-        source=f"config:{config_path}",
+        source=f"config:{config_path}:{variant}",
     )
 
 
-def compute_reid_r_ref(rows: np.ndarray, header: dict[str, float | str], init: dict[str, float]) -> float:
+def compute_reid_r_ref(rows: np.ndarray,
+                       header: dict[str,
+                                    float | str],
+                       init: dict[str,
+                                  float]) -> float:
     v = rows[:, 1]
     x = rows[:, 3]
     y = rows[:, 5]
@@ -270,11 +324,13 @@ def compute_reid_r_ref(rows: np.ndarray, header: dict[str, float | str], init: d
     hv = (v < float(header["Vmin"])) | (v > float(header["Vmax"]))
     r = np.hypot(x[hv] - init["x0_mas"], y[hv] - init["y0_mas"])
     if not len(r):
-        raise ValueError("Cannot infer Reid r_ref: no high-velocity spots found")
+        raise ValueError(
+            "Cannot infer Reid r_ref: no high-velocity spots found")
     return float(np.mean(r))
 
 
-def shift_warp_pivots(init: dict[str, float], reid_r_ref: float) -> dict[str, float]:
+def shift_warp_pivots(init: dict[str, float],
+                      reid_r_ref: float) -> dict[str, float]:
     out = dict(init)
     ri = float(init.get("_r_ref_i", 0.0))
     rpa = float(init.get("_r_ref_PA", 0.0))
@@ -294,7 +350,8 @@ def shift_warp_pivots(init: dict[str, float], reid_r_ref: float) -> dict[str, fl
             + init["d2PA_dr2_deg_mas2"] * dr * dr
         )
     if rperi:
-        out["peri_az_deg"] = init["peri_az_deg"] - init["dperi_dr_deg_mas"] * rperi
+        out["peri_az_deg"] = init["peri_az_deg"] - \
+            init["dperi_dr_deg_mas"] * rperi
     return out
 
 
@@ -305,7 +362,7 @@ def template_control_lines() -> list[str]:
 def set_control_numbers(line: str, values: Iterable[float | int | str]) -> str:
     suffix = ""
     if "!" in line:
-        suffix = " " + line[line.index("!") :]
+        suffix = " " + line[line.index("!"):]
     fields = []
     for value in values:
         if isinstance(value, str):
@@ -330,11 +387,14 @@ def write_control(
     step_fraction: float,
     fit_data: tuple[bool, bool, bool, bool],
     fixed_params: set[str] | None = None,
+    free_params: set[str] | None = None,
 ) -> None:
     fixed_params = fixed_params or set()
+    free_params = free_params or set()
     lines = template_control_lines()
     lines[1] = set_control_numbers(lines[1], [burnin])
-    lines[2] = set_control_numbers(lines[2], [trials, walkers, h0_low, h0_high])
+    lines[2] = set_control_numbers(
+        lines[2], [trials, walkers, h0_low, h0_high])
     lines[3] = set_control_numbers(
         lines[3], [0, 0.5, *(("T" if x else "F") for x in fit_data)]
     )
@@ -368,20 +428,20 @@ def write_control(
         if name in fixed_params:
             prior = 0.0
             post = 0.0
+        elif name in free_params:
+            prior, post = FREE_DEFAULTS.get(name, (-1.0, abs(post) or 0.05))
         lines[i] = set_control_numbers(lines[i], [init[name], prior, post])
     path.write_text("\n".join(lines) + "\n")
 
 
-def global_template_prior_unc() -> dict[str, float]:
-    lines = template_control_lines()
-    out: dict[str, float] = {}
-    for i, name in enumerate(GLOBAL_NAMES, start=5):
-        parts = lines[i].split("!", 1)[0].split()
-        out[name] = float(parts[1])
-    return out
-
-
-def initial_r_phi(rows: np.ndarray, header: dict[str, float | str], init: dict[str, float]) -> list[tuple[float, float, float, float]]:
+def initial_r_phi(rows: np.ndarray,
+                  header: dict[str,
+                               float | str],
+                  init: dict[str,
+                             float]) -> list[tuple[float,
+                                                   float,
+                                                   float,
+                                                   float]]:
     v = rows[:, 1].copy()
     acc = rows[:, 7]
     if str(header["velocity_flag"]).lower().startswith("r"):
@@ -410,7 +470,9 @@ def initial_r_phi(rows: np.ndarray, header: dict[str, float | str], init: dict[s
             post_phi = 0.5
             post_r = 0.1
         else:
-            r_mas = math.hypot(row[3] - init["x0_mas"], row[5] - init["y0_mas"])
+            r_mas = math.hypot(
+                row[3] - init["x0_mas"],
+                row[5] - init["y0_mas"])
             phi = 90.0 if vv > vmax else -90.0
             sigma_phi = 20.0
             post_phi = 5.0
@@ -419,8 +481,15 @@ def initial_r_phi(rows: np.ndarray, header: dict[str, float | str], init: dict[s
     return out
 
 
-def write_burnin_values(path: Path, init: dict[str, float], rphi: list[tuple[float, float, float, float]]) -> None:
-    prior_unc = global_template_prior_unc()
+def write_burnin_values(path: Path,
+                        init: dict[str,
+                                   float],
+                        rphi: list[tuple[float,
+                                         float,
+                                         float,
+                                         float]],
+                        fixed_params: set[str] | None = None) -> None:
+    fixed_params = fixed_params or set()
     with path.open("w") as f:
         f.write("! Ho value shifted down; reconstruct using  0.000000\n")
         for name in GLOBAL_NAMES:
@@ -431,7 +500,7 @@ def write_burnin_values(path: Path, init: dict[str, float], rphi: list[tuple[flo
                 post = 0.05
             elif name.endswith("_mas") or name.endswith("_mas2"):
                 post = 0.005
-            if prior_unc[name] == 0.0:
+            if name in fixed_params:
                 post = 0.0
             f.write(f"{init[name]:12.6f}{post:12.6f}{post:12.6f}\n")
         for r_mas, post_r, phi, post_phi in rphi:
@@ -454,7 +523,7 @@ def instrument_reid_source(run_dir: Path, status_interval: int) -> Path:
         1,
     )
 
-    secondary_marker = "      do ib2 = 1, ib2_max\n\n         do n_w = 1, num_walkers"
+    secondary_marker = "      do ib2 = 1, ib2_max\n\n         do n_w = 1, num_walkers"  # noqa: E501
     secondary_patch = (
         "      do ib2 = 1, ib2_max\n\n"
         f"         if ( mod(ib2,{status_literal}) .eq. 0 )\n"
@@ -464,7 +533,8 @@ def instrument_reid_source(run_dir: Path, status_interval: int) -> Path:
         "         do n_w = 1, num_walkers"
     )
     if secondary_marker not in text:
-        raise RuntimeError("Could not find Reid secondary burn-in loop to instrument")
+        raise RuntimeError(
+            "Could not find Reid secondary burn-in loop to instrument")
     text = text.replace(secondary_marker, secondary_patch, 1)
 
     out = run_dir / "fit_disk_v24d_unblinded_status.f"
@@ -472,9 +542,18 @@ def instrument_reid_source(run_dir: Path, status_interval: int) -> Path:
     return out
 
 
-def compile_reid(run_dir: Path, compiler: str, flags: str, status_interval: int) -> Path:
+def compile_reid(
+        run_dir: Path,
+        compiler: str,
+        flags: str,
+        status_interval: int,
+        instrument: bool = False) -> Path:
     exe = run_dir / "fit_disk_reid_v24d"
-    source = instrument_reid_source(run_dir, status_interval)
+    if instrument:
+        source = instrument_reid_source(run_dir, status_interval)
+    else:
+        source = run_dir / REID_SOURCE.name
+        shutil.copy2(REID_SOURCE, source)
     cmd = [compiler, *flags.split(), "-o", str(exe), str(source)]
     subprocess.run(cmd, cwd=run_dir, check=True)
     return exe
@@ -505,37 +584,98 @@ def run_reid(exe: Path, run_dir: Path) -> Path:
     return stdout_path
 
 
-def parse_fortran_float(value: bytes | str) -> float:
-    """Parse Reid/Fortran numeric output, including D exponent notation."""
-    if isinstance(value, bytes):
-        text = value.decode("ascii")
-    else:
-        text = value
-    return float(text.replace("D", "E").replace("d", "e"))
+def _coerce_float_column(col: np.ndarray) -> np.ndarray:
+    """Cast a fixed-width byte column to float64, mapping unparseable
+    entries (e.g. a Fortran f10.5-style field overflowing to '****' when
+    a run's H0 wanders near zero) to NaN instead of raising -- matching
+    genfromtxt's tolerant behaviour."""
+    try:
+        return col.astype(np.float64)
+    except ValueError:
+        out = np.full(col.shape, np.nan)
+        for i, token in enumerate(col):
+            try:
+                out[i] = float(token)
+            except ValueError:
+                pass
+        return out
 
 
 def load_chain(path: Path) -> np.ndarray:
-    expected = 2 + len(GLOBAL_NAMES) + 1
-    data = np.genfromtxt(
-        path,
-        comments="!",
-        converters={expected - 1: parse_fortran_float},
-    )
-    if data.ndim == 1:
-        data = data[None, :]
-    if data.shape[1] != expected:
-        raise ValueError(f"{path} has {data.shape[1]} columns, expected {expected}")
+    """Parse a fort.7 chain file: fixed-width Fortran columns that can
+    touch (e.g. a full-width negative number abutting the next field, so
+    this is NOT whitespace-delimited). Vectorized byte-offset slicing
+    instead of genfromtxt's per-row Python parsing -- ~5x faster on the
+    million-row production chains this pipeline writes."""
+    raw = Path(path).read_bytes().replace(b"D", b"E").replace(b"d", b"e")
+    lines = raw.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    # Drop comment lines and any partial row left by a job killed mid-write.
+    lines = [ln for ln in lines
+             if not ln.startswith(b"!") and len(ln) == FORT7_ROW_WIDTH]
+    if not lines:
+        raise ValueError(f"{path} has no complete fixed-width rows")
+    n = len(lines)
+    chars = np.array(lines, dtype=f"S{FORT7_ROW_WIDTH}").view("S1").reshape(
+        n, FORT7_ROW_WIDTH)
+    offsets = np.cumsum([0] + FORT7_WIDTHS)
+    cols = [chars[:, s:e].view(f"S{e - s}").ravel()
+            for s, e in zip(offsets[:-1], offsets[1:])]
+
     dtype = [("iter", "i8"), ("walker", "i4")]
     dtype += [(name, "f8") for name in GLOBAL_NAMES]
     dtype += [("lnP", "f8")]
-    arr = np.empty(data.shape[0], dtype=dtype)
-    arr["iter"] = data[:, 0].astype(np.int64)
-    arr["walker"] = data[:, 1].astype(np.int32)
+    arr = np.empty(n, dtype=dtype)
+    arr["iter"] = cols[0].astype(np.int64)
+    arr["walker"] = cols[1].astype(np.int32)
     for i, name in enumerate(GLOBAL_NAMES, start=2):
-        arr[name] = data[:, i]
-    arr["lnP"] = data[:, -1]
+        arr[name] = _coerce_float_column(cols[i])
+    arr["lnP"] = _coerce_float_column(cols[-1])
     arr = append_distance(arr)
     return arr
+
+
+def _reid_dnum(v):
+    """The H0- and D_A-independent factor of Reid fit_disk's ``dampc`` mapping
+    (flat LambdaCDM, Omega_m=0.27, Omega_L=0.73; Hogg 1999 eq. 14/18):
+    ``c * eq14int(z) / (1+z)`` with z = v/c and v = Vsys+Vcor [km/s]. Both
+    directions of the mapping fall out of it -- D_A = _reid_dnum(v)/H0 and its
+    inverse H0 = _reid_dnum(v)/D_A.
+
+    Vectorised: eq14int depends only on z, so it is precomputed on a shared
+    z-grid and interpolated per sample (grid error <1e-6; agrees with the
+    Fortran's per-draw D_A to ~6e-5, the residual being its integer-km/s Ez
+    rounding this deliberately smooths), keeping million-row chains
+    memory-safe."""
+    c, Om, Ol = 299792.458, 0.27, 0.73
+    v = np.asarray(v, dtype=np.float64)
+    z = v / c
+    zmax = float(np.nanmax(z)) if z.size else 0.0
+    zg = np.linspace(0.0, zmax if zmax > 0.0 else 1e-6, 20001)
+    inv_E = 1.0 / np.sqrt(Om * (1.0 + zg) ** 3 + Ol)
+    eq14 = np.concatenate(
+        ([0.0], np.cumsum(0.5 * (inv_E[1:] + inv_E[:-1]) * np.diff(zg))))
+    return c * np.interp(z, zg, eq14) / (1.0 + z)
+
+
+def reid_D_A(v, H0):
+    """Angular-diameter distance D_A [Mpc] from recession velocity v =
+    Vsys+Vcor [km/s] and H0, via Reid fit_disk's own ``dampc`` mapping. This
+    is the exact H0->D_A relation the disk model uses internally, so applying
+    it to the sampled H0 gives a Reid D_A directly comparable to CANDEL's
+    sampled D_A -- unlike the naive Hubble ratio v/H0, which overshoots D_A by
+    the cosmological (1+z)/E(z) factor (~3% at MCP redshifts)."""
+    return _reid_dnum(v) / np.asarray(H0, dtype=np.float64)
+
+
+def reid_H0(v, D_A):
+    """Inverse of reid_D_A: the cosmological H0 that makes ``dampc`` map
+    (v=Vsys+Vcor, H0) onto the given D_A. Applied to CANDEL's sampled D_A it
+    puts CANDEL's H0 on the same cosmological footing as Reid's sampled H0,
+    instead of the naive v/D_A -- which overshoots the true H0 by the same
+    ~3% factor."""
+    return _reid_dnum(v) / np.asarray(D_A, dtype=np.float64)
 
 
 def append_distance(arr: np.ndarray) -> np.ndarray:
@@ -543,7 +683,9 @@ def append_distance(arr: np.ndarray) -> np.ndarray:
     out = np.empty(arr.shape, dtype=dtype)
     for name in arr.dtype.names:
         out[name] = arr[name]
-    out["D_Mpc"] = (arr["Vsys_km_s"] + arr["Vcor_km_s"]) / arr["H0"]
+    # D_A via the disk model's dampc mapping (not the naive v/H0), so Reid's
+    # distance is the same angular-diameter distance CANDEL samples.
+    out["D_Mpc"] = reid_D_A(arr["Vsys_km_s"] + arr["Vcor_km_s"], arr["H0"])
     return out
 
 
@@ -564,18 +706,18 @@ def write_chain_csv(arr: np.ndarray, path: Path) -> None:
             writer.writerow([row[name].item() for name in names])
 
 
-def write_lnp_csv(arr: np.ndarray, path: Path, chain_label: str | None = None) -> None:
+def write_lnp_csv(
+        arr: np.ndarray,
+        path: Path) -> None:
     names = ["iter", "walker", "lnP"]
-    if chain_label is not None:
-        names = ["chain"] + names
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(names)
         for row in arr:
-            values = [row["iter"].item(), row["walker"].item(), row["lnP"].item()]
-            if chain_label is not None:
-                values = [chain_label] + values
-            writer.writerow(values)
+            writer.writerow([
+                row["iter"].item(),
+                row["walker"].item(),
+                row["lnP"].item()])
 
 
 def lnp_summary(arr: np.ndarray) -> dict:
@@ -620,11 +762,12 @@ def summary_from_chain(arr: np.ndarray, stdout_path: Path) -> dict:
             "p025": float(np.nanpercentile(x, 2.5)),
             "p975": float(np.nanpercentile(x, 97.5)),
         }
-    text = stdout_path.read_text(errors="replace") if stdout_path.exists() else ""
+    text = stdout_path.read_text(
+        errors="replace") if stdout_path.exists() else ""
     for key, pattern in {
         "acceptance_percent": r"Percent trials accepted.*?([0-9.]+)%",
-        "best_lnP_reported": r"MCMC trials had best ln\(Probability\) =\s*([-+0-9.Ee]+)",
-        "downhill_best_lnP": r"Best global parameter values with ln\(prob\)=\s*([-+0-9.Ee]+)",
+        "best_lnP_reported": r"MCMC trials had best ln\(Probability\) =\s*([-+0-9.Ee]+)",  # noqa: E501
+        "downhill_best_lnP": r"Best global parameter values with ln\(prob\)=\s*([-+0-9.Ee]+)",  # noqa: E501
     }.items():
         m = re.search(pattern, text)
         if m:
@@ -636,8 +779,8 @@ def plot_corner(arr: np.ndarray, params: list[str], path: Path) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import corner
+    import matplotlib.pyplot as plt
 
     params = [p for p in params if p != "lnP" and p in arr.dtype.names]
     if not params:
@@ -659,7 +802,8 @@ def plot_corner(arr: np.ndarray, params: list[str], path: Path) -> None:
 
     if data.shape[1] == 1:
         fig, ax = plt.subplots(figsize=(4.8, 3.2))
-        ax.hist(data[:, 0], bins=40, color="0.25", histtype="stepfilled", alpha=0.65)
+        ax.hist(data[:, 0], bins=40, color="0.25",
+                histtype="stepfilled", alpha=0.65)
         ax.set_xlabel(PARAM_LABELS.get(params[0], params[0]))
         ax.set_ylabel("stored samples")
         if truths is not None:
@@ -724,6 +868,12 @@ def numpyro_summary_text(samples: dict[str, np.ndarray]) -> str:
     from numpyro.diagnostics import summary as numpyro_summary
 
     stats = numpyro_summary(samples, prob=0.9, group_by_chain=True)
+    # Drop parameters pinned to a constant (not actually sampled, e.g. a
+    # control-file global with prior_unc=0): zero variance everywhere.
+    stats = {name: values for name, values in stats.items()
+             if values["std"] != 0.0}
+    if not stats:
+        return "(no sampled parameters)"
     name_width = max(9, *(len(name) for name in stats))
     lines = [
         f"{'':{name_width}s} {'mean':>10s} {'std':>10s} {'median':>10s} "
@@ -827,8 +977,10 @@ def parse_bool_quad(value: str) -> tuple[bool, bool, bool, bool]:
     if len(chars) == 1 and len(chars[0]) == 4:
         chars = list(chars[0])
     if len(chars) != 4:
-        raise argparse.ArgumentTypeError("expected four booleans, e.g. T T T T or TTTF")
-    return tuple(c.lower() in {"t", "true", "1", "yes", "y"} for c in chars)  # type: ignore[return-value]
+        raise argparse.ArgumentTypeError(
+            "expected four booleans, e.g. T T T T or TTTF")
+    return tuple(c.lower() in {"t", "true", "1", "yes", "y"}
+                 for c in chars)  # type: ignore[return-value]
 
 
 def parse_param_names(value: str) -> set[str]:
@@ -847,8 +999,7 @@ def parse_param_names(value: str) -> set[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Prepare, run, and plot Mark Reid fit_disk MCMC without editing the Reid source."
-    )
+        description="Prepare, run, and plot Mark Reid fit_disk MCMC without editing the Reid source.")  # noqa: E501
     parser.add_argument("--galaxy", default="NGC4258")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
@@ -857,22 +1008,30 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_REID_INIT.name,
         help=(
             "Init TOML filename in scripts/megamaser/check_reid. "
-            "The file may be Reid-style [globals] or a "
-            "[model.galaxies.<NAME>.init] config fragment."
+            "The file may be Reid-style [globals] (flat or "
+            "[globals.<GALAXY>.<variant>] merged) or a "
+            "[model.galaxies.<NAME>.<variant>] config fragment."
         ),
+    )
+    parser.add_argument(
+        "--variant",
+        default="init",
+        choices=["init", "init_qw"],
+        help="Init variant to select from --init when it is a merged "
+             "multi-galaxy TOML or a CANDEL config fragment.",
     )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument(
         "--burnin",
         type=int,
         default=1000000,
-        help="Primary Reid burn-in trials. <=0 skips it via generated burnin_values.dat.",
+        help="Primary Reid burn-in trials. <=0 skips it via generated burnin_values.dat.",  # noqa: E501
     )
     parser.add_argument(
         "--trials",
         type=int,
         default=100000000,
-        help="Final MCMC trials. Reid v24d requires >=500000 because n_skip=itermax/500000.",
+        help="Final MCMC trials. Reid v24d requires >=500000 because n_skip=itermax/500000.",  # noqa: E501
     )
     parser.add_argument("--walkers", type=int, default=1)
     parser.add_argument("--h0-low", type=float, default=None)
@@ -887,13 +1046,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Progress print interval for secondary burn-in and final MCMC. "
              "Use 0 to choose max(100000, min(10000000, trials/100)).",
     )
-    parser.add_argument("--fit-data", type=parse_bool_quad, default=(True, True, True, True))
+    parser.add_argument(
+        "--fit-data",
+        type=parse_bool_quad,
+        default=(
+            True,
+            True,
+            True,
+            True))
     parser.add_argument("--compiler", default="gfortran")
     parser.add_argument("--fflags", default="-O2 -std=legacy -fno-automatic")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--no-run", action="store_true")
-    parser.add_argument("--plot-params", default=",".join(DEFAULT_CONTOUR_PARAMS))
+    parser.add_argument(
+        "--plot-params",
+        default=",".join(DEFAULT_CONTOUR_PARAMS))
     parser.add_argument(
         "--fix-params",
         default="",
@@ -903,21 +1071,51 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--free-params",
+        default="",
+        help=(
+            "Comma/space-separated Reid global parameter names to unfreeze "
+            "(template-fixed) by giving them a flat prior and a proposal "
+            "width. Used to sample d2i_dr2_deg_mas2 for the quadratic warp."
+        ),
+    )
+    parser.add_argument(
         "--fix-circular",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Freeze eccentricity, periapsis, and periapsis-gradient globals "
+             "(default: on; pass --no-fix-circular to model eccentricity).",
+    )
+    parser.add_argument(
+        "--fix-all-globals",
         action="store_true",
-        help="Freeze eccentricity, periapsis, and periapsis-gradient globals.",
+        help="Freeze all 20 Reid global parameters; only per-spot latents "
+             "(r, phi) are MAP-optimised. Profiles latents at a fixed point.",
+    )
+    parser.add_argument(
+        "--instrument",
+        action="store_true",
+        help="Compile a per-run source copy with extra progress prints. "
+             "Default is the unmodified Reid source.",
+    )
+    parser.add_argument(
+        "--no-instrument",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--linear-warp",
-        action="store_true",
-        help="Freeze the quadratic inclination and PA warp globals.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Freeze the quadratic inclination and PA warp globals "
+             "(default: on; pass --no-linear-warp to model quadratic warp).",
     )
     parser.add_argument(
         "--collect-chain-dirs",
         nargs="+",
         type=Path,
         default=None,
-        help="Collect completed chain directories and write a combined summary/corner plot.",
+        help="Collect completed chain directories and write a combined summary/corner plot.",  # noqa: E501
     )
     parser.add_argument(
         "--collect-output-prefix",
@@ -929,12 +1127,21 @@ def main(argv: list[str] | None = None) -> int:
     params = [x.strip() for x in args.plot_params.split(",") if x.strip()]
     try:
         fixed_params = parse_param_names(args.fix_params)
+        free_params = parse_param_names(args.free_params)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
+    if fixed_params & free_params:
+        parser.error(
+            "parameters cannot be both fixed and freed: "
+            + ", ".join(sorted(fixed_params & free_params)))
     if args.fix_circular:
-        fixed_params.update({"ecc", "peri_az_deg", "dperi_dr_deg_mas"})
+        fixed_params.update(
+            {"ecc", "peri_az_deg", "dperi_dr_deg_mas"} - free_params)
     if args.linear_warp:
-        fixed_params.update({"d2i_dr2_deg_mas2", "d2PA_dr2_deg_mas2"})
+        fixed_params.update(
+            {"d2i_dr2_deg_mas2", "d2PA_dr2_deg_mas2"} - free_params)
+    if args.fix_all_globals:
+        fixed_params.update(GLOBAL_NAMES)
 
     if args.collect_chain_dirs is not None:
         if args.output_dir is None:
@@ -950,9 +1157,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.trials < 500000:
         raise ValueError(
-            "Reid v24d computes n_skip = itermax / 500000 with integer division; "
-            "use --trials >= 500000 unless the Fortran source itself is changed."
-        )
+            "Reid v24d computes n_skip = itermax / 500000 with integer division; "  # noqa: E501
+            "use --trials >= 500000 unless the Fortran source itself is changed.")  # noqa: E501
     status_interval = (
         default_status_interval(args.trials)
         if args.status_interval == 0 else int(args.status_interval)
@@ -962,12 +1168,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         init_toml = resolve_init_toml(args.init)
-        reid_init = load_toml_init(init_toml, args.galaxy, args.vcor)
+        reid_init = load_toml_init(
+            init_toml, args.galaxy, args.vcor, variant=args.variant)
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
     header, data_rows = parse_data_rows(args.data)
-    run_init = shift_warp_pivots(reid_init.values, compute_reid_r_ref(data_rows, header, reid_init.values))
+    run_init = shift_warp_pivots(
+        reid_init.values, compute_reid_r_ref(
+            data_rows, header, reid_init.values))
 
     h0_low = args.h0_low
     h0_high = args.h0_high
@@ -978,12 +1187,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.output_dir is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = DEFAULT_RESULTS / f"{args.galaxy}_{init_toml.stem}_{stamp}"
+        variant_tag = f"_{args.variant}" if args.variant != "init" else ""
+        run_dir = (
+            DEFAULT_RESULTS /
+            f"{args.galaxy}_{init_toml.stem}{variant_tag}_{stamp}")
     else:
         run_dir = args.output_dir
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    (run_dir / "fit_disk_data.inp").write_text(prepared_data_text(args.data, "300 700 0.02 0.03 0.01 0.01 0.3 Radio"))
+    (run_dir / "fit_disk_data.inp").write_text(prepared_data_text(args.data,
+                                                                  "300 700 0.02 0.03 0.01 0.01 0.3 Radio"))  # noqa: E501
+    if args.galaxy != "NGC4258":
+        print(f"[WARNING] write_control uses REID_CONTROL_TEMPLATE "
+              f"({REID_CONTROL_TEMPLATE}, tuned for NGC4258) for every "
+              f"non-fixed/non-free global's MCMC proposal step size "
+              f"(post_unc column); only the value column is set from "
+              f"{args.galaxy}'s init. These step sizes are not tuned for "
+              f"{args.galaxy} and may mix poorly.")
     write_control(
         run_dir / "fit_disk_control.inp",
         run_init,
@@ -996,9 +1216,18 @@ def main(argv: list[str] | None = None) -> int:
         step_fraction=args.step_fraction,
         fit_data=args.fit_data,
         fixed_params=fixed_params,
+        free_params=free_params,
     )
     if args.burnin <= 0:
-        write_burnin_values(run_dir / "burnin_values.dat", run_init, initial_r_phi(data_rows, header, run_init))
+        write_burnin_values(
+            run_dir /
+            "burnin_values.dat",
+            run_init,
+            initial_r_phi(
+                data_rows,
+                header,
+                run_init),
+            fixed_params=fixed_params)
 
     metadata = {
         "galaxy": args.galaxy,
@@ -1010,12 +1239,16 @@ def main(argv: list[str] | None = None) -> int:
         "trials": args.trials,
         "walkers": args.walkers,
         "status_interval": status_interval,
+        "source_instrumented": bool(args.instrument
+                                    and not args.no_instrument),
         "h0_low": h0_low,
         "h0_high": h0_high,
         "fixed_params": sorted(fixed_params),
+        "free_params": sorted(free_params),
         "initial_globals": {name: run_init[name] for name in GLOBAL_NAMES},
     }
-    (run_dir / "run_metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+    (run_dir / "run_metadata.json").write_text(json.dumps(metadata,
+                                                          indent=2, sort_keys=True) + "\n")  # noqa: E501
 
     print(f"Prepared Reid run directory: {run_dir}", flush=True)
     if args.prepare_only:
@@ -1023,10 +1256,16 @@ def main(argv: list[str] | None = None) -> int:
 
     exe = run_dir / "fit_disk_reid_v24d"
     if not args.no_compile:
-        exe = compile_reid(run_dir, args.compiler, args.fflags, status_interval)
+        exe = compile_reid(
+            run_dir,
+            args.compiler,
+            args.fflags,
+            status_interval,
+            instrument=bool(args.instrument and not args.no_instrument))
         print(f"Compiled Reid executable: {exe}", flush=True)
     elif not exe.exists():
-        raise FileNotFoundError(f"--no-compile requested but executable is missing: {exe}")
+        raise FileNotFoundError(
+            f"--no-compile requested but executable is missing: {exe}")
 
     if not args.no_run:
         stdout = run_reid(exe, run_dir)
@@ -1036,18 +1275,23 @@ def main(argv: list[str] | None = None) -> int:
 
     fort7 = run_dir / "fort.7"
     if not fort7.exists():
-        print(f"No chain file found at {fort7}; skipping post-processing.", file=sys.stderr)
+        print(
+            f"No chain file found at {fort7}; skipping post-processing.",
+            file=sys.stderr)
         return 0
 
     chain = load_chain(fort7)
     write_chain_csv(chain, run_dir / "global_chain.csv")
     write_lnp_csv(chain, run_dir / "lnP.csv")
     summary = summary_from_chain(chain, stdout)
-    (run_dir / "likelihood_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    (run_dir / "likelihood_summary.json").write_text(json.dumps(summary,
+                                                                indent=2, sort_keys=True) + "\n")  # noqa: E501
     plot_corner(chain, params, run_dir / "global_corner.png")
     print(f"Chain CSV: {run_dir / 'global_chain.csv'}", flush=True)
     print(f"lnP CSV: {run_dir / 'lnP.csv'}", flush=True)
-    print(f"Likelihood summary: {run_dir / 'likelihood_summary.json'}", flush=True)
+    print(
+        f"Likelihood summary: {run_dir / 'likelihood_summary.json'}",
+        flush=True)
     print(f"Global contour plot: {run_dir / 'global_corner.png'}", flush=True)
     print(f"Best stored lnP: {summary['lnP']['max']:.6g}", flush=True)
     return 0

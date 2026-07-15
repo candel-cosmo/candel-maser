@@ -96,6 +96,19 @@ def v_sys_to_cmb(v_sys_km_s, frame, ra_deg, dec_deg):
     return v_helio + _CMB_DIPOLE_V * cos_theta
 
 
+def v_sys_from_cmb(v_cmb_km_s, frame, ra_deg, dec_deg):
+    """Convert a CMB-frame systemic velocity back to the original frame."""
+    zero_point = v_sys_to_cmb(0.0, frame, ra_deg, dec_deg)
+    if zero_point is None:
+        return None
+    return float(v_cmb_km_s) - float(zero_point)
+
+
+def megamaser_velocity_frame(galaxy):
+    """Return the spot-velocity reference frame used by the source table."""
+    return _GALAXY_VELOCITY_FRAME.get(galaxy, "unknown")
+
+
 # Column byte ranges (1-indexed, inclusive) from the MRT header.
 _MRT_COLUMNS = {
     "spot_type":      (1, 1),
@@ -544,7 +557,7 @@ def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
         labels = remap[lab]
         method = "k-means on velocity"
 
-    data["velocity_frame"] = _GALAXY_VELOCITY_FRAME.get(galaxy, "unknown")
+    data["velocity_frame"] = megamaser_velocity_frame(galaxy)
     data["is_highvel"] = labels != 1
 
     # Per-spot phi bounds

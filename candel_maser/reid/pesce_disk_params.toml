@@ -1,0 +1,112 @@
+# Published megamaser disk-fit parameters, LITERAL paper values.
+# ---------------------------------------------------------------------------
+# Source papers (Megamaser Cosmology Project):
+#   UGC3789, NGC6264, NGC6323, NGC5765b : Pesce et al. 2020, ApJL 891 L1
+#                                         (arXiv:2001.09213, MCP XIII), Table 4.
+#   CGCG074-064                         : Pesce et al. 2020, ApJ 890 118
+#                                         (arXiv:2001.04581, CGCG paper), Table 3.
+#   NGC4258                             : Reid et al. 2019 -> see
+#                                         reid_ngc4258_best.toml (handled separately).
+#
+# These are the values exactly as printed in the papers. They are NOT yet in
+# Reid fit_disk convention -- consumers must apply the conversions (see
+# pesce_globals.py, which does so for the CANDEL 'reid' init path):
+#   * i0, Omega0 are quoted at r=0; Reid's fit_disk warps about r_ref, so they
+#     are shifted: angle(r_ref) = angle0 + (d.angle/dr)*r_ref.
+#   * inclination is flipped (i_Reid = 180 - i) and di/dr sign-flipped, matching
+#     the CANDEL<->Reid convention in run_reid_mcmc.load_config_init.
+#   * v is the CMB-frame optical velocity of the SMBH; the fit_disk Vsys must be
+#     in the .inp data frame (optical-LSR, except CGCG barycentric), so Vsys is
+#     the analytic inverse frame conversion of this v.
+#   * H0 is then reset so Reid's dampc angular-size distance reproduces the
+#     published D_A.
+#   * eccentricity, periapsis and quadratic warps are zero (fiducial circular,
+#     linear-warp model used for all of these fits).
+# Units: D [Mpc], MBH [1e7 Msun], v [km/s], x0/y0/sigma_x/sigma_y [mas],
+#        angles [deg], gradients [deg/mas], sigma_v [km/s], sigma_a [km/s/yr].
+# ---------------------------------------------------------------------------
+
+[galaxies.UGC3789]
+source = "Pesce+2020 MCP XIII (2001.09213) Tab.4"
+D_Mpc = 51.5
+MBH_1e7 = 1.19
+v_cmb_kms = 3319.9
+x0_mas = -0.4014
+y0_mas = -0.4615
+i0_deg = 84.9
+didr_deg_mas = 7.7
+Omega0_deg = 222.4
+dOmegadr_deg_mas = -1.6
+sigma_x_mas = 0.0045
+sigma_y_mas = 0.0063
+sigma_vsys_kms = 1.7
+sigma_vhv_kms = 1.8
+sigma_a_kms_yr = 0.34
+
+[galaxies.NGC6264]
+source = "Pesce+2020 MCP XIII (2001.09213) Tab.4"
+D_Mpc = 132.1
+MBH_1e7 = 2.76
+v_cmb_kms = 10192.6
+x0_mas = 0.0050
+y0_mas = 0.0076
+i0_deg = 91.3
+didr_deg_mas = -1.5
+Omega0_deg = 84.7
+dOmegadr_deg_mas = 16.7
+sigma_x_mas = 0.0012
+sigma_y_mas = 0.0056
+sigma_vsys_kms = 1.6
+sigma_vhv_kms = 1.3
+sigma_a_kms_yr = 0.08
+
+[galaxies.NGC6323]
+source = "Pesce+2020 MCP XIII (2001.09213) Tab.4"
+D_Mpc = 109.4
+MBH_1e7 = 1.02
+v_cmb_kms = 7801.5
+x0_mas = 0.0161
+y0_mas = 0.0073
+i0_deg = 91.5
+didr_deg_mas = 0.0          # inclination warp not fitted ("..." in Tab.4)
+Omega0_deg = 184.4
+dOmegadr_deg_mas = 12.9
+sigma_x_mas = 0.0035
+sigma_y_mas = 0.0037
+sigma_vsys_kms = 2.1
+sigma_vhv_kms = 1.9
+sigma_a_kms_yr = 0.21
+
+[galaxies.NGC5765b]
+source = "Pesce+2020 MCP XIII (2001.09213) Tab.4"
+D_Mpc = 112.2
+MBH_1e7 = 4.15
+v_cmb_kms = 8525.7
+x0_mas = -0.0440
+y0_mas = -0.0995
+i0_deg = 72.4
+didr_deg_mas = 12.5
+Omega0_deg = 149.7
+dOmegadr_deg_mas = -3.2
+sigma_x_mas = 0.0028
+sigma_y_mas = 0.0034
+sigma_vsys_kms = 1.1
+sigma_vhv_kms = 1.5
+sigma_a_kms_yr = 0.041
+
+[galaxies.CGCG074-064]
+source = "Pesce+2020 CGCG (2001.04581) Tab.3"
+D_Mpc = 87.6
+MBH_1e7 = 2.42
+v_cmb_kms = 7172.2          # = v0_bary(6908.9) + 263.3; barycentric->CMB per Tab.3 note
+x0_mas = 0.0013
+y0_mas = 0.0075
+i0_deg = 90.8
+didr_deg_mas = 0.0          # inclination warp not fitted
+Omega0_deg = 99.6
+dOmegadr_deg_mas = 4.7
+sigma_x_mas = 0.0018        # 95% upper limit (used as floor)
+sigma_y_mas = 0.017
+sigma_vsys_kms = 4.8        # 95% upper limit (used as floor)
+sigma_vhv_kms = 4.3
+sigma_a_kms_yr = 0.43       # 95% upper limit (used as floor)

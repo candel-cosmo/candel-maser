@@ -32,6 +32,10 @@ from ..util import SPEED_OF_LIGHT
 C_v = 2978.8656    # km/s: sqrt(G * 1e7 M_sun / (1 mas * 1 Mpc))
 C_a = 1.872e3      # km/s/yr: 1e7 M_sun * G * yr / (1 mas * 1 Mpc)^2
 C_g = 1.974e-4     # dimensionless: 2*G * 1e7 M_sun / (c^2 * 1 mas * 1 Mpc)
+# When True, the eccentric SR gamma uses the circular speed Vcirc (Reid
+# fit_disk convention) instead of the true orbital speed. Read at trace time;
+# set via run_maser --match-reid. Affects only the eccentric branch.
+REID_CIRCULAR_GAMMA = False
 LOG_2PI = 1.8378770664093453  # jnp.log(2 * pi), precomputed
 
 # Conversion: 1 mas at 1 Mpc = 4.848e-3 pc
@@ -82,6 +86,48 @@ def gravitational_redshift_factor(r_ang, D, M_BH):
 def centripetal_acceleration(r_ang, D, M_BH):
     """Circular centripetal acceleration |a| = G M / r², in km/s/yr."""
     return C_a * M_BH / (r_ang ** 2 * D ** 2)
+
+
+def gamma_minus_one(beta_sq):
+    """γ − 1 = 1/√(1−β²) − 1, computed cancellation-free.
+
+    Rationalising, γ−1 = β²/(q(1+q)) with q = √(1−β²): a sum/quotient of
+    positive terms, so no float catastrophic cancellation as β → 0 (unlike
+    forming ``1/√(1−β²) − 1`` directly).
+    """
+    q = jnp.sqrt(jnp.maximum(1.0 - beta_sq, 1e-6))
+    return beta_sq / (q * (1.0 + q))
+
+
+def gravitational_redshift_minus1(r_ang, D, M_BH):
+    """z_g = 1/√(1−x) − 1 with x = 2GM/(rc²), computed cancellation-free."""
+    x = C_g * M_BH / (r_ang * D)
+    q = jnp.sqrt(jnp.maximum(1.0 - x, 1e-6))
+    return x / (q * (1.0 + q))
+
+
+def velocity_rel_affine(r_ang, D, M_BH, v_sys, dv_sys, sin_i):
+    """Circular V − v_sys_obs as affine coefficients (V0, B) in sinφ.
+
+    The systemic velocity composes multiplicatively in redshift, so
+        V = c·z_og·(1+z0) + v_sys,   z0 = v_sys/c,
+        z_og = z_D + z_g + z_D·z_g   (orbital+gravitational redshift),
+    hence  V − v_sys_obs = c·z_og·(1+z0) + dv_sys  with dv_sys = v_sys −
+    v_sys_obs. Computing z_og from the cancellation-free z_D, z_g (sums of
+    small terms, never ``prod − 1``) keeps the result float32-stable — no
+    ~v_sys-magnitude number ever appears in the residual. V is affine in
+    sinφ; the returned (V0, B) give V_rel = V0 + B·sinφ.
+    """
+    v_kep = keplerian_speed(r_ang, D, M_BH)
+    z0 = v_sys / SPEED_OF_LIGHT
+    zg = gravitational_redshift_minus1(r_ang, D, M_BH)
+    gm1 = gamma_minus_one((v_kep / SPEED_OF_LIGHT) ** 2)
+    g = 1.0 + gm1
+    k = sin_i * v_kep / SPEED_OF_LIGHT          # v_z/c = k·sinφ
+    z_og0 = gm1 + zg + gm1 * zg                  # φ-independent part of z_og
+    z_og1 = g * (1.0 + zg) * k                   # sinφ coefficient of z_og
+    fac = SPEED_OF_LIGHT * (1.0 + z0)
+    return fac * z_og0 + dv_sys, fac * z_og1
 
 
 def radius_from_los_velocity(v_los, sin_i, D, M_BH):
@@ -135,55 +181,72 @@ def predict_position(r_ang, sin_phi, cos_phi, x0, y0,
     All inputs broadcast element-wise.
     """
     R = r_ang * 1e3  # mas → μas for position projection
-    X = x0 + R * (sin_phi * sin_O - cos_phi * cos_O * cos_i)
-    Y = y0 + R * (sin_phi * cos_O + cos_phi * sin_O * cos_i)
+    # Fold every r-only factor into (…,1) coefficients so each φ-broadcast
+    # multiply hits the (…, n_phi) tensor exactly once (fewer big ops; the
+    # reassociation only perturbs the result at the rounding level).
+    R_sinO = R * sin_O
+    R_cosO = R * cos_O
+    R_cosO_ci = R_cosO * cos_i
+    R_sinO_ci = R_sinO * cos_i
+    X = x0 + R_sinO * sin_phi - R_cosO_ci * cos_phi
+    Y = y0 + R_cosO * sin_phi + R_sinO_ci * cos_phi
     return X, Y
 
 
-def predict_velocity_los(r_ang, sin_phi, cos_phi, D, M_BH, v_sys, sin_i,
-                         ecc=0.0, sin_om=0.0, cos_om=1.0):
-    """Predict LOS recession velocity (optical convention) in km/s.
+def predict_velocity_los(r_ang, sin_phi, cos_phi, D, M_BH, v_sys, dv_sys,
+                         sin_i, ecc2=0.0, ecc_cos_om=0.0, ecc_sin_om=0.0):
+    """Predict LOS velocity RELATIVE to v_sys_obs (``V − v_sys_obs``), km/s.
 
     Combines Keplerian (possibly eccentric) orbital motion, special-
-    relativistic Doppler, and Schwarzschild gravitational redshift, then
-    composes with the systemic recession ``v_sys`` (km/s):
+    relativistic Doppler, and Schwarzschild gravitational redshift,
+    composed with the systemic recession via
         (1 + z_obs) = (1 + z_D)(1 + z_grav)(1 + v_sys / c).
-    ``sin_om, cos_om`` are sin/cos of the argument of periapsis (Reid
-    convention). Defaults yield the circular case.
+    Rather than the absolute velocity (~v_sys ≈ thousands of km/s), it
+    returns ``V − v_sys_obs = c·z_og·(1+z0) + dv_sys`` (``v_sys =
+    v_sys_obs + dv_sys``, ``z0 = v_sys/c``, ``z_og = z_D + z_g + z_D·z_g``).
+    The orbital+gravitational redshift z_og is built from cancellation-free
+    z_D, z_g (sums of small terms, never ``prod − 1``), so no ~v_sys-scale
+    number enters and the velocity residual stays accurate in float32.
+    Callers must compare against the data residual ``all_v − v_sys_obs``.
 
-    Fast circular path: when ``ecc`` is the Python literal ``0.0`` (the
-    default, i.e. callers that omit it), the eccentric expansions all
-    collapse to constants and the SR factor reduces to
-    ``lorentz_factor(beta_c2)`` — which depends only on r and is no
-    longer broadcast across the φ axis. The eccentric branch is
-    unchanged.
+    Eccentricity enters only through the smooth Cartesian combinations
+    ``ecc_cos_om = e·cos ω``, ``ecc_sin_om = e·sin ω`` (ω the argument of
+    periapsis, Reid convention) and ``ecc2 = e²``.  Passing these products
+    rather than ``(e, ω)`` keeps the velocity differentiable at e=0, where the
+    polar direction ω is undefined.  The circular branch (literal
+    ``ecc2 == 0.0``) is affine in sinφ and shares its coefficients with
+    ``velocity_rel_affine``.
     """
+    z0 = v_sys / SPEED_OF_LIGHT
+    zg = gravitational_redshift_minus1(r_ang, D, M_BH)
+
+    if isinstance(ecc2, (int, float)) and ecc2 == 0.0:
+        V0, B = velocity_rel_affine(r_ang, D, M_BH, v_sys, dv_sys, sin_i)
+        return V0 + B * sin_phi
+
     v_kep = keplerian_speed(r_ang, D, M_BH)
-    one_plus_z_g = gravitational_redshift_factor(r_ang, D, M_BH)
     beta_c2 = (v_kep / SPEED_OF_LIGHT) ** 2
-    z_0 = v_sys / SPEED_OF_LIGHT
-
-    if isinstance(ecc, (int, float)) and ecc == 0.0:
-        v_z = sin_i * v_kep * sin_phi
-        one_plus_z_D = lorentz_factor(beta_c2) * (
-            1.0 + v_z / SPEED_OF_LIGHT)
-        return SPEED_OF_LIGHT * (
-            one_plus_z_D * one_plus_z_g * (1.0 + z_0) - 1.0)
-
     # phi - omega via angle-subtraction; only cos_d is needed because the
     # tangential/radial decomposition collapses algebraically:
-    #   v_t·sin_phi - v_r·cos_phi = v_kep · (sin_phi + ecc·sin_om) / E
-    cos_d = cos_phi * cos_om + sin_phi * sin_om
+    #   v_t·sin_phi - v_r·cos_phi = v_kep · (sin_phi + ecc·sin_om) / E.
+    # Keep eccentricity in Cartesian form (e·cos ω, e·sin ω) so e·cos_d is a
+    # smooth polynomial in (e_x, e_y) -- no e·(direction) split at the origin.
+    ecc_cos_d = cos_phi * ecc_cos_om + sin_phi * ecc_sin_om
     # ecc→1 at anti-periapsis sends denom→0; clip so residuals stay finite.
-    denom = jnp.maximum(1.0 + ecc * cos_d, 1e-6)
+    denom = jnp.maximum(1.0 + ecc_cos_d, 1e-6)
     inv_sqrt_denom = jax.lax.rsqrt(denom)
     inv_denom = inv_sqrt_denom * inv_sqrt_denom
-    v_z = sin_i * v_kep * (sin_phi + ecc * sin_om) * inv_sqrt_denom
+    v_z = sin_i * v_kep * (sin_phi + ecc_sin_om) * inv_sqrt_denom
 
-    beta_e2 = beta_c2 * (1.0 + ecc ** 2 + 2.0 * ecc * cos_d) * inv_denom
-    one_plus_z_D = lorentz_factor(beta_e2) * (1.0 + v_z / SPEED_OF_LIGHT)
-
-    return SPEED_OF_LIGHT * (one_plus_z_D * one_plus_z_g * (1.0 + z_0) - 1.0)
+    # Reid puts the circular speed in the SR gamma; the physical choice is the
+    # true orbital speed v_orb² = Vcirc²·(1+e²+2e·cos_d)/(1+e·cos_d).
+    beta_g2 = beta_c2 if REID_CIRCULAR_GAMMA else \
+        beta_c2 * (1.0 + ecc2 + 2.0 * ecc_cos_d) * inv_denom
+    # z_D = γ(1 + v_z/c) − 1 = (γ−1) + γ·v_z/c, cancellation-free.
+    gm1 = gamma_minus_one(beta_g2)
+    z_D = gm1 + (1.0 + gm1) * (v_z / SPEED_OF_LIGHT)
+    z_og = z_D + zg + z_D * zg
+    return SPEED_OF_LIGHT * (1.0 + z0) * z_og + dv_sys
 
 
 def predict_acceleration_los(r_ang, sin_phi, cos_phi, D, M_BH, sin_i):
@@ -195,4 +258,5 @@ def predict_acceleration_los(r_ang, sin_phi, cos_phi, D, M_BH, sin_i):
     unused here.
     """
     del sin_phi
-    return centripetal_acceleration(r_ang, D, M_BH) * cos_phi * sin_i
+    coef = centripetal_acceleration(r_ang, D, M_BH) * sin_i  # r-only
+    return coef * cos_phi

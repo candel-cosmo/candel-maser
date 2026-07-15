@@ -1,7 +1,7 @@
 #!/bin/bash -l
-# Per-spot conditional-r Δll diagnostic. Screens all spots via a cheap
-# brute-force, then runs full-res on the worst N and plots their
-# 1D r posteriors.
+# Per-spot conditional-r Δll diagnostic. Compares the float32 production
+# grid against cheap/full float64 brute-force references, then plots the
+# worst spots' 1D r posteriors.
 
 QUEUE="optgpu"
 PASS_ARGS=()
@@ -12,8 +12,8 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: bash $0 [-q QUEUE] [ARGS...]"
             echo ""
             echo "Per-spot conditional-r convergence diagnostic. For each galaxy:"
-            echo "  1. Screen all spots (production vs 5k×5k brute-force)."
-            echo "  2. Full-res brute-force (50k×50k) on the worst N spots."
+            echo "  1. Screen all spots (float32 production vs 5k×5k float64 brute-force)."
+            echo "  2. Full-res float64 brute-force (50k×50k) on the worst N spots."
             echo "  3. Plot zoomed r posteriors (prod phi vs full 2pi phi)."
             echo ""
             echo "Default: all MCP galaxies. Override with --galaxies."

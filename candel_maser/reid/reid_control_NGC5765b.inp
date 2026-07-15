@@ -1,0 +1,25 @@
+!  Parameters for NGC5765b (CANDEL globals, Reid convention)
+      100000 ! Total "burn-in" trials (done in stages of 100,000); if negative, instead read in "burnin_values.dat" 
+      500000            4           15          210 ! Total # trials (stored or not); # of M-H strands (1-20); Initial Ho strand range (min max)
+           0          0.5            T            T            T            T ! Gaussian (0) or "outlier tolerant" (1) data unc; fraction Ho-M trials correlated; x,y,v,a fitted?
+       0.015    -47351937 ! Initial McMC parameter step size in burnin phase; random number seed 
+   67.827018           -5          0.7 ! Ho (Mpc); prior_unc (<0 for flat prior), expected posteriori_unc
+   4.4616962         -0.1         0.05 ! BH mass (10^7 Msuns)
+   8333.7904         -0.5         0.25 ! Vlsr_optical of BH (km/s) 
+  -0.0448484        -0.01        0.002 ! Xo of BH (mas)
+  -0.0992575        -0.01        0.004 ! Yo of BH (mas)
+   94.595738         -0.5          0.1 ! i (deg)
+    -11.5432           -1         0.05 ! di/dr (deg/mas)
+           0            0            0 ! d2i/dr (deg/mas^2)
+   146.68971           -1         0.05 ! PA (deg)
+     -3.3141           -1         0.02 ! dPA/dr (deg/mas)
+           0            0            0 ! d2PA/dr2 (deg/mas^2)
+           0            0            0 ! Eccentricity
+           0            0            0 ! Pericenter azimuth (deg)
+           0            0            0 ! dP-az/dr (deg/mas)
+           0            0            0 ! Vcorrection: added to Vobserved to get to Hubble flow (km/s)
+   0.0101819       -0.002        0.001 ! x floor (mas)
+   0.0036586        -0.01        0.001 ! y floor (mas)
+      1.8861        -0.25         0.15 ! Vsys floor (km/s)
+      2.8008         -0.5         0.15 ! Vsys floor (km/s)
+      0.0777         -0.2         0.05 ! Acc floor (km/s/yr)

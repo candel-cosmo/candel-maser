@@ -1,8 +1,8 @@
 #!/bin/bash -l
 # Fixed-r brute-force phi convergence test for all six MCP galaxies
 # including NGC4258. Sweeps per-sub-range phi grid sizes against a
-# high-resolution reference AND compares configured per-type phi
-# ranges against a single full-2π integration.
+# high-resolution float64 reference AND compares configured per-type
+# phi ranges against a single full-2π integration.
 
 QUEUE="gpulong"
 PASS_ARGS=()
@@ -13,7 +13,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: bash $0 [-q QUEUE] [ARGS...]"
             echo ""
             echo "Tests the sub-range phi marginaliser against a"
-            echo "full-2π reference. Per (galaxy, grid, scale) prints three"
+            echo "float64 full-2π reference. Per (galaxy, grid, scale) prints three"
             echo "narrow tables:"
             echo "  1. Δ logL per category (total, sys, red, blue)."
             echo "  2. rel. diff of AD ∇globals (max + worst param)."
@@ -31,6 +31,8 @@ while [[ $# -gt 0 ]]; do
             echo "Common Python toggles (forwarded as-is):"
             echo "  --driver-factor N       multiplier for the fiducial driver"
             echo "                          diagnostic (default: 2)"
+            echo "  --grid-factors F...     also test scaled production grids,"
+            echo "                          e.g. 0.25 0.5 1 2"
             echo "  --no-grad               skip the AD-gradient checks"
             echo "  --grad-rtol-globals X   pass tolerance on rel. ∇globals diff"
             echo "  --grad-rtol-r X         pass tolerance on rel. ∇r_ang diff"

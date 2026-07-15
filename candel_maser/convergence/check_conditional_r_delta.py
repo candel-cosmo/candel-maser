@@ -1,11 +1,13 @@
 """Per-spot conditional-r Δll diagnostic for MCP maser galaxies.
 
 Two-stage approach per galaxy:
-  1. Cheap moderate-resolution brute-force on ALL spots to find outliers.
-  2. Full-resolution brute-force + 1D r posterior plots for the worst N.
+  1. Cheap moderate-resolution float64 brute-force on ALL spots to find
+     outliers in the float32 production conditional-r grid.
+  2. Full-resolution float64 brute-force + 1D r posterior plots for the
+     worst N.
 
 Usage:
-  python check_conditional_r_delta.py                         # all MCP galaxies
+  python check_conditional_r_delta.py                         # all MCP galaxies  # noqa: E501
   python check_conditional_r_delta.py --galaxies NGC4258      # single galaxy
   python check_conditional_r_delta.py --galaxies NGC5765b UGC3789
 """
@@ -18,10 +20,10 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import tomli
+from convergence_utils import build_model, cast_floats, resolve_grid_for_galaxy
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
-from convergence_utils import build_model, resolve_grid_for_galaxy
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
 OUT_DIR = "/mnt/users/rstiskalek/CANDEL/results/Megamaser/convergence"
@@ -160,37 +162,49 @@ def run_galaxy(galaxy, master_cfg, args):
           f"phi=({grid['n_hv_high']}, {grid['n_hv_low']}, {grid['n_sys']})",
           flush=True)
 
-    model = build_model(galaxy, master_cfg,
-                        n_phi_hv_high=grid["n_hv_high"],
-                        n_phi_hv_low=grid["n_hv_low"],
-                        n_phi_sys=grid["n_sys"],
-                        n_r_global=grid["n_r_global"])
-    phys_args, phys_kw, diag = phys_from_init(model, galaxy, galaxies_cfg)
-    print(f"D_A={diag['D_A']:.2f} Mpc, n_spots={model.n_spots}", flush=True)
+    prod_model = build_model(galaxy, master_cfg,
+                             n_phi_hv_high=grid["n_hv_high"],
+                             n_phi_hv_low=grid["n_hv_low"],
+                             n_phi_sys=grid["n_sys"],
+                             n_r_global=grid["n_r_global"],
+                             dtype=jnp.float32)
+    ref_model = build_model(galaxy, master_cfg,
+                            n_phi_hv_high=grid["n_hv_high"],
+                            n_phi_hv_low=grid["n_hv_low"],
+                            n_phi_sys=grid["n_sys"],
+                            n_r_global=grid["n_r_global"],
+                            dtype=jnp.float64)
+    phys_args_ref, phys_kw_ref, diag = phys_from_init(
+        ref_model, galaxy, galaxies_cfg)
+    phys_args_prod = cast_floats(phys_args_ref, jnp.float32)
+    phys_kw_prod = cast_floats(phys_kw_ref, jnp.float32)
+    print(f"D_A={diag['D_A']:.2f} Mpc, n_spots={ref_model.n_spots}",
+          flush=True)
 
-    types = [("sys", model._idx_sys),
-             ("red", model._idx_red),
-             ("blue", model._idx_blue)]
-    spot_types = np.full(model.n_spots, "", dtype=object)
+    types = [("sys", prod_model._idx_sys),
+             ("red", prod_model._idx_red),
+             ("blue", prod_model._idx_blue)]
+    spot_types = np.full(prod_model.n_spots, "", dtype=object)
     for name, idx in types:
         spot_types[np.asarray(idx)] = name
-    has_accel = np.asarray(model._all_has_accel)
+    has_accel = np.asarray(prod_model._all_has_accel)
 
     # ── 1. Production ll ──
-    print("Computing production ll...", flush=True)
+    print("Computing production ll (float32)...", flush=True)
     t0 = time.time()
     ll_prod = per_spot_ll_production(
-        model, phys_args, phys_kw, args.spot_batch)
-    print(f"  done ({time.time()-t0:.1f}s), total={ll_prod.sum():.4f}",
+        prod_model, phys_args_prod, phys_kw_prod, args.spot_batch)
+    print(f"  done ({time.time() - t0:.1f}s), total={ll_prod.sum():.4f}",
           flush=True)
 
     # ── 2. Screening ──
     print(f"Screening all spots "
-          f"(n_r={args.n_r_screen}, n_phi={args.n_phi_screen})...",
+          f"(float64 ref; n_r={args.n_r_screen}, "
+          f"n_phi={args.n_phi_screen})...",
           flush=True)
     t0 = time.time()
     ll_screen = per_spot_bruteforce_all(
-        model, phys_args, phys_kw,
+        ref_model, phys_args_ref, phys_kw_ref,
         args.n_r_screen, args.n_phi_screen,
         args.r_chunk_screen, args.spot_batch)
     dt = time.time() - t0
@@ -215,15 +229,17 @@ def run_galaxy(galaxy, master_cfg, args):
               f"Dll_screen={delta_screen[gi]:+.4f}", flush=True)
 
     print(f"\nFull brute-force on {args.n_worst} worst "
-          f"(n_r={args.n_r_ref}, n_phi={args.n_phi_ref})...", flush=True)
+          f"(float64 ref; n_r={args.n_r_ref}, "
+          f"n_phi={args.n_phi_ref})...", flush=True)
     t0 = time.time()
     ll_ref_map = per_spot_bruteforce_subset(
-        model, worst_idx, phys_args, phys_kw,
+        ref_model, worst_idx, phys_args_ref, phys_kw_ref,
         args.n_r_ref, args.n_phi_ref, args.r_chunk_ref)
-    print(f"  done ({time.time()-t0:.1f}s)", flush=True)
+    print(f"  done ({time.time() - t0:.1f}s)", flush=True)
 
     # -- 4. Get conditional-r centres --
-    centres = model.get_conditional_r_centres(phys_args, phys_kw)
+    centres = prod_model.get_conditional_r_centres(
+        phys_args_prod, phys_kw_prod)
     r_min = float(centres["r_min"])
     r_max = float(centres["r_max"])
 
@@ -242,7 +258,7 @@ def run_galaxy(galaxy, master_cfg, args):
     print(f"r_ang range: [{r_min:.4f}, {r_max:.4f}] mas", flush=True)
 
     deltas_full = {}
-    print(f"\nFull-res Dll (prod - ref):", flush=True)
+    print("\nFull-res Dll (prod - ref):", flush=True)
     for gi in worst_idx:
         gi = int(gi)
         d = float(ll_prod[gi]) - ll_ref_map[gi]
@@ -256,11 +272,11 @@ def run_galaxy(galaxy, master_cfg, args):
               f"prod={ll_prod[gi]:.4f}  ref={ll_ref_map[gi]:.4f}",
               flush=True)
 
-    K_sigma = float(model._K_sigma)
-    zoom_half = 0.2 * (np.log(r_max) - np.log(r_min))
+    K_sigma = float(prod_model._K_sigma)
 
     n_phi_full = 20001
-    phi_full = jnp.linspace(0.0, 2 * jnp.pi, n_phi_full)
+    phi_full = jnp.linspace(0.0, 2 * jnp.pi, n_phi_full,
+                            dtype=jnp.float64)
     sin_phi_full = jnp.sin(phi_full)
     cos_phi_full = jnp.cos(phi_full)
     log_w_phi_full = trapz_log_weights(phi_full)
@@ -268,23 +284,26 @@ def run_galaxy(galaxy, master_cfg, args):
     print("\nComputing dense r posteriors...", flush=True)
     dense_data = {}
     r_dense_full = jnp.exp(jnp.linspace(
-        jnp.log(r_min), jnp.log(r_max), args.n_r_dense))
+        jnp.log(jnp.asarray(r_min, dtype=jnp.float64)),
+        jnp.log(jnp.asarray(r_max, dtype=jnp.float64)),
+        args.n_r_dense))
+    r_dense_prod = r_dense_full.astype(jnp.float32)
     for gi in worst_idx:
         gi = int(gi)
         tp = spot_types[gi]
-        pc = model._phi_concat[tp]
-        r_local = r_dense_full
+        pc = prod_model._phi_concat[tp]
         lp_prod = r_posterior_1spot(
-            model, gi, r_local, phys_args, phys_kw,
+            prod_model, gi, r_dense_prod, phys_args_prod, phys_kw_prod,
             pc["sin_phi"], pc["cos_phi"], pc["log_w_phi"],
             args.r_batch)
         lp_full = r_posterior_1spot(
-            model, gi, r_local, phys_args, phys_kw,
+            ref_model, gi, r_dense_full, phys_args_ref, phys_kw_ref,
             sin_phi_full, cos_phi_full, log_w_phi_full,
             args.r_batch)
-        dense_data[gi] = dict(r=np.asarray(r_local), lp_prod=lp_prod,
+        dense_data[gi] = dict(r=np.asarray(r_dense_full), lp_prod=lp_prod,
                               lp_full=lp_full,
-                              log_w=np.asarray(trapz_log_weights(r_local)))
+                              log_w=np.asarray(trapz_log_weights(
+                                  r_dense_full)))
         n_nan = int(np.isnan(lp_prod).sum())
         n_inf = int(np.isinf(lp_prod).sum())
         extra = ""
@@ -354,7 +373,7 @@ def run_galaxy(galaxy, master_cfg, args):
     fig.suptitle(
         f"{galaxy} conditional-r: {n_plot} worst spots  "
         f"(screening total Dll={delta_screen.sum():.2f} nats over "
-        f"{model.n_spots} spots)",
+        f"{ref_model.n_spots} spots)",
         fontsize=10)
     fig.tight_layout()
     out_png = os.path.join(OUT_DIR, f"{galaxy}_conditional_r_diagnose.png")
@@ -364,7 +383,7 @@ def run_galaxy(galaxy, master_cfg, args):
     print(f"\nWrote {out_png}", flush=True)
 
     worst_dll = min(deltas_full.values())
-    return dict(galaxy=galaxy, n_spots=model.n_spots,
+    return dict(galaxy=galaxy, n_spots=ref_model.n_spots,
                 total_dll_screen=float(delta_screen.sum()),
                 worst_dll=worst_dll, out_png=out_png)
 
@@ -393,7 +412,8 @@ def main():
     args = ap.parse_args()
 
     jax.config.update("jax_enable_x64", True)
-    print(f"JAX: {jax.default_backend()}, f64", flush=True)
+    print(f"JAX: {jax.default_backend()}, "
+          "production=float32, reference=float64", flush=True)
 
     if args.galaxies is not None:
         galaxies = args.galaxies

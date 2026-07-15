@@ -28,6 +28,33 @@ from candel.model.integration import trapz_log_weights
 from candel.util import get_nested
 
 
+def cast_floats(x, dtype):
+    """Cast floating arrays/scalars in a small pytree to ``dtype``."""
+    if x is None:
+        return None
+    if isinstance(x, dict):
+        return {k: cast_floats(v, dtype) for k, v in x.items()}
+    if isinstance(x, tuple):
+        return tuple(cast_floats(v, dtype) for v in x)
+    if isinstance(x, list):
+        return [cast_floats(v, dtype) for v in x]
+    arr = jnp.asarray(x)
+    if jnp.issubdtype(arr.dtype, jnp.floating):
+        return arr.astype(dtype)
+    return x
+
+
+def cast_model_floats(model, dtype):
+    """Cast cached floating arrays in a diagnostic model in place."""
+    for name, value in list(vars(model).items()):
+        if isinstance(value, (np.ndarray, jax.Array)):
+            arr = jnp.asarray(value)
+            if jnp.issubdtype(arr.dtype, jnp.floating):
+                setattr(model, name, arr.astype(dtype))
+    model._phi_concat = cast_floats(model._phi_concat, dtype)
+    return model
+
+
 def bruteforce_ll_fixed_r(model, phys_args, phys_kw, r_ang, ref_cfg):
     """Per-type full-2π φ brute force at a fixed r_ang vector.
 
@@ -70,7 +97,7 @@ def bruteforce_ll_fixed_r(model, phys_args, phys_kw, r_ang, ref_cfg):
 # can vary phi/r grid sizes while holding all other config constant.
 # -----------------------------------------------------------------------
 
-def build_model(galaxy, master_cfg, **overrides):
+def build_model(galaxy, master_cfg, dtype=None, **overrides):
     """Build a MaserDiskModel with global [model] keys overridden.
 
     Any recognised [model] key may be passed (n_phi_hv_high, n_phi_hv_low,
@@ -119,6 +146,8 @@ def build_model(galaxy, master_cfg, **overrides):
     from candel.model.model_H0_maser import MaserDiskModel
     model = MaserDiskModel(tmp.name, data)
     os.unlink(tmp.name)
+    if dtype is not None:
+        cast_model_floats(model, dtype)
     return model
 
 
@@ -184,7 +213,15 @@ def extend_grad_params(model, sample):
     return tuple(keys)
 
 
-def ensure_grad_sample(model, init_block):
+def _sample_dtype(sample):
+    for v in sample.values():
+        arr = jnp.asarray(v)
+        if jnp.issubdtype(arr.dtype, jnp.floating):
+            return arr.dtype
+    return jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+
+
+def ensure_grad_sample(model, init_block, dtype=None):
     """Populate a jnp-typed sample dict with every parameter used by
     the grad check, filling absent entries with sensible defaults so
     ``jax.grad`` produces a meaningful partial for every key.
@@ -194,7 +231,8 @@ def ensure_grad_sample(model, init_block):
     which is a valid neighbourhood for the remaining parameters
     (Cartesian offsets, warp rates, noise floors — all small).
     """
-    dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    dtype = dtype or (jnp.float64 if jax.config.jax_enable_x64
+                      else jnp.float32)
     sample = {k: jnp.asarray(float(v), dtype=dtype)
               for k, v in init_block.items()}
     H0_ref = float(get_nested(model.config, "model/H0_ref", 73.0))
@@ -204,6 +242,14 @@ def ensure_grad_sample(model, init_block):
     if model.use_quadratic_warp:
         for k in ("d2i_dr2", "d2Omega_dr2"):
             sample.setdefault(k, jnp.asarray(0.0, dtype=dtype))
+    if model.use_ecc:
+        if model.ecc_cartesian:
+            for k in ("e_x", "e_y"):
+                sample.setdefault(k, jnp.asarray(0.0, dtype=dtype))
+        else:
+            for k in ("ecc", "periapsis"):
+                sample.setdefault(k, jnp.asarray(0.0, dtype=dtype))
+        sample.setdefault("dperiapsis_dr", jnp.asarray(0.0, dtype=dtype))
     return sample
 
 
@@ -213,7 +259,7 @@ def jax_phys_from_sample(model, sample):
     All non-derived quantities flow through as jnp scalars so jax.grad
     can differentiate w.r.t. any entry of ``sample``.
     """
-    dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    dtype = _sample_dtype(sample)
 
     def g(key, default=None):
         if key in sample:
@@ -249,20 +295,17 @@ def jax_phys_from_sample(model, sample):
     )
     phys_kw = {}
     if model.use_quadratic_warp:
-        phys_kw["d2i_dr2"] = jnp.deg2rad(g("d2i_dr2"))
-        phys_kw["d2Omega_dr2"] = jnp.deg2rad(g("d2Omega_dr2"))
+        phys_kw["d2i_dr2"] = jnp.deg2rad(g("d2i_dr2", 0.0))
+        phys_kw["d2Omega_dr2"] = jnp.deg2rad(g("d2Omega_dr2", 0.0))
     if model.use_ecc:
-        if "ecc" in sample and "periapsis" in sample:
-            phys_kw["ecc"] = g("ecc")
-            phys_kw["periapsis0"] = jnp.deg2rad(g("periapsis"))
-        elif "e_x" in sample and "e_y" in sample:
-            ex, ey = g("e_x"), g("e_y")
-            phys_kw["ecc"] = jnp.sqrt(ex * ex + ey * ey)
-            phys_kw["periapsis0"] = jnp.arctan2(ey, ex)
+        if "e_x" in sample or "e_y" in sample or model.ecc_cartesian:
+            phys_kw["e_x"] = g("e_x", 0.0)
+            phys_kw["e_y"] = g("e_y", 0.0)
         else:
-            raise KeyError(
-                "use_ecc=True requires 'ecc'/'periapsis' or 'e_x'/'e_y'"
-                " in the sample")
+            ecc = g("ecc", 0.0)
+            peri = jnp.deg2rad(g("periapsis", 0.0))
+            phys_kw["e_x"] = ecc * jnp.cos(peri)
+            phys_kw["e_y"] = ecc * jnp.sin(peri)
         phys_kw["dperiapsis_dr"] = jnp.deg2rad(g("dperiapsis_dr", 0.0))
     return phys_args, phys_kw
 

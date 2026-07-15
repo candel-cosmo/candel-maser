@@ -21,10 +21,10 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import tomli
+from convergence_utils import build_model
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
-from convergence_utils import build_model
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
 DEFAULT_GALAXIES = ["UGC3789", "NGC6323"]

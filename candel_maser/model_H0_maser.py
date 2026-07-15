@@ -12,7 +12,7 @@
 # You should have received a copy of the GNU General Public License along
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-"""Megamaser disk forward model for the BlackJAX Gibbs sampler.
+"""Megamaser disk forward model for the BlackJAX megamaser samplers.
 
 Implements the warped Keplerian disk model from Pesce et al. (2020),
 arXiv:2001.04581. All JAX functions are JIT-compilable and auto-differentiable.
@@ -28,7 +28,8 @@ Phi integration:
   Knobs in [model] config: phi_hv_inner_deg, phi_hv_outer_deg,
     n_phi_hv_high, n_phi_hv_low, phi_sys_ranges_deg, n_phi_sys.
 
-The per-spot angular radii ``r_ang`` are sampled by the Gibbs sampler.
+The per-spot angular radii ``r_ang`` are marginalised by the DE objective and
+sampled explicitly (with the per-spot ``phi``) by the NUTS chain.
 
 Phi convention (Reid+2019): phi=+pi/2 at the redshifted HV locus,
 phi=-pi/2 at the blueshifted HV locus, phi=0 and phi=pi at systemic
@@ -49,9 +50,11 @@ from ..util import fprint, fsection, get_nested
 from .base_model import ModelBase
 from .integration import trapz_log_weights
 from .maser_physics import (LOG_2PI, PC_PER_MAS_MPC, R_EST_EPS, W_LOG_FLOOR,
-                            predict_acceleration_los, predict_position,
-                            predict_velocity_los, radius_from_los_acceleration,
-                            radius_from_los_velocity, warp_geometry)
+                            centripetal_acceleration, predict_acceleration_los,
+                            predict_position, predict_velocity_los,
+                            radius_from_los_acceleration,
+                            radius_from_los_velocity, velocity_rel_affine,
+                            warp_geometry)
 from .optim1d import brent_1d
 from .utils import load_priors
 
@@ -71,13 +74,15 @@ def neg_half_chi2_position(x_obs, y_obs, X_pred, Y_pred, var_x, var_y):
     """
     dx = x_obs - X_pred
     dy = y_obs - Y_pred
-    return -0.5 * (dx * dx / var_x + dy * dy / var_y)
+    # Fold -0.5/var into per-spot coefficients: turns two big-tensor
+    # divisions into multiplies and drops the trailing -0.5 scale.
+    return dx * dx * (-0.5 / var_x) + dy * dy * (-0.5 / var_y)
 
 
 def neg_half_chi2_velocity(v_obs, V_pred, var_v):
     """Per-gridpoint −½χ² from the LOS velocity channel (no norm)."""
     dv = v_obs - V_pred
-    return -0.5 * dv * dv / var_v
+    return dv * dv * (-0.5 / var_v)
 
 
 def neg_half_chi2_acceleration(a_obs, A_pred, var_a, has_a):
@@ -88,11 +93,95 @@ def neg_half_chi2_acceleration(a_obs, A_pred, var_a, has_a):
     ``var_a`` (the factor still multiplies 0 when has_a=0).
     """
     da = a_obs - A_pred
-    return -0.5 * da * da / var_a * has_a
+    return da * da * (-0.5 * has_a / var_a)
+
+
+def _neg_half_chi2_quadform(r_pre, sin_phi, cos_phi, sin2, cos2, sincos):
+    """−½χ² on the (r, φ) grid via a quadratic form in (sinφ, cosφ).
+
+    Circular-orbit only. Every residual channel is low-order in φ with
+    coefficients that depend only on r:
+
+        X = x0 + Px_s·sinφ + Px_c·cosφ,   Y = y0 + Py_s·sinφ + Py_c·cosφ
+        V_rel = V0 + Bv·sinφ               (velocity relative to v_sys_obs)
+        A = Ba·cosφ
+
+    so −½χ² collapses to ``C0 + Cs·s + Cc·c + Css·s² + Ccc·c² + Csc·s·c``
+    with six r-only coefficients evaluated against the precomputed φ-basis
+    ``(sinφ, cosφ, sin²φ, cos²φ, sinφ·cosφ)``. This is algebraically exact
+    but expands the constant C0 ≈ −½Σ(data/σ)², so the basis terms cancel
+    to recover the small residual. The velocity uses the relative
+    formulation (``velocity_rel_affine`` + ``all_v_rel``) so C0 stays at the
+    position/orbital scale rather than the ~v_sys² scale; the residual
+    cancellation is still milder in float64, so the caller (``_phi_eval``)
+    gates it to x64.
+
+    Mirrors ``_phi_eval``'s broadcasting: ``r_pre`` r-only fields share
+    ``r_ang``'s shape; per-spot data/variances carry a single leading axis.
+    Returns the residual term only — lnorm/lnorm_a are added by the caller
+    after the logsumexp.
+    """
+    r_ang = r_pre["r_ang"]
+    dp = (slice(None),) + (None,) * (r_ang.ndim - 1)  # per-spot → r_ang rank
+    sin_i = r_pre["sin_i"]
+    cos_i = r_pre["cos_i"]
+    sin_O = r_pre["sin_O"]
+    cos_O = r_pre["cos_O"]
+    D = r_pre["D"]
+    M_BH = r_pre["M_BH"]
+
+    R = r_ang * 1e3
+    R_sinO = R * sin_O
+    R_cosO = R * cos_O
+    px_s = R_sinO
+    px_c = -R_cosO * cos_i
+    py_s = R_cosO
+    py_c = R_sinO * cos_i
+
+    # Velocity relative to v_sys_obs: V_rel = v0 + bv·sinφ (f32-stable).
+    v0, bv = velocity_rel_affine(
+        r_ang, D, M_BH, r_pre["v_sys"], r_pre["dv_sys"], sin_i)
+
+    kx = (-0.5 / r_pre["var_x"])[dp]
+    ky = (-0.5 / r_pre["var_y"])[dp]
+    kv = (-0.5 / r_pre["var_v"])[dp]
+    ex = r_pre["all_x"][dp] - r_pre["x0"]
+    ey = r_pre["all_y"][dp] - r_pre["y0"]
+    ev = r_pre["all_v_rel"][dp] - v0
+
+    C0 = kx * ex * ex + ky * ey * ey + kv * ev * ev
+    Cs = -2.0 * (kx * ex * px_s + ky * ey * py_s + kv * ev * bv)
+    Cc = -2.0 * (kx * ex * px_c + ky * ey * py_c)
+    Css = kx * px_s * px_s + ky * py_s * py_s + kv * bv * bv
+    Ccc = kx * px_c * px_c + ky * py_c * py_c
+    Csc = 2.0 * (kx * px_s * px_c + ky * py_s * py_c)
+
+    if r_pre["has_any_accel"]:
+        ba = centripetal_acceleration(r_ang, D, M_BH) * sin_i
+        ka = (-0.5 * r_pre["has_a"] / r_pre["var_a"])[dp]
+        ea = r_pre["all_a"][dp]
+        C0 = C0 + ka * ea * ea
+        Cc = Cc - 2.0 * (ka * ea * ba)
+        Ccc = Ccc + ka * ba * ba
+
+    return (C0[..., None]
+            + Cs[..., None] * sin_phi + Cc[..., None] * cos_phi
+            + Css[..., None] * sin2 + Ccc[..., None] * cos2
+            + Csc[..., None] * sincos)
+
+
+def _conditional_global_r_window(valid, r_cf, r_min, r_max):
+    """Global conditional-r scan window from valid closed-form seeds."""
+    r_for_min = jnp.where(valid, r_cf, jnp.inf)
+    r_for_max = jnp.where(valid, r_cf, 0.0)
+    return (
+        jnp.maximum(r_min, jnp.min(r_for_min) * 0.25),
+        jnp.minimum(r_max, jnp.max(r_for_max) * 4.0),
+    )
 
 
 class MaserDiskModel(ModelBase):
-    """Megamaser disk model with sampled ``r_ang`` and marginalised ``phi``."""
+    """Megamaser disk model with explicit and marginalised latent helpers."""
 
     def __init__(self, config_path, data):
         super().__init__(config_path)
@@ -143,15 +232,32 @@ class MaserDiskModel(ModelBase):
             fprint(f"prior overrides for {gname}: "
                    f"{', '.join(sorted(gal_priors))}")
 
-        self._D_c_volume = False
+        # Megamaser distance is ALWAYS sampled as uniform D_A. The legacy
+        # uniform-D_c sampling path was removed; D_c_prior is no longer a knob.
+        self._D_A_uniform = True
         if "D_lo" in data and "D_hi" in data:
-            lo, hi = float(data["D_lo"]), float(data["D_hi"])
-            self.priors["D"] = Uniform(lo, hi)
             D_prior_type = get_nested(
-                self.config, "model/D_c_prior", "uniform")
-            self._D_c_volume = D_prior_type == "volume"
-            fprint(f"D prior: {'volume' if self._D_c_volume else 'uniform'}"
-                   f"({lo:.1f}, {hi:.1f})")
+                self.config, "model/D_c_prior", "uniform_D_A")
+            if D_prior_type != "uniform_D_A":
+                raise ValueError(
+                    "Megamaser distance is always sampled as uniform D_A; "
+                    f"model/D_c_prior={D_prior_type!r} is no longer supported "
+                    "(remove the key or set it to 'uniform_D_A').")
+            lo, hi = float(data["D_lo"]), float(data["D_hi"])
+            # Config D_lo/D_hi are comoving bounds; convert to D_A bounds
+            # at the fiducial cosmology (H0_ref, Om) so the uniform-D_A
+            # prior brackets the same physical distance range.
+            h_ref = float(get_nested(
+                self.config, "model/H0_ref", 73.0)) / 100.0
+            z_bounds = self.distance2redshift(jnp.asarray([lo, hi]), h=h_ref)
+            lo_DA = float(lo / (1.0 + z_bounds[0]))
+            hi_DA = float(hi / (1.0 + z_bounds[1]))
+            self.priors["D"] = Uniform(lo_DA, hi_DA)
+            fprint(f"D prior: D_A ~ Uniform({lo_DA:.1f}, {hi_DA:.1f}) Mpc "
+                   f"(from D_c [{lo:.1f}, {hi:.1f}] at H0_ref="
+                   f"{100 * h_ref:.0f}, Om={self.Om:.3f})")
+            fprint("distance coordinate: D_A sampled directly; D_c init "
+                   "values are converted once; no Jacobian term")
 
     # ---- spot indexing ----
 
@@ -215,6 +321,12 @@ class MaserDiskModel(ModelBase):
         self._all_sigma_x2 = jnp.asarray(data["sigma_x"])**2
         self._all_sigma_y2 = jnp.asarray(data["sigma_y"])**2
         self._all_v = jnp.asarray(self.velocity)
+        # Velocity relative to the (exactly known) systemic constant, formed
+        # once on the host in float64 so the ~v_sys-scale subtraction never
+        # happens in float32. The φ integrand compares against this.
+        self._all_v_rel = jnp.asarray(
+            _np.asarray(self.velocity, dtype=_np.float64) - self.v_sys_obs,
+            dtype=self._all_v.dtype)
         self._all_a = jnp.asarray(self.a)
         self._all_sigma_a = jnp.asarray(self.sigma_a)
         self._all_has_accel = jnp.asarray(accel_meas)
@@ -232,8 +344,7 @@ class MaserDiskModel(ModelBase):
         gal_cfg = get_nested(self.config, f"model/galaxies/{gname}", {})
         self._configure_features(gal_cfg)
         self._configure_mass_parameterization(gal_cfg)
-        self._configure_gibbs()
-        self._configure_warp_pivots(data, gal_cfg)
+        self._configure_warp_pivots(gal_cfg)
         return gal_cfg
 
     def _configure_features(self, gal_cfg):
@@ -262,42 +373,21 @@ class MaserDiskModel(ModelBase):
         self.mass_parameterization = mass_param
         fprint(f"mass parameterization: {mass_param}")
 
-    def _configure_gibbs(self):
-        """Use the single supported megamaser sampling path."""
-        self.mode = "gibbs"
-        self.marginalise_r = False
+    def _configure_warp_pivots(self, gal_cfg):
+        keys = ("r_ang_ref_i", "r_ang_ref_Omega", "r_ang_ref_periapsis")
+        missing = [key for key in keys if key not in gal_cfg]
+        if missing:
+            raise ValueError(
+                "Megamaser warp pivot radii must be set in the galaxy "
+                f"config; missing: {', '.join(missing)}.")
 
-    def _configure_warp_pivots(self, data, gal_cfg):
-        r_common = gal_cfg.get("r_ang_ref", None)
-        if r_common is not None:
-            r_base = float(r_common)
-            base_src = "config"
-        else:
-            is_hv_np = _np.asarray(data["is_highvel"])
-            x_hv = _np.asarray(data["x"])[is_hv_np]
-            y_hv = _np.asarray(data["y"])[is_hv_np]
-            if x_hv.size == 0:
-                raise ValueError(
-                    "_configure_warp_pivots: no HV spots and r_ang_ref not "
-                    "set in gal_cfg; cannot derive pivot radius.")
-            r_ang_hv = _np.sqrt(x_hv**2 + y_hv**2) / 1e3  # μas → mas
-            r_base = float(_np.median(r_ang_hv))
-            base_src = f"median projected radius of {x_hv.size} HV spots"
-
-        self._r_ang_ref_i = float(gal_cfg.get("r_ang_ref_i", r_base))
-        self._r_ang_ref_Omega = float(gal_cfg.get("r_ang_ref_Omega", r_base))
-        self._r_ang_ref_periapsis = float(
-            gal_cfg.get("r_ang_ref_periapsis", r_base / 2.0))
-
-        overrides = [k for k in ("r_ang_ref_i", "r_ang_ref_Omega",
-                                 "r_ang_ref_periapsis") if k in gal_cfg]
-        if overrides:
-            extras = " ".join(
-                f"{k}={float(gal_cfg[k]):.3f}" for k in overrides)
-            fprint(f"r_ang_ref = {r_base:.3f} mas ({base_src}); "
-                   f"overrides: {extras}")
-        else:
-            fprint(f"r_ang_ref = {r_base:.3f} mas ({base_src})")
+        self._r_ang_ref_i = float(gal_cfg["r_ang_ref_i"])
+        self._r_ang_ref_Omega = float(gal_cfg["r_ang_ref_Omega"])
+        self._r_ang_ref_periapsis = float(gal_cfg["r_ang_ref_periapsis"])
+        fprint(
+            f"r_ang_ref_i={self._r_ang_ref_i:.3f} mas "
+            f"r_ang_ref_Omega={self._r_ang_ref_Omega:.3f} mas "
+            f"r_ang_ref_periapsis={self._r_ang_ref_periapsis:.3f} mas")
 
     # ---- phi sub-ranges ----
 
@@ -359,22 +449,32 @@ class MaserDiskModel(ModelBase):
 
         self._phi_subranges = {"red": red, "blue": blue, "sys": sys_rng}
 
-        # Precompute concatenated (sin, cos, log-trapz-weights) per type
-        # so _eval_phi_marginal can do one _phi_eval + one logsumexp per
-        # group. Disjoint sub-range trapezoidal weights concatenate
-        # cleanly: each endpoint retains its h/2 weight, interior h.
+        # Precompute concatenated (sin, cos, log-weights) per type so
+        # _eval_phi_marginal can do one _phi_eval + one logsumexp per group.
+        # Uniform linspace + trapezoidal weights; disjoint sub-range weights
+        # concatenate cleanly (endpoints keep h/2, interior h).
+        def _nodes_log_w(lo, hi, n):
+            phi = jnp.linspace(lo, hi, n)
+            return phi, trapz_log_weights(phi)
+
         self._phi_concat = {}
         for key, subs in self._phi_subranges.items():
             sin_parts, cos_parts, w_parts = [], [], []
             for lo, hi, n in subs:
-                phi = jnp.linspace(lo, hi, n)
+                phi, log_w = _nodes_log_w(lo, hi, n)
                 sin_parts.append(jnp.sin(phi))
                 cos_parts.append(jnp.cos(phi))
-                w_parts.append(trapz_log_weights(phi))
+                w_parts.append(log_w)
+            sin_c = jnp.concatenate(sin_parts)
+            cos_c = jnp.concatenate(cos_parts)
             self._phi_concat[key] = dict(
-                sin_phi=jnp.concatenate(sin_parts),
-                cos_phi=jnp.concatenate(cos_parts),
+                sin_phi=sin_c,
+                cos_phi=cos_c,
                 log_w_phi=jnp.concatenate(w_parts),
+                # φ-basis for the quadratic-form integrand (theta-independent).
+                sin2_phi=sin_c * sin_c,
+                cos2_phi=cos_c * cos_c,
+                sincos_phi=sin_c * cos_c,
             )
 
         # Save for summary/printing
@@ -406,12 +506,6 @@ class MaserDiskModel(ModelBase):
             raise ValueError(
                 "n_r_local and n_r_global must be >= 3.")
 
-        # Selection function grid (same for all modes/galaxies).
-        D_min = float(get_nested(self.config, "model/priors/D/low", 10.0))
-        D_max = float(get_nested(self.config, "model/priors/D/high", 200.0))
-        self._sel_D_grid = jnp.linspace(D_min, D_max, 501)
-        self._sel_log_w = jnp.asarray(trapz_log_weights(self._sel_D_grid))
-        self._sel_lp_vol = 2.0 * jnp.log(self._sel_D_grid)
         self.use_selection = get_nested(
             self.config, "model/use_selection", False)
 
@@ -429,7 +523,6 @@ class MaserDiskModel(ModelBase):
 
     # ---- summary ----
     def _print_summary(self):
-        fprint("sampler geometry: Gibbs, sampled r_ang, marginalised phi")
         fprint(
             f"φ HV: inner ±{self._phi_hv_inner_deg:.0f}° "
             f"(n={self._n_phi_hv_high}), outer wings to "
@@ -452,7 +545,7 @@ class MaserDiskModel(ModelBase):
     def r_ang_range(self, D_A):
         """r_ang range in mas corresponding to physical R_phys bounds at D_A.
 
-        Used by the Gibbs radial updates to keep the physical/angular
+        Used by the latent radial updates to keep the physical/angular
         conversion in one place.
         """
         conv = D_A * PC_PER_MAS_MPC
@@ -497,8 +590,8 @@ class MaserDiskModel(ModelBase):
             jnp.maximum(s_acc, 0.1))
         return r_est, s_prop, r_min, r_max
 
-    def gibbs_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv):
-        """Differentiable closed-form radius seeds for the gibbs mode.
+    def radius_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv):
+        """Differentiable closed-form radius seeds (r_hat plus support bounds).
 
         Same closed forms as `_closed_form_seeds` (velocity inversion
         for HV spots, centripetal inversion for sys spots with an accel
@@ -599,10 +692,8 @@ class MaserDiskModel(ModelBase):
         r_cf, _, r_min, r_max = self._closed_form_seeds(
             D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
         valid = self.is_highvel | self._all_has_accel.astype(bool)
-        r_for_min = jnp.where(valid, r_cf, jnp.inf)
-        r_for_max = jnp.where(valid, r_cf, 0.0)
-        r_lo_data = jnp.maximum(r_min, jnp.min(r_for_min) * 0.5)
-        r_hi_data = jnp.minimum(r_max, jnp.max(r_for_max) * 2.0)
+        r_lo_data, r_hi_data = _conditional_global_r_window(
+            valid, r_cf, r_min, r_max)
         r_global, _ = self._build_global_r_grid(r_lo_data, r_hi_data)
 
         r_est, s_fallback, r_min, r_max = self._compute_seeds(
@@ -654,8 +745,10 @@ class MaserDiskModel(ModelBase):
 
     def _build_global_r_grid(self, r_min, r_max):
         """Shared log-uniform grid of shape (n_r_global,)."""
+        dtype = jnp.result_type(r_min, r_max)
         log_r = jnp.linspace(
-            jnp.log(r_min), jnp.log(r_max), self._n_r_global)
+            jnp.log(r_min), jnp.log(r_max), self._n_r_global,
+            dtype=dtype)
         r = jnp.exp(log_r)
         return r, trapz_log_weights(r)
 
@@ -682,10 +775,8 @@ class MaserDiskModel(ModelBase):
         r_cf, _, r_min, r_max = self._closed_form_seeds(
             D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
         valid = self.is_highvel | self._all_has_accel.astype(bool)
-        r_for_min = jnp.where(valid, r_cf, jnp.inf)
-        r_for_max = jnp.where(valid, r_cf, 0.0)
-        r_lo_data = jnp.maximum(r_min, jnp.min(r_for_min) * 0.5)
-        r_hi_data = jnp.minimum(r_max, jnp.max(r_for_max) * 2.0)
+        r_lo_data, r_hi_data = _conditional_global_r_window(
+            valid, r_cf, r_min, r_max)
         r_global, _ = self._build_global_r_grid(r_lo_data, r_hi_data)
 
         r_est, s_fallback, r_min, r_max = self._compute_seeds(
@@ -742,14 +833,15 @@ class MaserDiskModel(ModelBase):
          sigma_a_floor2) = phys_args
         d2i_dr2 = phys_kw.get("d2i_dr2", 0.0)
         d2Omega_dr2 = phys_kw.get("d2Omega_dr2", 0.0)
-        ecc = phys_kw.get("ecc", None)
-        periapsis0 = phys_kw.get("periapsis0", 0.0)
+        e_x = phys_kw.get("e_x", None)
+        e_y = phys_kw.get("e_y", 0.0)
         dperiapsis_dr = phys_kw.get("dperiapsis_dr", 0.0)
+        dv_sys = phys_kw.get("dv_sys", 0.0)
 
         dtype = r_est_group.dtype
         x_g = self._all_x[idx].astype(dtype)
         y_g = self._all_y[idx].astype(dtype)
-        v_g = self._all_v[idx].astype(dtype)
+        v_g = self._all_v_rel[idx].astype(dtype)
         a_g = self._all_a[idx].astype(dtype)
         sx2_g = self._all_sigma_x2[idx].astype(dtype)
         sy2_g = self._all_sigma_y2[idx].astype(dtype)
@@ -778,16 +870,18 @@ class MaserDiskModel(ModelBase):
             X, Y = predict_position(
                 r, sin_phi, cos_phi, x0, y0,
                 sin_i, cos_i, sin_O, cos_O)
-            if ecc is None:
+            if e_x is None:
                 V = predict_velocity_los(
-                    r, sin_phi, cos_phi, D_A, M_BH, v_sys, sin_i)
+                    r, sin_phi, cos_phi, D_A, M_BH, v_sys, dv_sys, sin_i)
             else:
-                omega_r = (periapsis0
-                           + dperiapsis_dr * (r - r_ang_ref_periapsis))
+                delta = dperiapsis_dr * (r - r_ang_ref_periapsis)
+                cos_del = jnp.cos(delta)
+                sin_del = jnp.sin(delta)
                 V = predict_velocity_los(
-                    r, sin_phi, cos_phi, D_A, M_BH, v_sys, sin_i,
-                    ecc=ecc,
-                    sin_om=jnp.sin(omega_r), cos_om=jnp.cos(omega_r))
+                    r, sin_phi, cos_phi, D_A, M_BH, v_sys, dv_sys, sin_i,
+                    ecc2=e_x * e_x + e_y * e_y,
+                    ecc_cos_om=e_x * cos_del - e_y * sin_del,
+                    ecc_sin_om=e_x * sin_del + e_y * cos_del)
 
             var_x = sx2i + sigma_x_floor2
             var_y = sy2i + sigma_y_floor2
@@ -866,8 +960,8 @@ class MaserDiskModel(ModelBase):
                       sigma_x_floor2, sigma_y_floor2,
                       var_v_sys, var_v_hv, sigma_a_floor2,
                       d2i_dr2=0.0, d2Omega_dr2=0.0,
-                      ecc=None, periapsis0=None, dperiapsis_dr=0.0,
-                      has_any_accel=True):
+                      e_x=None, e_y=None, dperiapsis_dr=0.0,
+                      dv_sys=0.0, has_any_accel=True):
         """Gather per-spot data and warped angles for the φ integrand.
 
         Returned pytree is consumed by _phi_eval or _phi_eval_shared_r.
@@ -879,7 +973,7 @@ class MaserDiskModel(ModelBase):
         """
         all_x = self._all_x[idx]
         all_y = self._all_y[idx]
-        all_v = self._all_v[idx]
+        all_v_rel = self._all_v_rel[idx]
         all_a = self._all_a[idx]
         sx2 = self._all_sigma_x2[idx]
         sy2 = self._all_sigma_y2[idx]
@@ -897,14 +991,20 @@ class MaserDiskModel(ModelBase):
         sin_O_r = jnp.sin(Om_r)
         cos_O_r = jnp.cos(Om_r)
 
-        if ecc is not None:
-            omega_r = (periapsis0
-                       + dperiapsis_dr * (r_ang - r_ang_ref_periapsis))
-            sin_om_r = jnp.sin(omega_r)
-            cos_om_r = jnp.cos(omega_r)
+        if e_x is not None:
+            # Rotate the Cartesian eccentricity by the radius-dependent warp
+            # delta = dperiapsis_dr·(r - r_ref); ecc·cos ω(r) and ecc·sin ω(r)
+            # stay smooth polynomials in (e_x, e_y) (no e·direction split).
+            delta = dperiapsis_dr * (r_ang - r_ang_ref_periapsis)
+            cos_del = jnp.cos(delta)
+            sin_del = jnp.sin(delta)
+            ecc_cos_om_r = e_x * cos_del - e_y * sin_del
+            ecc_sin_om_r = e_x * sin_del + e_y * cos_del
+            ecc2 = e_x * e_x + e_y * e_y
         else:
-            sin_om_r = None
-            cos_om_r = None
+            ecc_cos_om_r = None
+            ecc_sin_om_r = None
+            ecc2 = None
 
         var_x = sx2 + sigma_x_floor2
         var_y = sy2 + sigma_y_floor2
@@ -928,9 +1028,9 @@ class MaserDiskModel(ModelBase):
             r_ang=r_ang,
             sin_i=sin_i_r, cos_i=cos_i_r,
             sin_O=sin_O_r, cos_O=cos_O_r,
-            sin_om=sin_om_r, cos_om=cos_om_r, ecc=ecc,
-            x0=x0, y0=y0, D=D_A, M_BH=M_BH, v_sys=v_sys,
-            all_x=all_x, all_y=all_y, all_v=all_v, all_a=all_a,
+            ecc_cos_om=ecc_cos_om_r, ecc_sin_om=ecc_sin_om_r, ecc2=ecc2,
+            x0=x0, y0=y0, D=D_A, M_BH=M_BH, v_sys=v_sys, dv_sys=dv_sys,
+            all_x=all_x, all_y=all_y, all_v_rel=all_v_rel, all_a=all_a,
             var_x=var_x, var_y=var_y, var_v=var_v, var_a=var_a,
             has_a=has_a, lnorm=lnorm, lnorm_a=lnorm_a,
             has_any_accel=has_any_accel,
@@ -952,18 +1052,17 @@ class MaserDiskModel(ModelBase):
             r_b, sin_phi, cos_phi, r_pre["x0"], r_pre["y0"],
             sin_i_b, cos_i_b, sin_O_b, cos_O_b)
 
-        ecc = r_pre["ecc"]
-        if ecc is None:
+        ecc2 = r_pre["ecc2"]
+        if ecc2 is None:
             V = predict_velocity_los(
-                r_b, sin_phi, cos_phi,
-                r_pre["D"], r_pre["M_BH"], r_pre["v_sys"], sin_i_b)
+                r_b, sin_phi, cos_phi, r_pre["D"], r_pre["M_BH"],
+                r_pre["v_sys"], r_pre["dv_sys"], sin_i_b)
         else:
-            sin_om_b = r_pre["sin_om"][rpad]
-            cos_om_b = r_pre["cos_om"][rpad]
             V = predict_velocity_los(
-                r_b, sin_phi, cos_phi,
-                r_pre["D"], r_pre["M_BH"], r_pre["v_sys"], sin_i_b,
-                ecc=ecc, sin_om=sin_om_b, cos_om=cos_om_b)
+                r_b, sin_phi, cos_phi, r_pre["D"], r_pre["M_BH"],
+                r_pre["v_sys"], r_pre["dv_sys"], sin_i_b,
+                ecc2=ecc2, ecc_cos_om=r_pre["ecc_cos_om"][rpad],
+                ecc_sin_om=r_pre["ecc_sin_om"][rpad])
 
         if r_pre["has_any_accel"]:
             A = predict_acceleration_los(
@@ -973,7 +1072,8 @@ class MaserDiskModel(ModelBase):
             A = None
         return X, Y, V, A
 
-    def _phi_eval(self, r_pre, sin_phi, cos_phi):
+    def _phi_eval(self, r_pre, sin_phi, cos_phi,
+                  sin2=None, cos2=None, sincos=None):
         """−½χ² at every (r, φ) gridpoint for per-spot r.
 
         r_pre   : pytree from _r_precompute with r_ang shape (N,) for
@@ -981,7 +1081,21 @@ class MaserDiskModel(ModelBase):
         sin_phi, cos_phi : shape (n_phi,).
         Returns shape (N, [n_r,] n_phi) — residual term only; callers
         add lnorm/lnorm_a after logsumexp.
+
+        Circular orbits under x64 use the quadratic-form integrand
+        (`_neg_half_chi2_quadform`): ~2.5× fewer big-tensor ops. It expands
+        a cancellation-prone constant, so it is restricted to float64 (the
+        production regime); float32 and the eccentric branch keep the
+        residual-stable predict/chi² path. `sin2/cos2/sincos` are the
+        precomputed φ-basis; computed inline if omitted.
         """
+        if r_pre["ecc2"] is None and jax.config.jax_enable_x64:
+            if sin2 is None:
+                sin2 = sin_phi * sin_phi
+                cos2 = cos_phi * cos_phi
+                sincos = sin_phi * cos_phi
+            return _neg_half_chi2_quadform(
+                r_pre, sin_phi, cos_phi, sin2, cos2, sincos)
         r_ang = r_pre["r_ang"]
         rpad = (slice(None),) * r_ang.ndim + (None,)
         dpad = (slice(None),) + (None,) * r_ang.ndim
@@ -992,7 +1106,7 @@ class MaserDiskModel(ModelBase):
             r_pre["all_x"][dpad], r_pre["all_y"][dpad], X, Y,
             r_pre["var_x"][dpad], r_pre["var_y"][dpad])
         nhc = nhc + neg_half_chi2_velocity(
-            r_pre["all_v"][dpad], V, r_pre["var_v"][dpad])
+            r_pre["all_v_rel"][dpad], V, r_pre["var_v"][dpad])
         if r_pre["has_any_accel"]:
             nhc = nhc + neg_half_chi2_acceleration(
                 r_pre["all_a"][dpad], A,
@@ -1011,7 +1125,7 @@ class MaserDiskModel(ModelBase):
             r_pre["all_x"][dpad], r_pre["all_y"][dpad], X3, Y3,
             r_pre["var_x"][dpad], r_pre["var_y"][dpad])
         nhc = nhc + neg_half_chi2_velocity(
-            r_pre["all_v"][dpad], V3, r_pre["var_v"][dpad])
+            r_pre["all_v_rel"][dpad], V3, r_pre["var_v"][dpad])
         if r_pre["has_any_accel"]:
             nhc = nhc + neg_half_chi2_acceleration(
                 r_pre["all_a"][dpad], A[None],
@@ -1025,7 +1139,7 @@ class MaserDiskModel(ModelBase):
                        sigma_x_floor2, sigma_y_floor2,
                        var_v_sys, var_v_hv, sigma_a_floor2,
                        d2i_dr2=0.0, d2Omega_dr2=0.0,
-                       ecc=None, periapsis0=None, dperiapsis_dr=0.0):
+                       e_x=None, e_y=None, dperiapsis_dr=0.0):
         """Convenience wrapper for dense phi-reference diagnostics."""
         r_pre = self._r_precompute(
             r_ang, idx, x0, y0, D_A, M_BH, v_sys,
@@ -1034,7 +1148,8 @@ class MaserDiskModel(ModelBase):
             sigma_x_floor2, sigma_y_floor2,
             var_v_sys, var_v_hv, sigma_a_floor2,
             d2i_dr2=d2i_dr2, d2Omega_dr2=d2Omega_dr2,
-            ecc=ecc, periapsis0=periapsis0, dperiapsis_dr=dperiapsis_dr)
+            e_x=e_x, e_y=e_y, dperiapsis_dr=dperiapsis_dr,
+            dv_sys=v_sys - self.v_sys_obs)
         neg_half_chi2 = self._phi_eval(r_pre, sin_phi, cos_phi)
         rpad = (slice(None),) * r_ang.ndim + (None,)
         return (r_pre["lnorm"] + r_pre["lnorm_a"])[rpad] + neg_half_chi2
@@ -1058,8 +1173,7 @@ class MaserDiskModel(ModelBase):
                              has_any_accel, phys_args, phys_kw, batch):
         """Per-spot log-marginal for groups with a per-spot r grid.
 
-        Used by the Gibbs sampler with ``r_ang`` shape ``(N,)`` and
-        ``log_w_r is None``.
+        Used with ``r_ang`` shape ``(N,)`` and ``log_w_r is None``.
 
         ``batch is None`` (or ``batch >= n_idx``) -> single-shot
         evaluation (one XLA op). Otherwise the spot axis is chunked
@@ -1080,7 +1194,8 @@ class MaserDiskModel(ModelBase):
             # logsumexp so the max-subtraction acts on bounded χ²
             # differences (protects float32 precision).
             nhc = self._phi_eval(
-                r_pre, pc["sin_phi"], pc["cos_phi"])
+                r_pre, pc["sin_phi"], pc["cos_phi"],
+                pc["sin2_phi"], pc["cos2_phi"], pc["sincos_phi"])
             lnorm_b = r_pre["lnorm"] + r_pre["lnorm_a"]
             if lwr_b is None:
                 return lnorm_b + logsumexp(
@@ -1142,7 +1257,8 @@ class MaserDiskModel(ModelBase):
         """
         if phys_kw is None:
             phys_kw = {}
-        result = jnp.zeros(self.n_spots)
+        dtype = jnp.asarray(phys_args[2]).dtype
+        result = jnp.zeros(self.n_spots, dtype=dtype)
 
         for group in spot_groups:
             type_key, idx, r_ang, log_w_r = group
@@ -1162,12 +1278,83 @@ class MaserDiskModel(ModelBase):
 
         return result
 
+    def _fixed_phi_per_spot(self, idx, r_ang, phi, has_any_accel,
+                            phys_args, phys_kw):
+        r_pre = self._r_precompute(
+            r_ang, idx, *phys_args, **phys_kw,
+            has_any_accel=has_any_accel)
+        sin_phi = jnp.sin(phi)
+        cos_phi = jnp.cos(phi)
+        X, Y = predict_position(
+            r_ang, sin_phi, cos_phi, r_pre["x0"], r_pre["y0"],
+            r_pre["sin_i"], r_pre["cos_i"],
+            r_pre["sin_O"], r_pre["cos_O"])
+
+        ecc2 = r_pre["ecc2"]
+        if ecc2 is None:
+            V = predict_velocity_los(
+                r_ang, sin_phi, cos_phi, r_pre["D"], r_pre["M_BH"],
+                r_pre["v_sys"], r_pre["dv_sys"], r_pre["sin_i"])
+        else:
+            V = predict_velocity_los(
+                r_ang, sin_phi, cos_phi, r_pre["D"], r_pre["M_BH"],
+                r_pre["v_sys"], r_pre["dv_sys"], r_pre["sin_i"], ecc2=ecc2,
+                ecc_cos_om=r_pre["ecc_cos_om"], ecc_sin_om=r_pre["ecc_sin_om"])
+
+        nhc = neg_half_chi2_position(
+            r_pre["all_x"], r_pre["all_y"], X, Y,
+            r_pre["var_x"], r_pre["var_y"])
+        nhc = nhc + neg_half_chi2_velocity(
+            r_pre["all_v_rel"], V, r_pre["var_v"])
+        if has_any_accel:
+            A = predict_acceleration_los(
+                r_ang, sin_phi, cos_phi,
+                r_pre["D"], r_pre["M_BH"], r_pre["sin_i"])
+            nhc = nhc + neg_half_chi2_acceleration(
+                r_pre["all_a"], A, r_pre["var_a"], r_pre["has_a"])
+        return r_pre["lnorm"] + r_pre["lnorm_a"] + nhc
+
+    def _eval_phi_fixed(self, spot_groups, phi, phys_args, phys_kw=None):
+        """Per-spot fixed-phi log likelihood for explicit-angle MCMC."""
+        if phys_kw is None:
+            phys_kw = {}
+        dtype = jnp.asarray(phys_args[2]).dtype
+        result = jnp.zeros(self.n_spots, dtype=dtype)
+        for group in spot_groups:
+            type_key, idx, r_ang, _ = group
+            if int(idx.shape[0]) == 0:
+                continue
+            ps = self._fixed_phi_per_spot(
+                idx, r_ang, phi[idx],
+                self._group_has_any_accel(type_key), phys_args, phys_kw)
+            result = result.at[idx].set(ps)
+        return result
+
+    def _sum_phi_fixed(self, spot_groups, phi, phys_args, phys_kw=None):
+        """Total fixed-phi log likelihood for explicit-angle MCMC."""
+        if phys_kw is None:
+            phys_kw = {}
+        total = jnp.asarray(0.0, dtype=jnp.asarray(phys_args[2]).dtype)
+        for group in spot_groups:
+            type_key, idx, r_ang, _ = group
+            if int(idx.shape[0]) == 0:
+                continue
+            ps = self._fixed_phi_per_spot(
+                idx, r_ang, phi[idx],
+                self._group_has_any_accel(type_key), phys_args, phys_kw)
+            total = total + jnp.sum(ps)
+        return total
+
     def _sum_phi_marginal(self, spot_groups, phys_args, phys_kw=None,
-                          spot_batch=None):
+                          spot_batch=None, remat=True):
         """Compute the total phi-marginal log-likelihood.
 
         This mirrors `_eval_phi_marginal` but avoids scattering group results
         into a full per-spot vector when only the scalar total is needed.
+
+        `remat` wraps each group in `jax.checkpoint` to save memory in the
+        backward pass; set it False for gradient-free callers (the DE MAP),
+        where rematerialisation only adds overhead.
         """
         if phys_kw is None:
             phys_kw = {}
@@ -1182,11 +1369,11 @@ class MaserDiskModel(ModelBase):
             has_any_accel = self._group_has_any_accel(type_key)
             batch = (None if spot_batch is None
                      else min(int(spot_batch), n_idx))
-            ps = jax.checkpoint(
-                self._marginal_per_spot_r,
-                static_argnums=(0, 4, 7))(
-                type_key, idx, r_ang, log_w_r,
-                has_any_accel, phys_args, phys_kw, batch)
+            fn = (jax.checkpoint(self._marginal_per_spot_r,
+                                 static_argnums=(0, 4, 7))
+                  if remat else self._marginal_per_spot_r)
+            ps = fn(type_key, idx, r_ang, log_w_r,
+                    has_any_accel, phys_args, phys_kw, batch)
             total = total + jnp.sum(ps)
 
         return total
@@ -1208,10 +1395,13 @@ class MaserDiskModel(ModelBase):
         H0_ref = float(get_nested(self.config, "model/H0_ref", 73.0))
         h = g("H0", H0_ref) / 100.0
 
-        D_c = g("D_c")
-        z_cosmo = float(self.distance2redshift(
-            jnp.atleast_1d(D_c), h=h).squeeze())
-        D_A = D_c / (1.0 + z_cosmo)
+        if "D_A" in sample:
+            D_A = g("D_A")
+        else:
+            D_c = g("D_c")
+            z_cosmo = float(self.distance2redshift(
+                jnp.atleast_1d(D_c), h=h).squeeze())
+            D_A = D_c / (1.0 + z_cosmo)
         if "eta" in sample and (
                 "log_MBH" not in sample
                 or self.mass_parameterization == "eta"):
@@ -1238,26 +1428,13 @@ class MaserDiskModel(ModelBase):
             g("sigma_a_floor") ** 2,
         )
 
-        phys_kw = {}
+        phys_kw = {"dv_sys": g("dv_sys", 0.0)}
         if self.use_quadratic_warp:
-            phys_kw["d2i_dr2"] = _np.deg2rad(g("d2i_dr2"))
-            phys_kw["d2Omega_dr2"] = _np.deg2rad(g("d2Omega_dr2"))
+            phys_kw["d2i_dr2"] = _np.deg2rad(g("d2i_dr2", 0.0))
+            phys_kw["d2Omega_dr2"] = _np.deg2rad(g("d2Omega_dr2", 0.0))
         if self.use_ecc:
-            if "ecc" in sample and "periapsis" in sample:
-                phys_kw["ecc"] = g("ecc")
-                phys_kw["periapsis0"] = _np.deg2rad(g("periapsis"))
-            elif "ecc" in sample and "periapsis_rad" in sample:
-                phys_kw["ecc"] = g("ecc")
-                phys_kw["periapsis0"] = g("periapsis_rad")
-            elif "e_x" in sample and "e_y" in sample:
-                e_x = g("e_x")
-                e_y = g("e_y")
-                phys_kw["ecc"] = float(_np.sqrt(e_x * e_x + e_y * e_y))
-                phys_kw["periapsis0"] = float(_np.arctan2(e_y, e_x))
-            else:
-                raise KeyError(
-                    "use_ecc=True but neither 'ecc'/'periapsis' nor "
-                    "'e_x'/'e_y' present in sample")
+            phys_kw["e_x"] = g("e_x", 0.0)
+            phys_kw["e_y"] = g("e_y", 0.0)
             phys_kw["dperiapsis_dr"] = _np.deg2rad(g("dperiapsis_dr", 0.0))
 
         diag = dict(D_A=D_A, M_BH=M_BH, v_sys=v_sys)
@@ -1267,7 +1444,7 @@ class MaserDiskModel(ModelBase):
         """JAX-traceable (phys_args, phys_kw) from constrained values.
 
         `par` maps site name -> jnp scalar. This mirrors the deterministic
-        transformations used by the BlackJAX Gibbs target.
+        transformations used by the BlackJAX megamaser target.
         """
         missing = object()
 
@@ -1281,10 +1458,13 @@ class MaserDiskModel(ModelBase):
                 return jnp.asarray(default)
             raise KeyError(f"missing '{site}' in HMC sites")
 
-        D_c = g("D_c", "D")
-        z_cosmo = self.distance2redshift(
-            jnp.atleast_1d(D_c), h=h).squeeze()
-        D_A = D_c / (1.0 + z_cosmo)
+        if "D_A" in par:
+            D_A = g("D_A", "D")
+        else:
+            D_c = g("D_c", "D")
+            z_cosmo = self.distance2redshift(
+                jnp.atleast_1d(D_c), h=h).squeeze()
+            D_A = D_c / (1.0 + z_cosmo)
         if "eta" in par and (
                 "log_MBH" not in par
                 or self.mass_parameterization == "eta"):
@@ -1304,19 +1484,19 @@ class MaserDiskModel(ModelBase):
             g("sigma_v_sys") ** 2, g("sigma_v_hv") ** 2,
             g("sigma_a_floor") ** 2)
 
-        phys_kw = {}
+        phys_kw = {"dv_sys": g("dv_sys", default=0.0)}
         if self.use_quadratic_warp:
-            phys_kw["d2i_dr2"] = jnp.deg2rad(g("d2i_dr2"))
-            phys_kw["d2Omega_dr2"] = jnp.deg2rad(g("d2Omega_dr2"))
+            phys_kw["d2i_dr2"] = jnp.deg2rad(g("d2i_dr2", default=0.0))
+            phys_kw["d2Omega_dr2"] = jnp.deg2rad(
+                g("d2Omega_dr2", default=0.0))
         if self.use_ecc:
-            if "e_x" in par:
-                e_x, e_y = g("e_x"), g("e_y")
-                phys_kw["ecc"] = jnp.sqrt(e_x**2 + e_y**2)
-                phys_kw["periapsis0"] = jnp.arctan2(e_y, e_x)
-            else:
-                phys_kw["ecc"] = g("ecc")
-                phys_kw["periapsis0"] = g("periapsis_rad")
-            phys_kw["dperiapsis_dr"] = jnp.deg2rad(g("dperiapsis_dr"))
+            # Carry eccentricity Cartesian (e_x, e_y); never sqrt/arctan2 the
+            # sampled components -- polar magnitude/direction is singular at
+            # e=0 and its gradient poisons the whole near-circular region.
+            phys_kw["e_x"] = g("e_x", default=0.0)
+            phys_kw["e_y"] = g("e_y", default=0.0)
+            phys_kw["dperiapsis_dr"] = jnp.deg2rad(
+                g("dperiapsis_dr", default=0.0))
         return phys_args, phys_kw
 
     def __call__(self):
@@ -1330,60 +1510,12 @@ class MaserDiskModel(ModelBase):
 # -----------------------------------------------------------------------
 
 
-def remap_warp_to_r0(samples, r_ang_ref_i, r_ang_ref_Omega):
-    """Re-express warp parameters as if the pivot were r = 0.
-
-    Parameters
-    ----------
-    samples : dict
-        Posterior samples dict with keys ``i0``, ``di_dr``, ``Omega0``,
-        ``dOmega_dr`` (all in degrees / degrees per mas).  Optionally also
-        ``d2i_dr2`` and ``d2Omega_dr2`` (degrees per mas^2) for quadratic
-        warps.
-    r_ang_ref_i, r_ang_ref_Omega : float
-        Pivot radii in mas used during sampling (``model._r_ang_ref_i`` and
-        ``model._r_ang_ref_Omega``).
-
-    Returns
-    -------
-    dict with keys ``i0_r0``, ``Omega0_r0``, ``di_dr_r0``, ``dOmega_dr_r0``
-    (same units as input).
-    """
-    i0 = _np.asarray(samples["i0"])
-    di_dr = _np.asarray(samples["di_dr"])
-    Om0 = _np.asarray(samples["Omega0"])
-    dOm_dr = _np.asarray(samples["dOmega_dr"])
-
-    d2i = (_np.asarray(samples["d2i_dr2"])
-           if "d2i_dr2" in samples else None)
-    d2Om = (_np.asarray(samples["d2Omega_dr2"])
-            if "d2Omega_dr2" in samples else None)
-
-    ri, rO = float(r_ang_ref_i), float(r_ang_ref_Omega)
-
-    if d2i is not None:
-        i0_r0 = i0 - di_dr * ri + d2i * ri**2
-        di_dr_r0 = di_dr - 2.0 * d2i * ri
-    else:
-        i0_r0 = i0 - di_dr * ri
-        di_dr_r0 = di_dr
-
-    if d2Om is not None:
-        Om0_r0 = Om0 - dOm_dr * rO + d2Om * rO**2
-        dOm_dr_r0 = dOm_dr - 2.0 * d2Om * rO
-    else:
-        Om0_r0 = Om0 - dOm_dr * rO
-        dOm_dr_r0 = dOm_dr
-
-    return dict(i0_r0=i0_r0, Omega0_r0=Om0_r0,
-                di_dr_r0=di_dr_r0, dOmega_dr_r0=dOm_dr_r0)
-
-
 def _trapz_log_w_per_spot(r):
     """Per-spot trapezoidal log-weights for non-uniform r grids."""
     h = jnp.diff(r, axis=-1)
     N = r.shape[0]
-    h_left = jnp.concatenate([jnp.zeros((N, 1)), h], axis=-1)
-    h_right = jnp.concatenate([h, jnp.zeros((N, 1))], axis=-1)
+    zeros = jnp.zeros((N, 1), dtype=r.dtype)
+    h_left = jnp.concatenate([zeros, h], axis=-1)
+    h_right = jnp.concatenate([h, zeros], axis=-1)
     w = (h_left + h_right) / 2
     return jnp.log(jnp.maximum(w, W_LOG_FLOOR))

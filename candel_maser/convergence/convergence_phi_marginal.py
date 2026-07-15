@@ -7,6 +7,8 @@ reference evaluated on a single uniform grid per spot type. This tells
 us (a) whether the config sub-range grids have enough density, and
 (b) whether the sub-range restrictions miss any likelihood mass outside
 the configured ranges (full-2π catches leakage).
+The production grid is evaluated in float32; the reference is evaluated
+in float64.
 
 Additionally, at every (galaxy, grid, r_ang-scale) combination, compare
 the AD gradient of the production sum-log-L against the same quantity
@@ -25,13 +27,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import tomli
-
-from convergence_utils import (
-    bruteforce_ll_fixed_r, build_model, ensure_grad_sample,
-    extend_grad_params, grad_diff_report, grad_fixed_r_production,
-    grad_fixed_r_reference,
-    resolve_grid_for_galaxy, vector_diff_report,
-)
+from convergence_utils import (bruteforce_ll_fixed_r, build_model, cast_floats,
+                               ensure_grad_sample, extend_grad_params,
+                               grad_diff_report, grad_fixed_r_production,
+                               grad_fixed_r_reference, resolve_grid_for_galaxy,
+                               vector_diff_report)
 
 
 def _phys_from_init(model, galaxies_cfg, galaxy):
@@ -40,6 +40,7 @@ def _phys_from_init(model, galaxies_cfg, galaxy):
     init = galaxies_cfg[galaxy]["init"]
     sample = {k: np.asarray(v) for k, v in init.items()}
     return model.phys_from_sample(sample)
+
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
 ALL_GALAXIES = ["CGCG074-064", "NGC5765b", "NGC6264", "NGC6323",
@@ -50,7 +51,8 @@ ALL_GALAXIES = ["CGCG074-064", "NGC5765b", "NGC6264", "NGC6323",
 PHI_MARGINAL_ANCHOR = (2001, 501, 3001)
 
 # Extra test grids (n_phi_hv_high, n_phi_hv_low, n_phi_sys) around the
-# anchor. Always include the config default and the anchor.
+# anchor. Always include the config default and the anchor. Optional
+# --grid-factors add scaled copies of the per-galaxy production grid.
 EXTRA_GRIDS = [
     (3001,  501,   4501),
     (5001,  1001,  5001),
@@ -59,13 +61,30 @@ EXTRA_GRIDS = [
 ]
 
 
-def build_test_grids(galaxy_default):
+def _scaled_grid_size(n_base, factor):
+    """Scale grid intervals and return an odd number of points >= 3."""
+    n = max(3, int(round((n_base - 1) * factor)) + 1)
+    return n if n % 2 else n + 1
+
+
+def _scale_grid(galaxy_default, factor):
+    return (
+        _scaled_grid_size(galaxy_default["n_hv_high"], factor),
+        _scaled_grid_size(galaxy_default["n_hv_low"], factor),
+        _scaled_grid_size(galaxy_default["n_sys"], factor),
+    )
+
+
+def build_test_grids(galaxy_default, grid_factors=None):
     """Build the convergence test list: per-galaxy production default +
-    anchor + EXTRA, deduplicated and sorted ascending (tightest last)."""
+    anchor + EXTRA + optional scaled grids, deduplicated and sorted."""
     d = (galaxy_default["n_hv_high"], galaxy_default["n_hv_low"],
          galaxy_default["n_sys"])
     grids = set(EXTRA_GRIDS) | {d, PHI_MARGINAL_ANCHOR}
+    if grid_factors:
+        grids.update(_scale_grid(galaxy_default, f) for f in grid_factors)
     return sorted(grids, key=lambda g: (g[0], g[2], g[1]))
+
 
 # r_ang scales: sample r_ang at the data-driven estimate × scale.
 R_SCALES = [0.5, 1.0, 2.0]
@@ -110,13 +129,13 @@ def worst_global_param(per_param):
 
 
 def eval_grid_logl(model, master_cfg, galaxy, n_high, n_low, n_sys,
-                    r_ang, phys_args, phys_kw, ref_cfg):
+                   r_ang, phys_args, phys_kw, ref_cfg):
     """Build a model at (n_high, n_low, n_sys), evaluate per-type logL
     at fixed r_ang, return the per_type_logl dict and the test model."""
     m_t = build_model(
         galaxy, master_cfg,
         n_phi_hv_high=n_high, n_phi_hv_low=n_low,
-        n_phi_sys=n_sys)
+        n_phi_sys=n_sys, dtype=jnp.float32)
     spot_groups = []
     if m_t._n_sys > 0:
         spot_groups.append(
@@ -159,11 +178,19 @@ def main():
              "n_hv_high and n_hv_low are each bumped by this factor "
              "(one at a time) to see which limits the fiducial grid "
              "(default: 2).")
+    parser.add_argument(
+        "--grid-factors", nargs="+", type=float, default=None,
+        help="Also test scaled copies of each galaxy's production phi grid. "
+             "Example: --grid-factors 0.25 0.5 1 2.")
     args = parser.parse_args()
+    if (args.grid_factors is not None
+            and any(f <= 0 for f in args.grid_factors)):
+        raise ValueError("--grid-factors entries must be positive.")
 
     jax.config.update("jax_platform_name", "gpu")
     jax.config.update("jax_enable_x64", True)
-    print(f"JAX platform: {jax.default_backend()}, precision: float64",
+    print(f"JAX platform: {jax.default_backend()}, "
+          "production=float32, reference=float64",
           flush=True)
 
     with open(CONFIG_PATH, "rb") as f:
@@ -177,6 +204,7 @@ def main():
 
     print("=" * 80)
     print("Fixed-r phi-marginal convergence")
+    print("Comparison dtype: production float32 − reference float64")
     print(f"Reference (ll): full-2π uniform grid, "
           f"n_phi = {ref_cfg['n_phi']}")
     if do_grad:
@@ -185,6 +213,8 @@ def main():
               f"spot_batch = {grad_ref_cfg['spot_batch']}, "
               f"jax.checkpoint per spot-batch")
     print(f"Anchor: {PHI_MARGINAL_ANCHOR}, EXTRA_GRIDS={EXTRA_GRIDS}")
+    if args.grid_factors is not None:
+        print(f"Scaled production-grid factors: {args.grid_factors}")
     print(f"r_ang scales: {R_SCALES}")
     print("=" * 80)
 
@@ -198,7 +228,7 @@ def main():
         # Per-galaxy production grid (per-galaxy block -> generic [model]).
         galaxy_default = resolve_grid_for_galaxy(
             master_cfg, galaxy, "fixed_r")
-        galaxy_grids = build_test_grids(galaxy_default)
+        galaxy_grids = build_test_grids(galaxy_default, args.grid_factors)
         galaxy_grids_map[galaxy] = galaxy_grids
         print(f"  production φ grid: "
               f"({galaxy_default['n_hv_high']}, "
@@ -208,29 +238,38 @@ def main():
 
         # Build model once for fixed-r diagnostics. Defaults used; we
         # override per-iteration via rebuild for the test grids.
-        model = build_model(galaxy, master_cfg)
+        model = build_model(galaxy, master_cfg, dtype=jnp.float64)
+        model_prod = build_model(galaxy, master_cfg, dtype=jnp.float32)
         phys_args, phys_kw, diag = _phys_from_init(
             model, galaxies_cfg, galaxy)
+        phys_args_prod = cast_floats(phys_args, jnp.float32)
+        phys_kw_prod = cast_floats(phys_kw, jnp.float32)
         D_A, M_BH, v_sys = diag["D_A"], diag["M_BH"], diag["v_sys"]
         i0 = phys_args[8]
         sigma_a_floor2 = phys_args[16]
         var_v_hv = phys_args[15]
         r_est = estimate_r_ang(model, D_A, M_BH, v_sys,
-                                sigma_a_floor2, i0, var_v_hv)
+                               sigma_a_floor2, i0, var_v_hv)
         print(f"  D_A={D_A:.2f} Mpc, n_spots={model.n_spots}")
 
         _r_ang_lo, _r_ang_hi = model.r_ang_range(D_A)
 
         if do_grad:
-            sample = ensure_grad_sample(model, galaxies_cfg[galaxy]["init"])
+            sample = ensure_grad_sample(
+                model, galaxies_cfg[galaxy]["init"], dtype=jnp.float64)
+            sample_prod = ensure_grad_sample(
+                model_prod, galaxies_cfg[galaxy]["init"], dtype=jnp.float32)
             grad_param_keys = extend_grad_params(model, sample)
         else:
             sample = None
+            sample_prod = None
             grad_param_keys = None
 
         for scale in R_SCALES:
             r_ang = jnp.clip(
-                jnp.asarray(r_est * scale), _r_ang_lo, _r_ang_hi)
+                jnp.asarray(r_est * scale, dtype=jnp.float64),
+                _r_ang_lo, _r_ang_hi)
+            r_ang_prod = r_ang.astype(jnp.float32)
             med_r = float(jnp.median(r_ang))
             print(f"\n  r_ang scale = {scale:.2f}x  "
                   f"(median r = {med_r:.4f} mas)")
@@ -244,7 +283,7 @@ def main():
 
             # Reference gradient (computed once per scale and reused).
             if do_grad:
-                print(f"    computing full-2π ref gradient...", flush=True)
+                print("    computing full-2π ref gradient...", flush=True)
                 grad_ref_glob, grad_ref_r = grad_fixed_r_reference(
                     model, sample, r_ang, grad_ref_cfg)
             else:
@@ -260,7 +299,7 @@ def main():
                 per_t, m_t = eval_grid_logl(
                     model, master_cfg, galaxy,
                     n_high, n_low, n_sys,
-                    r_ang, phys_args, phys_kw, ref_cfg)
+                    r_ang_prod, phys_args_prod, phys_kw_prod, ref_cfg)
                 grid_results[(n_high, n_low, n_sys)] = per_t
 
                 d_tot = per_t["total"] - ref["total"]
@@ -277,7 +316,7 @@ def main():
 
                 if do_grad:
                     grad_test_glob, grad_test_r = grad_fixed_r_production(
-                        m_t, sample, r_ang)
+                        m_t, sample_prod, r_ang_prod)
                     rep_g = grad_diff_report(
                         grad_test_glob, grad_ref_glob, grad_param_keys)
                     rep_r_per = per_category_r_grad_diff(
@@ -295,7 +334,7 @@ def main():
                 summary.append(row)
 
             # Table 1 — Δ logL per category.
-            print(f"\n    Δ logL per category (production − full-2π ref):")
+            print("\n    Δ logL per category (production − full-2π ref):")
             hdr1 = (f"      {'n_hv_high':>10} {'n_hv_low':>9} "
                     f"{'n_sys':>7}  {'Δ total':>11}  "
                     f"{'Δ sys':>9}  {'Δ red':>9}  {'Δ blue':>9}")
@@ -327,8 +366,8 @@ def main():
                           f"{wname} ({wrel:.2e})")
 
                 # Table 3 — rel. diff of per-spot ∇r_ang per category.
-                print(f"\n    rel. diff of ∇r_ang per spot category "
-                      f"(max over spots in category):")
+                print("\n    rel. diff of ∇r_ang per spot category "
+                      "(max over spots in category):")
                 hdr3 = (f"      {'n_hv_high':>10} {'n_hv_low':>9} "
                         f"{'n_sys':>7}  {'rel∇r-sys':>11}  "
                         f"{'rel∇r-red':>11}  {'rel∇r-blue':>11}")
@@ -368,8 +407,9 @@ def main():
             print(f"      {'label':<16} {'grid':<24} "
                   f"{'Δ total':>11}  {'Δ red':>9}  {'Δ blue':>9}  "
                   f"{'|Δtot| reduction':>17}")
+            fid_grid = f"({n_h_d}, {n_l_d}, {n_s_d})"
             print(f"      {'fiducial':<16} "
-                  f"{'(' + str(n_h_d) + ', ' + str(n_l_d) + ', ' + str(n_s_d) + ')':<24} "
+                  f"{fid_grid:<24} "
                   f"{fid['total']-ref['total']:+11.4f}  "
                   f"{fid['red']-ref['red']:+9.4f}  "
                   f"{fid['blue']-ref['blue']:+9.4f}  "
@@ -383,7 +423,7 @@ def main():
                     per_t, _ = eval_grid_logl(
                         model, master_cfg, galaxy,
                         grid[0], grid[1], grid[2],
-                        r_ang, phys_args, phys_kw, ref_cfg)
+                        r_ang_prod, phys_args_prod, phys_kw_prod, ref_cfg)
                 d_tot = per_t["total"] - ref["total"]
                 d_red = per_t["red"] - ref["red"]
                 d_blue = per_t["blue"] - ref["blue"]

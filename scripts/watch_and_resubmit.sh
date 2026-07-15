@@ -12,8 +12,8 @@
 #   bash watch_and_resubmit.sh --marker "MAP init" -- \
 #       bash scripts/megamaser/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b
 #
-#   bash watch_and_resubmit.sh --marker "saved samples to" -- \
-#       bash scripts/megamaser/submit.sh --sampler gibbs -q cmbgpu --galaxy NGC5765b
+#   bash watch_and_resubmit.sh --marker "saved samples to" --no-resume -- \
+#       bash scripts/megamaser/submit.sh --sampler mcmc -q cmbgpu --galaxy NGC5765b
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -40,7 +40,10 @@ Options:
 The submit command must produce JOBID=<id> lines on stdout (provided
 by _submit_lib.sh's submit_job function).
 
-On resubmit, the same command is re-run with the resume flag appended.
+On resubmit, the same command is re-run with the resume flag appended unless
+--no-resume was passed.
+For megamaser submit.sh commands with multiple galaxies, retry rounds
+resubmit only the galaxies whose latest jobs missed the marker.
 
 Examples:
   # DE MAP (one galaxy, auto-resume on timeout)
@@ -51,9 +54,13 @@ Examples:
   bash watch_and_resubmit.sh --marker "MAP init" -- \
       bash scripts/megamaser/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b,NGC6264
 
-  # Gibbs sampler (one galaxy)
-  bash watch_and_resubmit.sh --marker "saved samples to" -- \
-      bash scripts/megamaser/submit.sh --sampler gibbs -q cmbgpu --galaxy NGC5765b
+  # DE MAP (all MCP H0 galaxies; excludes NGC4258)
+  bash watch_and_resubmit.sh --marker "MAP init" -- \
+      bash scripts/megamaser/submit.sh --sampler de -q cmbgpu --galaxy all
+
+  # MCMC sampler (one galaxy; no resume flag exists)
+  bash watch_and_resubmit.sh --marker "saved samples to" --no-resume -- \
+      bash scripts/megamaser/submit.sh --sampler mcmc -q cmbgpu --galaxy NGC5765b
 
   # Custom poll and retries
   bash watch_and_resubmit.sh --marker "MAP init" --max-retries 10 --poll 60 -- \
@@ -87,9 +94,14 @@ CMD=("$@")
 # ── helpers ────────────────────────────────────────────────────────────────
 
 log_path_for_job() {
-    # submit_job writes logs as "logs-<jobid>-<jobname>.out" in $PWD on
-    # both clusters. The watcher only knows the jobid, so glob to find it.
-    local jid="$1"
+    local jid="$1" template="${2:-}"
+    if [[ -n "$template" ]]; then
+        template="${template//<jobid>/$jid}"
+        template="${template//%j/$jid}"
+        echo "$template"
+        return
+    fi
+    # Default submit_job logs are "logs-<jobid>-<jobname>.out" in $PWD.
     local f
     f=$(ls "$PWD"/logs-"${jid}"-*.out 2>/dev/null | head -1)
     echo "${f:-$PWD/logs-${jid}-<name>.out}"
@@ -97,14 +109,27 @@ log_path_for_job() {
 
 run_and_capture_jobids() {
     # Run the command, tee output to the terminal, collect JOBID= lines.
-    local -n _jids=$1; shift
     local cmd=("$@")
+    local current_gal="" current_log=""
+    job_ids=()
+    job_gals=()
+    job_logs=()
     echo "[watch] Running: ${cmd[*]}"
     _out=$("${cmd[@]}" 2>&1) || true
     echo "$_out"
     while IFS= read -r line; do
+        if [[ "$line" =~ ^(Submitting|Running)[[:space:]]+([^[:space:]]+)[[:space:]]+\( ]]; then
+            current_gal="${BASH_REMATCH[2]}"
+        fi
+        if [[ "$line" =~ ^\[submit_job\][[:space:]]+log[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+            current_log="${BASH_REMATCH[1]}"
+        fi
         if [[ "$line" =~ ^JOBID=([0-9]+)$ ]]; then
-            _jids+=("${BASH_REMATCH[1]}")
+            job_ids+=("${BASH_REMATCH[1]}")
+            job_gals+=("$current_gal")
+            job_logs+=("$current_log")
+            current_gal=""
+            current_log=""
         fi
     done <<< "$_out"
 }
@@ -130,18 +155,48 @@ wait_for_jobs() {
 check_jobs() {
     # Check completion for a list of job IDs. Returns 0 if all complete,
     # 1 if any incomplete. Prints status for each.
-    local jids=("$@")
+    local jids=("${job_ids[@]}")
     local any_incomplete=0
-    for jid in "${jids[@]}"; do
-        logfile=$(log_path_for_job "$jid")
+    incomplete_gals=()
+    for i in "${!jids[@]}"; do
+        local jid="${jids[$i]}"
+        local gal="${job_gals[$i]:-}"
+        logfile=$(log_path_for_job "$jid" "${job_logs[$i]:-}")
         if [[ -f "$logfile" ]] && grep -q "$MARKER" "$logfile"; then
             echo "[watch] Job $jid: COMPLETE"
         else
             echo "[watch] Job $jid: INCOMPLETE (log: ${logfile})"
+            [[ -n "$gal" ]] && incomplete_gals+=("$gal")
             any_incomplete=1
         fi
     done
     return $any_incomplete
+}
+
+replace_galaxy_arg() {
+    local galaxies="$1"; shift
+    local cmd=("$@")
+    local replaced=0
+    resubmit_cmd=()
+    for ((i = 0; i < ${#cmd[@]}; i++)); do
+        case "${cmd[$i]}" in
+            --galaxy)
+                resubmit_cmd+=("--galaxy" "$galaxies")
+                i=$((i + 1))
+                replaced=1
+                ;;
+            --galaxy=*)
+                resubmit_cmd+=("--galaxy=$galaxies")
+                replaced=1
+                ;;
+            *)
+                resubmit_cmd+=("${cmd[$i]}")
+                ;;
+        esac
+    done
+    if [[ $replaced -eq 0 ]]; then
+        resubmit_cmd=("${cmd[@]}")
+    fi
 }
 
 # ── main loop ──────────────────────────────────────────────────────────────
@@ -164,8 +219,7 @@ for attempt in $(seq 0 "$MAX_RETRIES"); do
     echo "[watch] Round $attempt/$MAX_RETRIES ($(date '+%Y-%m-%d %H:%M:%S'))"
     echo "========================================"
 
-    job_ids=()
-    run_and_capture_jobids job_ids "${resubmit_cmd[@]}"
+    run_and_capture_jobids "${resubmit_cmd[@]}"
 
     if [[ ${#job_ids[@]} -eq 0 ]]; then
         echo "[watch] No jobs submitted (dry run or error). Exiting."
@@ -174,7 +228,7 @@ for attempt in $(seq 0 "$MAX_RETRIES"); do
 
     wait_for_jobs "${job_ids[@]}"
 
-    if check_jobs "${job_ids[@]}"; then
+    if check_jobs; then
         echo ""
         echo "[watch] All jobs completed successfully!"
         exit 0
@@ -188,8 +242,15 @@ for attempt in $(seq 0 "$MAX_RETRIES"); do
     echo ""
     echo "[watch] Resubmitting (round $((attempt + 1))/$MAX_RETRIES)..."
 
-    # Build resubmit command: original command + resume flag (if set)
-    resubmit_cmd=("${CMD[@]}")
+    # Build resubmit command: original command, narrowed to incomplete
+    # galaxies when submit.sh output provided a jobid -> galaxy mapping.
+    if [[ ${#incomplete_gals[@]} -gt 0 ]]; then
+        gal_csv=$(IFS=,; echo "${incomplete_gals[*]}")
+        echo "[watch] Retrying galaxies: $gal_csv"
+        replace_galaxy_arg "$gal_csv" "${CMD[@]}"
+    else
+        resubmit_cmd=("${CMD[@]}")
+    fi
     if [[ -n "$RESUME_FLAG" ]]; then
         resubmit_cmd+=("$RESUME_FLAG")
     fi

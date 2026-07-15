@@ -1,0 +1,25 @@
+!  Parameters for NGC 6323 (CANDEL globals, Reid convention)
+      100000 ! Total "burn-in" trials (done in stages of 100,000); if negative, instead read in "burnin_values.dat" 
+      500000            4       15.0     210.0 ! Total # trials (stored or not); # of M-H strands (1-20); Initial Ho strand range (min max)
+           0          0.5            T            T            T            T ! Gaussian (0) or "outlier tolerant" (1) data unc; fraction Ho-M trials correlated; x,y,v,a fitted?
+       0.015    -47351937 ! Initial McMC parameter step size in burnin phase; random number seed 
+   60.345873           -5          0.7 ! Ho (Mpc); prior_unc (<0 for flat prior), expected posteriori_unc
+   1.1703075         -0.1         0.05 ! BH mass (10^7 Msuns)
+   7852.7119         -0.5         0.25 ! Vlsr_optical of BH (km/s) 
+   0.0146898        -0.01        0.002 ! Xo of BH (mas)
+   0.0039044        -0.01        0.004 ! Yo of BH (mas)
+   88.225547         -0.5          0.1 ! i (deg)
+        1.14           -1         0.05 ! di/dr (deg/mas)
+           0            0            0 ! d2i/dr (deg/mas^2)
+   189.64019           -1         0.05 ! PA (deg)
+     13.7687           -1         0.02 ! dPA/dr (deg/mas)
+           0            0            0 ! d2PA/dr2 (deg/mas^2)
+           0            0            0 ! Eccentricity
+           0            0            0 ! Pericenter azimuth (deg)
+           0            0            0 ! dP-az/dr (deg/mas)
+           0            0            0 ! Vcorrection: added to Vobserved to get to Hubble flow (km/s)
+   0.0040484       -0.002        0.001 ! x floor (mas)
+   0.0027264        -0.01        0.001 ! y floor (mas)
+      1.8252        -0.25         0.15 ! Vsys floor (km/s)
+      1.7246         -0.5         0.15 ! Vsys floor (km/s)
+      0.1376         -0.2         0.05 ! Acc floor (km/s/yr)
