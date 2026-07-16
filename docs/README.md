@@ -51,6 +51,32 @@ Submit DE MAP jobs (the global search to seed MCMC):
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b --sampler de
 ```
 
+The production default remains classic DE.  Two opt-in adaptive modes are
+available for validation:
+
+```bash
+python scripts/megamaser/run_maser.py NGC6264 --sampler de \
+    --de-algorithm lshade
+python scripts/megamaser/run_maser.py NGC6264 --sampler de \
+    --de-algorithm hybrid --adam-steps 200
+```
+
+`lshade` uses success-history mutation/crossover adaptation and linearly
+reduces the population.  `hybrid` additionally applies Adam to a small set of
+diverse elites using independently reshuffled, stratified spot batches.  Adam
+never changes the integration grids, and its endpoints enter the DE population
+only after improving the exact all-spot objective.  Every exact optimiser
+proposal is deduplicated in a SQLite sidecar next to the algorithm-specific DE
+checkpoint, and `--resume` restores both.  GPU runs continue to split exact
+population evaluations over the visible devices with `pmap`; pass
+experimental runner options after `--` when using `submit.sh`, for example:
+
+```bash
+bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC6264 \
+    --sampler de --gpu-count 4 -- \
+    --de-algorithm hybrid --min-pop-size 16 --adam-steps 200
+```
+
 For GPU jobs, `--gpu-count N` requests N GPUs on one node and `--cpus C`
 means C CPU cores per GPU. If `--cpus` is omitted, GPU jobs use 4 CPU cores
 per GPU. For example, `--gpu-count 8` requests 32 CPU cores by default, while
@@ -63,7 +89,7 @@ bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --infer-H0 
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --infer-H0 --selection redshift --distance-prior volume
 ```
 
-Common forwarded options are `--init-strategy median|config|reid`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. `reid` uses reported Pesce/Reid globals, with NGC4258 read from `reid_ngc4258_best.toml`. MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`. Submit single-galaxy evidence separately with `submit.sh --evidence` after the chain exists. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses the matching saved per-galaxy `samples/D_A` chains (legacy `samples/D_c` chains are converted to D_A) as KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
+Common forwarded options are `--init-strategy median|config|reid`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. `reid` uses reported Pesce/Reid globals, with NGC4258 read from `reid_ngc4258_best.toml`. MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass adaptive-DE options after the `submit.sh` `--` separator. Submit single-galaxy evidence separately with `submit.sh --evidence` after the chain exists. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses the matching saved per-galaxy `samples/D_A` chains (legacy `samples/D_c` chains are converted to D_A) as KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
 
 Automatic retries use the watcher wrapper. The `--max-retries` shortcut
 launches the watcher in a detached `screen`/`tmux` session and prints the

@@ -475,14 +475,23 @@ n_phi = 50001
 spot_batch = 4
 
 [optimise]
+# Experimental alternatives are "lshade" and "hybrid". Keep classic as the
+# production default until the GPU validation round is complete.
+algorithm = "classic"
 log2_N = 14
 pop_size = 2000
+min_pop_size = 32
 max_generations = 5000
 patience = 500
 eval_chunk = 5
 log_every = 1
 sobol_n_sigma = 5
 min_dist_frac = 0.005
+adam_interval = 10
+adam_elites = 4
+adam_steps = 20
+adam_learning_rate = 0.005
+adam_batch_fraction = 0.5
 
 [joint.selection]
 # HEALPix nside for the isotropic LOS average of the selection normalisation.
