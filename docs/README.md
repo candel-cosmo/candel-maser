@@ -4,6 +4,10 @@ Supported megamaser workflow:
 
 - `run_maser.py`: unified megamaser runner. It defaults to `--sampler mcmc` (the explicit-latent `(r_ang, phi)` NUTS chain); use `--sampler de` for the 2D-marginal differential-evolution MAP (delegates to `run_de_map.py`), the global search used to seed the MCMC.
 - `run_de_map.py`: 2D-marginal MAP optimiser. Per spot it marginalises `(r_ang, phi)` jointly on a conditional per-spot r-grid (`_build_conditional_r_grids` + `_sum_phi_marginal`; not phi at a profiled `r_ang`, which overfits `D_A`) and optimises the globals with differential evolution. The phi/r grid is read from the per-galaxy `config_maser.toml` (same grid as the MCMC and convergence checks). Reached via `run_maser.py --sampler de`.
+- `benchmark_de_batching.py`: fixed-candidate exact-likelihood benchmark for
+  spot batching. Suite mode uses fresh child processes, bypasses SQLite, and
+  reads candidates from the current compatible DE checkpoint, or uses a
+  deterministic scrambled-Sobol fallback when no checkpoint exists.
 - `run_joint_H0.py`: toy joint MCP megamaser H0 inference using KDE distance likelihoods from the saved single-galaxy MCMC chains.
 - `submit.sh`: cluster/local submission helper for `--sampler mcmc`, `--sampler de`, or the toy joint H0 via `--infer-H0`.
 - `check_reid/`: standalone comparison against the Reid-style parameterisation.
@@ -51,36 +55,95 @@ Submit DE MAP jobs (the global search to seed MCMC):
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b --sampler de
 ```
 
-The production default remains classic DE.  Two opt-in adaptive modes are
-available for validation:
+DE now always uses L-SHADE: current-to-pbest/1 mutation, success-history
+adaptation of the mutation and crossover rates, a displaced-parent archive,
+and linear population reduction.  Population reduction follows the number of
+DE-population fitness evaluations, not the generation counter.  Consequently,
+raising `max_generations` as a safety ceiling does not slow the reduction
+schedule.  The production population is 2000 -> 128 over 3,400,000 such
+evaluations; after that it remains at 128 until patience or the generation
+ceiling stops the run.  The 3,400,000 value is only the population-reduction
+horizon, not an NFE limit: evaluations continue beyond it.  There is no
+classic/hybrid selector and no Adam polishing path.
 
-```bash
-python scripts/megamaser/run_maser.py NGC6264 --sampler de \
-    --de-algorithm lshade
-python scripts/megamaser/run_maser.py NGC6264 --sampler de \
-    --de-algorithm hybrid --adam-steps 200
-```
+The initial population contains only the data-derived ridge and scrambled
+Sobol points.  The Pesce/Reid point is never inserted, including through the
+DE initialisation strategy.  Its exact all-spot unnormalised log posterior
+density is still printed as an independent reference and is scored through the
+same compiled DE objective rather than a separate startup executable.  (A
+single point has zero probability mass in a continuous posterior.) Runs use
+the explicit
+`*_lshade_nopesce.npz` checkpoint plus a SQLite exact-evaluation sidecar, and
+`--resume` restores both without accepting an older seeded or
+generation-scheduled checkpoint.
 
-`lshade` uses success-history mutation/crossover adaptation and linearly
-reduces the population.  `hybrid` additionally applies Adam to a small set of
-diverse elites using independently reshuffled, stratified spot batches.  Adam
-never changes the integration grids, and its endpoints enter the DE population
-only after improving the exact all-spot objective.  Every exact optimiser
-proposal is deduplicated in a SQLite sidecar next to the algorithm-specific DE
-checkpoint, and `--resume` restores both.  GPU runs continue to split exact
-population evaluations over the visible devices with `pmap`; pass
-experimental runner options after `--` when using `submit.sh`, for example:
+Every L-SHADE proposal is evaluated with the exact all-spot objective and
+deduplicated in the sidecar.  Spot batching remains allowed because it is an
+exact sum. The five standard float32 galaxies (`CGCG074-064`, `NGC5765b`,
+`NGC6264`, `NGC6323`, and `UGC3789`) default to true all-spots evaluation;
+an explicit `--spot-batch` or per-galaxy setting still overrides this. The f64
+`NGC4258` path retains its configured/planned spot batching. GPU runs use
+concurrent device-local JITs in one process and on one node. Each device has
+one immutable eight-candidate executable whose entries are evaluated
+sequentially, so only one candidate's intermediates are live at a time and
+population shrinkage cannot trigger new input shapes. Runs begin with ordinary
+round-robin assignment, learn bounded per-device throughput weights, and adopt
+a weighted assignment only when its block-aware predicted makespan improves by
+at least 2%. Candidate vectorisation is an implementation invariant and has no
+configuration or command-line toggle. Padding is evaluated but excluded from
+the archive and algorithmic NFE count.
+The SQLite sidecar persists deterministic 64-bit
+fingerprints, so a resume loads the compact fingerprint table instead of every
+full point key.  Possible matches are still verified against the complete BLOB
+key, preserving exact cache semantics even under a fingerprint collision.
+Checkpoint logs report exact-evaluation, trial-generation, archive lookup/write,
+device balance, update, and checkpoint timings.  Pass budget overrides after
+`--` when using `submit.sh`, for example:
 
 ```bash
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC6264 \
-    --sampler de --gpu-count 4 -- \
-    --de-algorithm hybrid --min-pop-size 16 --adam-steps 200
+    --sampler de --gpu-count 4 --cpus 2 -- \
+    --population-reduction-evaluations 3400000 \
+    --max-generations 5000 --patience 500
 ```
 
-For GPU jobs, `--gpu-count N` requests N GPUs on one node and `--cpus C`
-means C CPU cores per GPU. If `--cpus` is omitted, GPU jobs use 4 CPU cores
-per GPU. For example, `--gpu-count 8` requests 32 CPU cores by default, while
-`--gpu-count 8 --cpus 2` requests 16 CPU cores. `--mem` remains GB per CPU.
+For a development-only batching benchmark inside an existing two-GPU
+allocation, run:
+
+```bash
+python scripts/megamaser/benchmark_de_batching.py UGC3789 --suite \
+    --candidates 512 --n-devices 2
+```
+
+The benchmark reports compile/adaptation passes separately from steady timed
+passes. It does not change the checkpoint or exact-evaluation sidecar. To
+trace the production-like fixed/config score and DE evaluator at 50 ms
+resolution, while isolating allocator state in one fresh process per setting,
+use for example:
+
+```bash
+python scripts/megamaser/benchmark_de_batching.py UGC3789 --suite \
+    --spot-batches 8,16,34,68,all,68 \
+    --candidates 128 --warmups 3 --repeats 1 --n-devices 2 \
+    --trace-memory --include-fixed-score
+```
+
+The JSON records both JAX live/peak bytes and sampled `nvidia-smi` resident
+memory. It also reports the raw grid geometry by spot class. For scan-based
+spot batching, the first-order live-array scale is
+`spot_batch * n_r * n_phi * dtype_bytes`. The truly unbatched path selected by
+`--spot-batch all` can have a different, more strongly fused XLA memory plan,
+so benchmark it directly rather than extrapolating a scan-batch fit. Resident
+memory can also jump in allocator buckets; use the sampled peak when
+establishing a card-specific limit.
+
+For GPU jobs, `--gpu-count N` requests N GPUs and `--cpus C` means C CPU cores
+per GPU. Use `--cpus 2` for multi-GPU Glamdring jobs with the default 7 GB per
+CPU: two RTX 2080 Ti GPUs then request 28 GB total and four RTX 3090 GPUs 56
+GB, fitting one node. The generic omitted default is 4 CPU cores per GPU; with
+7 GB per CPU that can force the scheduler to spread a nominal multi-GPU job
+across nodes, where one JAX process cannot use the remote GPUs. `--mem` remains
+GB per CPU.
 
 Submit one joint H0 chain over several galaxies:
 
@@ -89,7 +152,7 @@ bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --infer-H0 
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --infer-H0 --selection redshift --distance-prior volume
 ```
 
-Common forwarded options are `--init-strategy median|config|reid`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. `reid` uses reported Pesce/Reid globals, with NGC4258 read from `reid_ngc4258_best.toml`. MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass adaptive-DE options after the `submit.sh` `--` separator. Submit single-galaxy evidence separately with `submit.sh --evidence` after the chain exists. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses the matching saved per-galaxy `samples/D_A` chains (legacy `samples/D_c` chains are converted to D_A) as KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
+Common forwarded options are `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. DE accepts `--init-strategy median|config`; MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit single-galaxy evidence separately with `submit.sh --evidence` after the chain exists. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses the matching saved per-galaxy `samples/D_A` chains (legacy `samples/D_c` chains are converted to D_A) as KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
 
 Automatic retries use the watcher wrapper. The `--max-retries` shortcut
 launches the watcher in a detached `screen`/`tmux` session and prints the

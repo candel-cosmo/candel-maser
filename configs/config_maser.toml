@@ -475,23 +475,24 @@ n_phi = 50001
 spot_batch = 4
 
 [optimise]
-# Experimental alternatives are "lshade" and "hybrid". Keep classic as the
-# production default until the GPU validation round is complete.
-algorithm = "classic"
+# DE always uses L-SHADE (current-to-pbest/1, success-history F/CR, and linear
+# population reduction). Its population contains only the data-derived ridge
+# and Sobol points; Pesce/Reid is never seeded and is scored only as a reference.
 log2_N = 14
 pop_size = 2000
-min_pop_size = 32
+min_pop_size = 128
+# L-SHADE's population reduction is driven by population fitness evaluations,
+# independently of max_generations.  This horizon brings 2000 -> 128 in about
+# 5000 generations; it is not an NFE cap.  Evaluations continue with 128
+# members until patience or max_generations stops the run.
+population_reduction_evaluations = 3400000
 max_generations = 5000
 patience = 500
-eval_chunk = 5
+# The evaluator always scores one DE candidate per GPU wave. This is an
+# implementation invariant, not a configurable optimiser parameter.
 log_every = 1
 sobol_n_sigma = 5
 min_dist_frac = 0.005
-adam_interval = 10
-adam_elites = 4
-adam_steps = 20
-adam_learning_rate = 0.005
-adam_batch_fraction = 0.5
 
 [joint.selection]
 # HEALPix nside for the isotropic LOS average of the selection normalisation.

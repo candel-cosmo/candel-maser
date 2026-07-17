@@ -27,7 +27,6 @@ SAMPLER_EXPLICIT=false
 COMPUTE_EVIDENCE=false
 INIT_STRATEGY=""
 SPOT_BATCH=""
-EVAL_CHUNK=""
 ADD_ECC=false
 ADD_QW=false
 MATCH_REID=false
@@ -70,8 +69,8 @@ Required:
                          single-galaxy jobs.
   --sampler mcmc|de
                          Job type (default: mcmc). de runs the 2D-marginal
-                         differential-evolution MAP (global search
-                         to seed mcmc).  Ignored with --infer-H0
+                         L-SHADE MAP (global search to seed mcmc). Ignored with
+                         --infer-H0
                          (always a joint NUTS chain).
   --infer-H0             Run ONE toy joint H0 chain over all requested galaxies
                          with a shared H0 (run_joint_H0.py), instead of one
@@ -100,8 +99,9 @@ Joint H0 options (with --infer-H0), passed to run_joint_H0.py:
 
 Common options passed to run_maser.py:
   --init-strategy median|config|reid
-                         reid uses reported Pesce/Reid globals
-                         (NGC4258 reads reid_ngc4258_best.toml).
+                         median/config apply to all samplers. reid is MCMC and
+                         evidence only; DE never initialises from Pesce/Reid
+                         (but reports its exact reference logP).
   --spot-batch N         Maser spots evaluated together per pass (DE, mcmc and
                          --evidence). Default: all at once (auto-shrunk only if
                          one candidate's spots overflow VRAM); lower to cut
@@ -144,6 +144,11 @@ Experimental MCMC options passed to run_maser.py --sampler mcmc:
                          Disabled by default.
 
 DE optimiser options passed to run_maser.py --sampler de:
+  DE always uses L-SHADE and a data-ridge + Sobol initial population. The
+                         Pesce/Reid point is never seeded; its exact all-spot
+                         unnormalised log posterior density is reported.
+                         Population reduction follows DE fitness evaluations,
+                         independently of the generation ceiling.
   --resume               Resume from the DE checkpoint if present.
   --fix-globals          Skip the DE search; score logP and the conditional
                          r_ang MAP at the config [init] globals.
@@ -151,10 +156,6 @@ DE optimiser options passed to run_maser.py --sampler de:
                          globals, scoring the data-only marginal.
   --fix-floors-pesce     Run the full DE but hold the five error floors at the
                          published Pesce/Reid values (all other globals free).
-  --eval-chunk N         DE candidates evaluated per JIT wave per GPU (also
-                         forwarded to --evidence). Default: auto-sized from the
-                         VRAM budget; raise to go faster, lower if you OOM.
-
 Cluster options:
   MCMC jobs submit as CPU-only jobs. DE and --evidence request GPU.
   Joint H0 follows the selected node/queue: GPU queues request GPU; CPU queues
@@ -167,7 +168,8 @@ Cluster options:
   --gpu-mem GB           GPU VRAM request; also passed to DE/evidence
                          autobatching where relevant.
   --gpu-count N          GPUs per DE job on one node (-> --gres=gpu:N on ARC);
-                         the runner shards the DE population across them.
+                         the runner uses adaptive weighted round-robin across
+                         these local devices.
   --time T
   --mem GB              Memory in GB per CPU (default: 7) for every submitted
                          job type.
@@ -301,7 +303,6 @@ while [[ $# -gt 0 ]]; do
         --gputype) GPUTYPE="$2"; shift 2 ;;
         --gpu-mem) GPU_MEM="$2"; shift 2 ;;
         --gpu-count) GPU_COUNT="$2"; shift 2 ;;
-        --eval-chunk) EVAL_CHUNK="$2"; shift 2 ;;
         --time) TIME="$2"; shift 2 ;;
         --max-retries) MAX_RETRIES="$2"; shift 2 ;;
         --poll) WATCH_POLL="$2"; shift 2 ;;
@@ -380,6 +381,12 @@ if [[ "$EVIDENCE" == true && "$JOINT_H0_MODE" == true ]]; then
 fi
 if [[ "$EVIDENCE" == true && "$SAMPLER_EXPLICIT" == true ]]; then
     echo "[ERROR] --sampler is not valid with --evidence"; exit 1
+fi
+if [[ "$EVIDENCE" == false && "$JOINT_H0_MODE" == false
+      && "$SAMPLER" == "de" && "$(chain_init_strategy)" == "reid" ]]; then
+    echo "[ERROR] DE never initialises from Pesce/Reid."
+    echo "        Use --init-strategy median or config; Pesce logP is reported separately."
+    exit 1
 fi
 if [[ "$COMPUTE_EVIDENCE" == true ]]; then
     echo "[ERROR] --compute-evidence is no longer submitted inline;"
@@ -470,7 +477,6 @@ else
     [[ ${#DE_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${DE_ARGS[@]}")
     # --gpu-mem (SLURM min-VRAM request) also tells the DE planner which V100.
     [[ -n "$GPU_MEM" ]] && RUN_ARGS+=("--gpu-mem" "$GPU_MEM")
-    [[ -n "$EVAL_CHUNK" ]] && RUN_ARGS+=("--eval-chunk" "$EVAL_CHUNK")
     [[ ${#PASSTHRU_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${PASSTHRU_ARGS[@]}")
 fi
 
@@ -658,7 +664,6 @@ if [[ "$EVIDENCE" == true ]]; then
         fi
         evidence_args=(--chain "$chain")
         [[ -n "$GPU_MEM" ]] && evidence_args+=(--gpu-mem "$GPU_MEM")
-        [[ -n "$EVAL_CHUNK" ]] && evidence_args+=(--eval-chunk "$EVAL_CHUNK")
         [[ -n "$SPOT_BATCH" ]] && evidence_args+=(--spot-batch "$SPOT_BATCH")
         [[ ${#PASSTHRU_ARGS[@]} -gt 0 ]] && evidence_args+=("${PASSTHRU_ARGS[@]}")
         if [[ "$LOCAL" == true ]]; then
