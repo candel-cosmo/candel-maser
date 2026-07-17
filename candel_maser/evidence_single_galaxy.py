@@ -64,7 +64,7 @@ if _HERE not in sys.path:
 sys.path.insert(0, os.path.join(_HERE, "convergence"))
 
 from convergence_utils import cast_model_floats  # noqa: E402
-from run_de_map import (_clean_init, _eval_chunks,  # noqa: E402
+from run_de_map import (_clean_init, _evaluate_one_at_a_time,  # noqa: E402
                         _logp_2d_terms, _make_logp, _plan_de_batch)
 
 from candel.inference.evidence import harmonic_evidence  # noqa: E402
@@ -239,45 +239,37 @@ def _grid_gate(target_prod, target_ref, X, names, n_check, tol, seed):
     fprint(f"PASS: max |Δ lnL| = {dmax:.4f} nats <= tol {tol:.4f}")
 
 
-def _resolve_batching(target_prod, target_ref, n_samples, args, gblk, opt_cfg):
-    """Pick the production spot_batch and Stage-2 eval_chunk.
+def _resolve_batching(target_prod, target_ref, n_samples, args, gblk):
+    """Pick the production spot batch for the evidence calculation.
 
     The f64 4x reference is the memory hog, so it is always scored ONE SPOT at
-    a time (``target_ref.spot_batch = 1``).  The production (f32) spot_batch
-    and eval_chunk mirror run_de_map: auto-size from the device VRAM budget on
-    GPU, else fall back to the config (``conditional_spot_batch`` for the
-    galaxy, ``[optimise].eval_chunk``).  ``--spot-batch`` / ``--eval-chunk``
-    override the production values; the reference stays at 1 regardless.
-    Returns the resolved eval_chunk and sets ``target.spot_batch`` on both
-    targets.
+    a time (``target_ref.spot_batch = 1``). The production (f32) spot batch
+    mirrors run_de_map: auto-size it from the device VRAM budget on GPU, while
+    scoring exactly one global sample per GPU wave. ``--spot-batch`` can
+    override the production value. Sets ``target.spot_batch`` on both targets.
     """
     cfg_sb = gblk.get("conditional_spot_batch", None)
     cfg_sb = int(cfg_sb) if cfg_sb is not None else None
-    cfg_ec = int(opt_cfg.get("eval_chunk", 5))
 
-    plan_sb_p, plan_ec, info_p = _plan_de_batch(
+    plan_sb_p, plan_available, info_p = _plan_de_batch(
         target_prod.model, n_samples, gpu_mem_gb=args.gpu_mem)
 
-    if plan_ec is not None:  # GPU budget available -> auto-size
+    if plan_available:  # GPU budget available -> auto-size
         fprint("memory plan (production f32): " + info_p)
         if "UNRECOGNISED" in info_p:
             fprint("  WARNING: GPU not recognised; conservative budget. Pass "
                    "--gpu-mem GB or add it to _GPU_VRAM_GB in run_de_map.py.")
         sb_p = plan_sb_p if args.spot_batch is None else args.spot_batch
-        eval_chunk = plan_ec if args.eval_chunk is None else args.eval_chunk
     else:  # no device budget (CPU) -> configured defaults
         sb_p = cfg_sb if args.spot_batch is None else args.spot_batch
-        eval_chunk = cfg_ec if args.eval_chunk is None else args.eval_chunk
         fprint("no GPU memory budget; using config defaults")
 
     target_prod.spot_batch = sb_p
     target_ref.spot_batch = 1
     fprint(f"batching: prod spot_batch={sb_p} (None=all spots), "
            f"ref(f64,{args.ref_grid_scale}x) spot_batch=1 (forced), "
-           f"eval_chunk={eval_chunk}"
-           f"{' [--spot-batch]' if args.spot_batch is not None else ''}"
-           f"{' [--eval-chunk]' if args.eval_chunk is not None else ''}")
-    return eval_chunk
+           "one global sample per GPU wave"
+           f"{' [--spot-batch]' if args.spot_batch is not None else ''}")
 
 
 def main(argv=None):
@@ -312,10 +304,6 @@ def main(argv=None):
                         help="Thin to at most this many posterior samples by "
                              "taking every Nth draw before Stage 1/2 "
                              "(default: 10000; <=0 disables thinning).")
-    parser.add_argument("--eval-chunk", type=int, default=None,
-                        help="Global samples scored per vmap batch (Stage 2). "
-                             "Unset: auto-size from VRAM on GPU, else the "
-                             "config's [optimise] eval_chunk.")
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
@@ -360,17 +348,15 @@ def main(argv=None):
     fprint("globals: " + ", ".join(names))
 
     gblk = master_cfg["model"]["galaxies"][args.galaxy]
-    eval_chunk = _resolve_batching(
-        target_prod, target_ref, X.shape[0], args, gblk,
-        master_cfg.get("optimise", {}))
+    _resolve_batching(target_prod, target_ref, X.shape[0], args, gblk)
 
     _grid_gate(target_prod, target_ref, X, names,
                args.n_check, args.tol, args.seed)
 
     fsection("Stage 2 — marginal log-posterior over globals (production grid)")
     logp = jax.jit(jax.vmap(_make_logp(target_prod, names)))
-    lnpost = np.asarray(_eval_chunks(
-        logp, jnp.asarray(X), eval_chunk, desc="marginal logP"))
+    lnpost = np.asarray(_evaluate_one_at_a_time(
+        logp, jnp.asarray(X), desc="marginal logP"))
     ok = np.isfinite(lnpost)
     if int(ok.sum()) < X.shape[0]:
         fprint(f"dropped {int((~ok).sum())} non-finite log-posterior samples")
