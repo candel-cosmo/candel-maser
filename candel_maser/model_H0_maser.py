@@ -96,7 +96,8 @@ def neg_half_chi2_acceleration(a_obs, A_pred, var_a, has_a):
     return da * da * (-0.5 * has_a / var_a)
 
 
-def _neg_half_chi2_quadform(r_pre, sin_phi, cos_phi, sin2, cos2, sincos):
+def _neg_half_chi2_quadform(r_pre, sin_phi, cos_phi, sin2, cos2, sincos,
+                            shared_r=False):
     """−½χ² on the (r, φ) grid via a quadratic form in (sinφ, cosφ).
 
     Circular-orbit only. Every residual channel is low-order in φ with
@@ -122,11 +123,19 @@ def _neg_half_chi2_quadform(r_pre, sin_phi, cos_phi, sin2, cos2, sincos):
     after the logsumexp.
     """
     r_ang = r_pre["r_ang"]
-    dp = (slice(None),) + (None,) * (r_ang.ndim - 1)  # per-spot → r_ang rank
-    sin_i = r_pre["sin_i"]
-    cos_i = r_pre["cos_i"]
-    sin_O = r_pre["sin_O"]
-    cos_O = r_pre["cos_O"]
+    if shared_r:
+        r_ang = r_ang[None, :]
+        dp = (slice(None), None)
+        sin_i = r_pre["sin_i"][None, :]
+        cos_i = r_pre["cos_i"][None, :]
+        sin_O = r_pre["sin_O"][None, :]
+        cos_O = r_pre["cos_O"][None, :]
+    else:
+        dp = (slice(None),) + (None,) * (r_ang.ndim - 1)
+        sin_i = r_pre["sin_i"]
+        cos_i = r_pre["cos_i"]
+        sin_O = r_pre["sin_O"]
+        cos_O = r_pre["cos_O"]
     D = r_pre["D"]
     M_BH = r_pre["M_BH"]
 
@@ -168,6 +177,19 @@ def _neg_half_chi2_quadform(r_pre, sin_phi, cos_phi, sin2, cos2, sincos):
             + Cs[..., None] * sin_phi + Cc[..., None] * cos_phi
             + Css[..., None] * sin2 + Ccc[..., None] * cos2
             + Csc[..., None] * sincos)
+
+
+def _combine_cached_phi_marginal(nhc_local, ll_global, order,
+                                 log_w_r, log_w_phi):
+    """Combine local columns with cached global phi-marginals.
+
+    This is algebraically the original joint logsumexp, associated as phi
+    then radius so the global-radius scan can be reused.
+    """
+    ll_local = logsumexp(nhc_local + log_w_phi, axis=-1)
+    ll_nodes = jnp.concatenate([ll_local, ll_global], axis=-1)
+    ll_sorted = jnp.take_along_axis(ll_nodes, order, axis=-1)
+    return logsumexp(ll_sorted + log_w_r, axis=-1)
 
 
 def _conditional_global_r_window(valid, r_cf, r_min, r_max):
@@ -610,11 +632,11 @@ class MaserDiskModel(ModelBase):
 
     def _scan_on_global_grid(self, type_key, idx, r_global,
                              phys_args, phys_kw, r_chunk=32,
-                             spot_chunk=None):
+                             spot_chunk=None, cache_scan=False):
         """Per-spot argmax on the phi-marginalised global radius grid."""
         n = int(idx.shape[0])
         if n == 0:
-            return None, None
+            return None, None, None
         n_r = int(r_global.shape[0])
         pc = self._phi_concat[type_key]
         has_any_accel = self._group_has_any_accel(type_key)
@@ -624,6 +646,7 @@ class MaserDiskModel(ModelBase):
 
         r_parts = []
         ll_parts = []
+        ll_grid_parts = []
         for i0 in range(0, n, spot_chunk):
             idx_chunk = idx[i0:i0 + spot_chunk]
             scan_parts = []
@@ -633,7 +656,9 @@ class MaserDiskModel(ModelBase):
                     r_chunk_arr, idx_chunk, *phys_args, **phys_kw,
                     has_any_accel=has_any_accel)
                 nhc = self._phi_eval_shared_r(
-                    r_pre, pc["sin_phi"], pc["cos_phi"])
+                    r_pre, pc["sin_phi"], pc["cos_phi"],
+                    pc["sin2_phi"], pc["cos2_phi"], pc["sincos_phi"],
+                    use_quadform=cache_scan)
                 ll_chunk = logsumexp(
                     nhc + pc["log_w_phi"][None, None, :], axis=-1)
                 scan_parts.append(ll_chunk)
@@ -643,21 +668,29 @@ class MaserDiskModel(ModelBase):
             r_parts.append(r_global[best])
             ll_parts.append(jnp.take_along_axis(
                 ll_scan, best[:, None], axis=-1).squeeze(-1))
-        return jnp.concatenate(r_parts), jnp.concatenate(ll_parts)
+            if cache_scan:
+                ll_grid_parts.append(ll_scan)
+        ll_grid = jnp.concatenate(ll_grid_parts) if cache_scan else None
+        return (jnp.concatenate(r_parts), jnp.concatenate(ll_parts), ll_grid)
 
     def _compute_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2,
-                       i0, var_v_hv, phys_args, phys_kw, r_global):
+                       i0, var_v_hv, phys_args, phys_kw, r_global,
+                       cache_scan=False):
         """Per-spot seed and fallback width for conditional r-MAP."""
         r_est, s_prop, r_min, r_max = self._closed_form_seeds(
             D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+        scan_cache = {}
         for type_key, idx in [("sys", self._idx_sys),
                               ("red", self._idx_red),
                               ("blue", self._idx_blue)]:
-            r_scan, ll_scan_best = self._scan_on_global_grid(
+            r_scan, ll_scan_best, ll_scan = self._scan_on_global_grid(
                 type_key, idx, r_global, phys_args, phys_kw,
-                spot_chunk=self._conditional_spot_batch)
+                spot_chunk=self._conditional_spot_batch,
+                cache_scan=cache_scan)
             if r_scan is None:
                 continue
+            if cache_scan:
+                scan_cache[type_key] = ll_scan
             r_cf = r_est[idx]
             pc = self._phi_concat[type_key]
             has_any_accel = self._group_has_any_accel(type_key)
@@ -675,12 +708,17 @@ class MaserDiskModel(ModelBase):
             s_uc = jnp.full((self._n_sys_uncons,), 3.0 * log_bin,
                             dtype=r_est.dtype)
             s_prop = s_prop.at[self._idx_sys_uncons].set(s_uc)
-        return r_est, s_prop, r_min, r_max
+        return r_est, s_prop, r_min, r_max, scan_cache
 
     def _build_conditional_r_grids(self, D_A, M_BH, v_sys, sigma_a_floor2,
                                    i0, var_v_hv,
-                                   phys_args=None, phys_kw=None):
-        """Build conditional r-grid objects for phi/r diagnostics."""
+                                   phys_args=None, phys_kw=None,
+                                   return_scan_cache=False):
+        """Build conditional r-grid objects for phi/r diagnostics.
+
+        ``return_scan_cache`` also returns the global-radius phi marginals
+        and their positions in each sorted local/global union.
+        """
         have_phys = phys_args is not None and phys_kw is not None
         if not have_phys:
             raise ValueError(
@@ -696,9 +734,9 @@ class MaserDiskModel(ModelBase):
             valid, r_cf, r_min, r_max)
         r_global, _ = self._build_global_r_grid(r_lo_data, r_hi_data)
 
-        r_est, s_fallback, r_min, r_max = self._compute_seeds(
+        r_est, s_fallback, r_min, r_max, scan_values = self._compute_seeds(
             D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
-            phys_args, phys_kw, r_global)
+            phys_args, phys_kw, r_global, cache_scan=return_scan_cache)
 
         def _refine(type_key, idx):
             r0 = r_est[idx]
@@ -715,20 +753,31 @@ class MaserDiskModel(ModelBase):
             r_c, s_spot = _refine(type_key, idx)
             r_local, _ = self._build_local_sinh(
                 r_c, s_spot, r_min, r_max)
-            r_union, log_w_union = self._build_union(
-                r_local, r_global)
-            return (type_key, idx,
-                    jax.lax.stop_gradient(r_union),
-                    jax.lax.stop_gradient(log_w_union))
+            if return_scan_cache:
+                r_union, log_w_union, order = self._build_union(
+                    r_local, r_global, return_order=True)
+                cache = (jax.lax.stop_gradient(r_local),
+                         jax.lax.stop_gradient(scan_values[type_key]),
+                         jax.lax.stop_gradient(order))
+            else:
+                r_union, log_w_union = self._build_union(
+                    r_local, r_global)
+                cache = None
+            return ((type_key, idx,
+                     jax.lax.stop_gradient(r_union),
+                     jax.lax.stop_gradient(log_w_union)), cache)
 
         groups = []
+        caches = []
         for entry in (
                 _group("sys", self._idx_sys, self._n_sys),
                 _group("red", self._idx_red, self._n_red),
                 _group("blue", self._idx_blue, self._n_blue)):
             if entry is not None:
-                groups.append(entry)
-        return groups
+                group, cache = entry
+                groups.append(group)
+                caches.append(cache)
+        return (groups, caches) if return_scan_cache else groups
 
     def _build_local_sinh(self, r_c, s, r_min, r_max):
         """Per-spot sinh grid of shape (N, n_r_local)."""
@@ -752,12 +801,16 @@ class MaserDiskModel(ModelBase):
         r = jnp.exp(log_r)
         return r, trapz_log_weights(r)
 
-    def _build_union(self, r_local, r_global):
+    def _build_union(self, r_local, r_global, return_order=False):
         """Sorted per-spot union of local and global nodes."""
         N = r_local.shape[0]
         r_global_b = jnp.broadcast_to(
             r_global[None, :], (N, r_global.shape[0]))
         r_union = jnp.concatenate([r_local, r_global_b], axis=-1)
+        if return_order:
+            order = jnp.argsort(r_union, axis=-1)
+            r_sorted = jnp.take_along_axis(r_union, order, axis=-1)
+            return r_sorted, _trapz_log_w_per_spot(r_sorted), order
         r_sorted = jnp.sort(r_union, axis=-1)
         return r_sorted, _trapz_log_w_per_spot(r_sorted)
 
@@ -779,7 +832,7 @@ class MaserDiskModel(ModelBase):
             valid, r_cf, r_min, r_max)
         r_global, _ = self._build_global_r_grid(r_lo_data, r_hi_data)
 
-        r_est, s_fallback, r_min, r_max = self._compute_seeds(
+        r_est, s_fallback, r_min, r_max, _ = self._compute_seeds(
             D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
             phys_args, phys_kw, r_global)
 
@@ -1113,8 +1166,19 @@ class MaserDiskModel(ModelBase):
                 r_pre["var_a"][dpad], r_pre["has_a"][dpad])
         return nhc
 
-    def _phi_eval_shared_r(self, r_pre, sin_phi, cos_phi):
+    def _phi_eval_shared_r(self, r_pre, sin_phi, cos_phi,
+                           sin2=None, cos2=None, sincos=None,
+                           use_quadform=False):
         """Shared-r variant of `_phi_eval` for scan/reference grids."""
+        if (use_quadform and r_pre["ecc2"] is None
+                and jax.config.jax_enable_x64):
+            if sin2 is None:
+                sin2 = sin_phi * sin_phi
+                cos2 = cos_phi * cos_phi
+                sincos = sin_phi * cos_phi
+            return _neg_half_chi2_quadform(
+                r_pre, sin_phi, cos_phi, sin2, cos2, sincos,
+                shared_r=True)
         rpad = (slice(None), None)
         X, Y, V, A = self._predict_on_grid(r_pre, sin_phi, cos_phi, rpad)
 
@@ -1170,7 +1234,8 @@ class MaserDiskModel(ModelBase):
         return self._group_has_accel[key]
 
     def _marginal_per_spot_r(self, type_key, idx, r_ang, log_w_r,
-                             has_any_accel, phys_args, phys_kw, batch):
+                             has_any_accel, phys_args, phys_kw, batch,
+                             scan_cache=None):
         """Per-spot log-marginal for groups with a per-spot r grid.
 
         Used with ``r_ang`` shape ``(N,)`` and ``log_w_r is None``.
@@ -1182,13 +1247,17 @@ class MaserDiskModel(ModelBase):
         of ``batch`` so every scan iteration sees identical shapes
         (single compile, no per-residual recompile); padding is
         sliced off the output. Returns shape ``(N_group,)``.
+
+        ``scan_cache`` avoids re-evaluating the global-radius columns in a
+        conditional grid; it is used only by the circular DE path.
         """
         pc = self._phi_concat[type_key]
         n_idx = int(idx.shape[0])
 
-        def _eval(idx_b, r_b, lwr_b):
+        def _eval(idx_b, r_b, lwr_b, cache_b):
+            r_eval = r_b if cache_b is None else cache_b[0]
             r_pre = self._r_precompute(
-                r_b, idx_b, *phys_args, **phys_kw,
+                r_eval, idx_b, *phys_args, **phys_kw,
                 has_any_accel=has_any_accel)
             # _phi_eval returns −½χ² only; lnorm is added after
             # logsumexp so the max-subtraction acts on bounded χ²
@@ -1200,11 +1269,15 @@ class MaserDiskModel(ModelBase):
             if lwr_b is None:
                 return lnorm_b + logsumexp(
                     nhc + pc["log_w_phi"], axis=-1)
+            if cache_b is not None:
+                return lnorm_b + _combine_cached_phi_marginal(
+                    nhc, cache_b[1], cache_b[2], lwr_b,
+                    pc["log_w_phi"])
             w2d = lwr_b[:, :, None] + pc["log_w_phi"][None, None, :]
             return lnorm_b + logsumexp(nhc + w2d, axis=(-2, -1))
 
         if batch is None or batch >= n_idx:
-            return _eval(idx, r_ang, log_w_r)
+            return _eval(idx, r_ang, log_w_r, scan_cache)
 
         n_chunks = (n_idx + batch - 1) // batch
         n_pad = n_chunks * batch - n_idx
@@ -1215,19 +1288,35 @@ class MaserDiskModel(ModelBase):
                      jnp.concatenate([log_w_r, log_w_r[:n_pad]], axis=0))
         else:
             idx_p, r_p, lwr_p = idx, r_ang, log_w_r
+        if scan_cache is not None:
+            cache_p = tuple(
+                jnp.concatenate([x, x[:n_pad]], axis=0) if n_pad else x
+                for x in scan_cache)
+        else:
+            cache_p = None
         idx_c = idx_p.reshape(n_chunks, batch)
         r_c = r_p.reshape(n_chunks, batch, *r_p.shape[1:])
 
-        if lwr_p is None:
+        if cache_p is not None:
+            lwr_c = lwr_p.reshape(n_chunks, batch, *lwr_p.shape[1:])
+            cache_c = tuple(
+                x.reshape(n_chunks, batch, *x.shape[1:]) for x in cache_p)
+
             def body(_, x):
-                return None, _eval(x[0], x[1], None)
+                cache_b = (x[3], x[4], x[5])
+                return None, _eval(x[0], x[1], x[2], cache_b)
+
+            xs = (idx_c, r_c, lwr_c, *cache_c)
+        elif lwr_p is None:
+            def body(_, x):
+                return None, _eval(x[0], x[1], None, None)
 
             xs = (idx_c, r_c)
         else:
             lwr_c = lwr_p.reshape(n_chunks, batch, *lwr_p.shape[1:])
 
             def body(_, x):
-                return None, _eval(x[0], x[1], x[2])
+                return None, _eval(x[0], x[1], x[2], None)
 
             xs = (idx_c, r_c, lwr_c)
         _, ps_chunks = jax.lax.scan(body, None, xs)
@@ -1273,7 +1362,7 @@ class MaserDiskModel(ModelBase):
                 self._marginal_per_spot_r,
                 static_argnums=(0, 4, 7))(
                 type_key, idx, r_ang, log_w_r,
-                has_any_accel, phys_args, phys_kw, batch)
+                has_any_accel, phys_args, phys_kw, batch, None)
             result = result.at[idx].set(ps)
 
         return result
@@ -1346,7 +1435,7 @@ class MaserDiskModel(ModelBase):
         return total
 
     def _sum_phi_marginal(self, spot_groups, phys_args, phys_kw=None,
-                          spot_batch=None, remat=True):
+                          spot_batch=None, remat=True, scan_cache=None):
         """Compute the total phi-marginal log-likelihood.
 
         This mirrors `_eval_phi_marginal` but avoids scattering group results
@@ -1360,7 +1449,7 @@ class MaserDiskModel(ModelBase):
             phys_kw = {}
         total = jnp.asarray(0.0, dtype=jnp.asarray(phys_args[2]).dtype)
 
-        for group in spot_groups:
+        for i, group in enumerate(spot_groups):
             type_key, idx, r_ang, log_w_r = group
             n_idx = int(idx.shape[0])
             if n_idx == 0:
@@ -1372,8 +1461,9 @@ class MaserDiskModel(ModelBase):
             fn = (jax.checkpoint(self._marginal_per_spot_r,
                                  static_argnums=(0, 4, 7))
                   if remat else self._marginal_per_spot_r)
+            cache = None if scan_cache is None else scan_cache[i]
             ps = fn(type_key, idx, r_ang, log_w_r,
-                    has_any_accel, phys_args, phys_kw, batch)
+                    has_any_accel, phys_args, phys_kw, batch, cache)
             total = total + jnp.sum(ps)
 
         return total

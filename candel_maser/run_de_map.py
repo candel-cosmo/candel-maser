@@ -75,6 +75,13 @@ if _ENABLE_F64:
     _jax_config.update("jax_enable_x64", True)
 
 import jax  # noqa: E402
+
+# Persistent XLA compilation cache: resubmits/restarts reuse the compiled
+# DE executable (keyed on HLO + jaxlib + GPU arch; results unaffected).
+if not os.environ.get("JAX_COMPILATION_CACHE_DIR"):
+    jax.config.update("jax_compilation_cache_dir",
+                      os.path.expanduser("~/.cache/candel_jax"))
+
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import tomli_w  # noqa: E402
@@ -336,6 +343,7 @@ def _normalise_theta_point(theta, names, lo, hi):
 _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
 _DE_POPULATION_SCHEDULE = "nfe_linear"
+_DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v1"
 _CANDIDATES_PER_GPU_WAVE = 1
 _F32_ALL_SPOT_GALAXIES = frozenset((
     "CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789"))
@@ -386,12 +394,20 @@ def _logp_2d_terms(target, theta):
     """
     model = target.model
     phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
-    groups = model._build_conditional_r_grids(
+    # Circular scan and union columns use the same integrand (quadratic-form
+    # in x64, residual in f32), so reuse the 128 scan columns.
+    reuse_scan = not model.use_ecc
+    built = model._build_conditional_r_grids(
         phys_args[2], phys_args[3], phys_args[4], phys_args[16],
-        phys_args[8], phys_args[15], phys_args, phys_kw)
+        phys_args[8], phys_args[15], phys_args, phys_kw,
+        return_scan_cache=reuse_scan)
+    if reuse_scan:
+        groups, scan_cache = built
+    else:
+        groups, scan_cache = built, None
     ll = model._sum_phi_marginal(
         groups, phys_args, phys_kw, spot_batch=target.spot_batch,
-        remat=False)  # DE is gradient-free: skip rematerialisation overhead
+        remat=False, scan_cache=scan_cache)
     lp = _global_logprior(target, theta, ll.dtype)
     return lp, ll, phys_args, phys_kw
 
@@ -676,9 +692,11 @@ _ARCHIVE_FINGERPRINT_BATCH = 10_000
 class _ExactArchive:
     """Persistent exact-value cache for one optimiser checkpoint."""
 
-    def __init__(self, path, dimension, resume=False):
-        if path != ":memory:" and not resume and os.path.exists(path):
+    def __init__(self, path, dimension, resume=False, objective_policy=None):
+        archive_exists = path != ":memory:" and os.path.exists(path)
+        if archive_exists and not resume:
             os.unlink(path)
+            archive_exists = False
         self.connection = sqlite3.connect(path)
         self.connection.execute(
             "CREATE TABLE IF NOT EXISTS evaluations "
@@ -696,6 +714,19 @@ class _ExactArchive:
         self.connection.execute(
             "INSERT OR REPLACE INTO metadata VALUES ('dimension', ?)",
             (str(dimension),))
+        if objective_policy is not None:
+            row = self.connection.execute(
+                "SELECT value FROM metadata "
+                "WHERE key='objective_policy'").fetchone()
+            if archive_exists and (row is None or row[0] != objective_policy):
+                self.connection.close()
+                raise ValueError(
+                    "Exact-evaluation archive objective policy is "
+                    f"{row[0] if row else 'legacy'!r}, requested "
+                    f"{objective_policy!r}; start a fresh run.")
+            self.connection.execute(
+                "INSERT OR REPLACE INTO metadata VALUES "
+                "('objective_policy', ?)", (objective_policy,))
         self.connection.commit()
 
         backfill_start = time.perf_counter()
@@ -1138,7 +1169,7 @@ def _load_de_checkpoint(path, lo, hi, names, sizes):
 
 
 def _validate_de_checkpoint_policy(checkpoint, path):
-    """Reject incompatible algorithm, seed, or population-schedule state."""
+    """Reject incompatible algorithm, objective, seed, or schedule state."""
     saved_algorithm = (
         str(np.asarray(checkpoint["algorithm"]).item())
         if "algorithm" in checkpoint.files else "classic")
@@ -1168,6 +1199,34 @@ def _validate_de_checkpoint_policy(checkpoint, path):
             "Checkpoint population schedule is "
             f"{saved_schedule or 'legacy generation-linear'!r}, requested "
             f"{_DE_POPULATION_SCHEDULE!r}; start a fresh run.")
+    saved_objective = (
+        str(np.asarray(checkpoint["objective_policy"]).item())
+        if "objective_policy" in checkpoint.files else None)
+    if saved_objective != _DE_OBJECTIVE_POLICY:
+        raise ValueError(
+            f"Checkpoint objective policy is {saved_objective or 'legacy'!r}, "
+            f"requested {_DE_OBJECTIVE_POLICY!r}; start a fresh run.")
+
+
+def _screen_eval(batch_eval, x, desc, chunk=512):
+    """Evaluate ``x`` in slices with progress/ETA prints.
+
+    Slicing only changes call granularity: the same points reach the same
+    per-candidate executable, so values, archive contents and NFE counts
+    are identical to a single call.
+    """
+    n = x.shape[0]
+    if n <= chunk:
+        return np.asarray(batch_eval(x, desc=desc))
+    t0 = time.time()
+    parts = []
+    for i in range(0, n, chunk):
+        parts.append(np.asarray(batch_eval(x[i:i + chunk], desc=desc)))
+        done = min(i + chunk, n)
+        rate = done / (time.time() - t0)
+        fprint(f"{desc}: {done}/{n} ({rate:.2f} cand/s, "
+               f"ETA {(n - done) / rate / 60.0:.1f} min)")
+    return np.concatenate(parts)
 
 
 def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
@@ -1182,7 +1241,7 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
     sobol_normed = jnp.asarray((sobol_points - lo) / scale)
 
     t0 = time.time()
-    logp_all = -np.asarray(batch_eval(sobol_normed, desc="Sobol"))
+    logp_all = -_screen_eval(batch_eval, sobol_normed, "Sobol screen")
     valid = np.isfinite(logp_all)
     logp_all = np.where(valid, logp_all, -np.inf)
     best_sobol = logp_all[valid].max() if np.any(valid) else -np.inf
@@ -1208,7 +1267,8 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
         population = np.empty((0, D))
     if seeds.shape[0]:
         population = np.vstack(((seeds - lo) / scale, population))
-    fitness = np.asarray(batch_eval(jnp.asarray(population)))
+    fitness = _screen_eval(
+        batch_eval, jnp.asarray(population), "initial population")
     jax.block_until_ready(fitness)
     if population.shape[0] != pop_size:
         raise RuntimeError(
@@ -1261,6 +1321,10 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     distance_name = "D_A" if "D_A" in names else "D_c"
     distance_idx = names.index(distance_name)
     N_sobol = 2 ** log2_N
+    ckpt = None
+    if resume_path is not None:
+        ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
+        _validate_de_checkpoint_policy(ckpt, resume_path)
     # seed_points arrive in full target.names order; drop the fixed columns.
     if fixed and seed_points is not None:
         free_idx = [target.names.index(n) for n in names]
@@ -1297,7 +1361,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     archive_path = (checkpoint_path + ".sqlite"
                     if checkpoint_path is not None else ":memory:")
     exact_archive = _ExactArchive(
-        archive_path, D, resume=resume_path is not None)
+        archive_path, D, resume=resume_path is not None,
+        objective_policy=_DE_OBJECTIVE_POLICY)
 
     def exact_eval(points, desc=None):
         return exact_archive(batch_eval, points, desc=desc)
@@ -1343,8 +1408,6 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
                "was not inserted into the initial population.")
 
     if resume_path is not None:
-        ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
-        _validate_de_checkpoint_policy(ckpt, resume_path)
         key = jnp.asarray(ckpt["key"])
         gen_start = int(ckpt["generation_counter"])
         gens_without_improvement = int(ckpt["gens_without_improvement"])
@@ -1423,6 +1486,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             "algorithm": np.asarray(_DE_ALGORITHM),
             "seed_policy": np.asarray(_DE_SEED_POLICY),
             "population_schedule": np.asarray(_DE_POPULATION_SCHEDULE),
+            "objective_policy": np.asarray(_DE_OBJECTIVE_POLICY),
             "initial_pop_size": np.asarray(initial_pop_size),
             "min_pop_size": np.asarray(min_pop_size),
             "de_evaluations": np.asarray(de_evaluations),
