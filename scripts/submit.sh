@@ -27,6 +27,7 @@ SAMPLER_EXPLICIT=false
 COMPUTE_EVIDENCE=false
 INIT_STRATEGY=""
 SPOT_BATCH=""
+PHI_INTEGRATION=""
 ADD_ECC=false
 ADD_QW=false
 MATCH_REID=false
@@ -156,6 +157,11 @@ DE optimiser options passed to run_maser.py --sampler de:
                          globals, scoring the data-only marginal.
   --fix-floors-pesce     Run the full DE but hold the five error floors at the
                          published Pesce/Reid values (all other globals free).
+  --phi-integration fixed-grid|peak-partition
+                         Phi integration for the 2D marginal. Default:
+                         fixed-grid. peak-partition numerically locates and
+                         refines peaks in two independent systemic half-planes
+                         and one half-plane for each high-velocity group.
 Cluster options:
   MCMC jobs submit as CPU-only jobs. DE and --evidence request GPU.
   Joint H0 follows the selected node/queue: GPU queues request GPU; CPU queues
@@ -338,6 +344,8 @@ while [[ $# -gt 0 ]]; do
             MCMC_ARGS+=("$1"); shift ;;
         --spot-batch)
             SPOT_BATCH="$2"; SINGLE_ARGS+=("$1" "$2"); shift 2 ;;
+        --phi-integration)
+            PHI_INTEGRATION="$2"; DE_ARGS+=("$1" "$2"); shift 2 ;;
         --add-ecc|--add-quadratic-warp)
             case "$1" in
                 --add-ecc) ADD_ECC=true ;;
@@ -371,6 +379,11 @@ if [[ -z "$GALAXY" ]]; then
 fi
 if [[ "$SAMPLER" != "mcmc" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler must be mcmc or de"; exit 1
+fi
+if [[ -n "$PHI_INTEGRATION" && "$PHI_INTEGRATION" != "fixed-grid" \
+      && "$PHI_INTEGRATION" != "peak-partition" ]]; then
+    echo "[ERROR] --phi-integration must be fixed-grid or peak-partition"
+    exit 1
 fi
 JOINT_H0_MODE=false
 if [[ "$INFER_H0" == true ]]; then
@@ -700,6 +713,8 @@ if [[ ${#RUN_ARGS[@]} -gt 0 ]]; then
         esac
     done
 fi
+[[ "$PHI_INTEGRATION" == "peak-partition" ]] && \
+    variant_tag="${variant_tag}_peakpartition"
 
 for gal in $GALAXY; do
     if [[ "$SKIP_DONE" == true ]]; then

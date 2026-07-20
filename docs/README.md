@@ -3,7 +3,7 @@
 Supported megamaser workflow:
 
 - `run_maser.py`: unified megamaser runner. It defaults to `--sampler mcmc` (the explicit-latent `(r_ang, phi)` NUTS chain); use `--sampler de` for the 2D-marginal differential-evolution MAP (delegates to `run_de_map.py`), the global search used to seed the MCMC.
-- `run_de_map.py`: 2D-marginal MAP optimiser. Per spot it marginalises `(r_ang, phi)` jointly on a conditional per-spot r-grid (`_build_conditional_r_grids` + `_sum_phi_marginal`; not phi at a profiled `r_ang`, which overfits `D_A`) and optimises the globals with differential evolution. The phi/r grid is read from the per-galaxy `config_maser.toml` (same grid as the MCMC and convergence checks). Reached via `run_maser.py --sampler de`.
+- `run_de_map.py`: 2D-marginal MAP optimiser. Per spot it marginalises `(r_ang, phi)` jointly on a conditional per-spot r-grid (`_build_conditional_r_grids` + `_sum_phi_marginal`; not phi at a profiled `r_ang`, which overfits `D_A`) and optimises the globals with differential evolution. Phi integration defaults to the fixed grids in `config_maser.toml`; DE can opt into the fixed-shape peak-partition routine with `--phi-integration peak-partition`. Reached via `run_maser.py --sampler de`.
 - `benchmark_de_batching.py`: fixed-candidate exact-likelihood benchmark for
   spot batching. Suite mode uses fresh child processes, bypasses SQLite, and
   reads candidates from the current compatible DE checkpoint, or uses a
@@ -83,15 +83,19 @@ exact sum. The five standard float32 galaxies (`CGCG074-064`, `NGC5765b`,
 `NGC6264`, `NGC6323`, and `UGC3789`) default to true all-spots evaluation;
 an explicit `--spot-batch` or per-galaxy setting still overrides this. The f64
 `NGC4258` path retains its configured/planned spot batching. GPU runs use
-concurrent device-local JITs in one process and on one node. Each device has
-one immutable eight-candidate executable whose entries are evaluated
-sequentially, so only one candidate's intermediates are live at a time and
-population shrinkage cannot trigger new input shapes. Runs begin with ordinary
-round-robin assignment, learn bounded per-device throughput weights, and adopt
-a weighted assignment only when its block-aware predicted makespan improves by
-at least 2%. Candidate vectorisation is an implementation invariant and has no
-configuration or command-line toggle. Padding is evaluated but excluded from
-the archive and algorithmic NFE count.
+one shared `pmap` executable when the same GPU model supplies every device, so
+cold startup compiles the objective once rather than once per GPU. Phi
+integrands are materialised before their log-sum reductions so XLA does not
+build the very slow fused reduction kernels seen on the 60,001-point NGC4258
+grid. Each device
+runs immutable eight-candidate blocks whose entries are evaluated sequentially,
+so only one candidate's intermediates are live at a time and population
+shrinkage cannot trigger new input shapes. Heterogeneous devices retain
+concurrent device-local JITs, learn bounded per-device throughput weights, and
+adopt a weighted assignment only when its block-aware predicted makespan
+improves by at least 2%. Candidate vectorisation is an implementation invariant
+and has no configuration or command-line toggle. Padding is evaluated but
+excluded from the archive and algorithmic NFE count.
 The SQLite sidecar persists deterministic 64-bit
 fingerprints, so a resume loads the compact fingerprint table instead of every
 full point key.  Possible matches are still verified against the complete BLOB
@@ -181,6 +185,27 @@ Pesce/Reid-reported/config/MCMC-median comparison table scored with the same
 ## Configuration
 
 The main config is `config_maser.toml`.
+
+The DE objective uses `phi_integration = "fixed-grid"` by default. To use the
+GPU-shaped peak-partition quadrature, pass:
+
+```bash
+./scripts/megamaser/submit.sh -q short --sampler de --galaxy NGC4258 \
+    --gpu-mem 32 --gpu-count 2 --spot-batch 47 \
+    --phi-integration peak-partition
+```
+
+This mode always searches the two systemic half-planes independently using
+513 nodes per half-plane, and uses 257 nodes for each red/blue half-plane. It
+then numerically refines stationary points and integrates fixed-size peak/tail
+partitions. The same strategy is used for the global-radius scan, radius-centre
+refinement, and final joint `(r_ang, phi)` quadrature. It supports circular and
+eccentric models and uses a separate checkpoint/objective identity. The mode
+currently recompiles on process start: persistent-cache reload of this
+loop/JVP-heavy executable failed reproducibly in CPU PjRt testing, so the
+fixed-grid path alone retains the persistent JAX compilation cache. Its GPU
+memory planner is also not yet calibrated; explicit `--spot-batch` and the
+per-galaxy config remain authoritative.
 
 Important explicit-latent controls:
 

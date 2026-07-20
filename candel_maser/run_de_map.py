@@ -344,6 +344,7 @@ _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
 _DE_POPULATION_SCHEDULE = "nfe_linear"
 _DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v1"
+_DE_PEAK_PARTITION_POLICY = "peak_partition_v1"
 _CANDIDATES_PER_GPU_WAVE = 1
 _F32_ALL_SPOT_GALAXIES = frozenset((
     "CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789"))
@@ -396,7 +397,7 @@ def _logp_2d_terms(target, theta):
     phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
     # Circular scan and union columns use the same integrand (quadratic-form
     # in x64, residual in f32), so reuse the 128 scan columns.
-    reuse_scan = not model.use_ecc
+    reuse_scan = model.phi_integration == "fixed-grid" and not model.use_ecc
     built = model._build_conditional_r_grids(
         phys_args[2], phys_args[3], phys_args[4], phys_args[16],
         phys_args[8], phys_args[15], phys_args, phys_kw,
@@ -452,8 +453,8 @@ def _device_block_capacity(count, block_size=_DEVICE_LOCAL_BLOCK_SIZE):
     """Padded device-local work for ``count`` real candidates.
 
     Every visible device receives at least one block during the first call so
-    all device executables compile together.  Later calls retain exactly the
-    same executable shape; only the number of invocations changes.
+    it is ready for later work. Later calls retain exactly the same executable
+    shape; only the number of invocations changes.
     """
     if block_size < 1:
         raise ValueError("Device block size must be positive.")
@@ -541,18 +542,23 @@ def _predicted_rebalance_gain(n, current_weights, proposed_weights,
     return max(0.0, (current - proposed) / current)
 
 
+def _use_shared_pmap(n_dev, devices):
+    """Compile homogeneous multi-device work once with pmap."""
+    devices = tuple(devices[:n_dev])
+    return (n_dev > 1 and len(devices) == n_dev
+            and len({device.device_kind for device in devices}) == 1)
+
+
 def _make_batched_fitness(fitness_one, n_dev, devices):
     """Return ``batch_eval(x_normed (M,D)[, desc]) -> fitness (M,)``.
 
     Every device evaluates exactly one candidate per JAX wave.  A fixed-size
-    device-local executable contains several sequential waves, eliminating
-    population- and rebalance-dependent input shapes. ``n_dev > 1`` runs those
-    blocks concurrently on same-node devices. Candidates follow deterministic
-    weighted round-robin assignment; equal weights are ordinary round-robin.
-    Measured throughput changes the assignment only when the block-aware
-    predicted makespan improves materially. Output is restored to input order
-    on the host. Finite padding is excluded from the exact archive and
-    algorithmic NFE count.
+    executable contains several sequential waves, eliminating population- and
+    rebalance-dependent input shapes. Homogeneous multi-GPU jobs compile one
+    shared ``pmap`` executable; heterogeneous devices retain concurrent
+    device-local JITs and weighted round-robin assignment. Output is restored
+    to input order on the host. Finite padding is excluded from the exact
+    archive and algorithmic NFE count.
     """
     vmapped = jax.vmap(fitness_one)
 
@@ -569,8 +575,12 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
     if len(devices) != n_dev:
         raise ValueError(
             f"Requested {n_dev} evaluator devices, found {len(devices)}.")
-    runners = tuple(jax.jit(per_device, device=device)
-                    for device in devices)
+    shared_pmap = _use_shared_pmap(n_dev, devices)
+    shared_runner = (jax.pmap(per_device, devices=devices)
+                     if shared_pmap else None)
+    runners = (() if shared_pmap else
+               tuple(jax.jit(per_device, device=device)
+                     for device in devices))
     state = {
         "assignment_weights": np.full(n_dev, 1.0 / n_dev),
         "profile_weights": np.full(n_dev, 1.0 / n_dev),
@@ -605,24 +615,48 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
             shard[:len(idx)] = x[idx]
             shards.append(shard)
 
-        def run_device(i):
+        if shared_pmap:
+            shared_capacity = int(np.max(capacities))
+            for i, shard in enumerate(shards):
+                if shard.shape[0] < shared_capacity:
+                    padded = np.broadcast_to(
+                        x[:1], (shared_capacity,) + x.shape[1:]).copy()
+                    padded[:shard.shape[0]] = shard
+                    shards[i] = padded
+            capacities[:] = shared_capacity
             start = time.perf_counter()
             parts = []
-            for start_idx in range(0, capacities[i],
+            for start_idx in range(0, shared_capacity,
                                    _DEVICE_LOCAL_BLOCK_SIZE):
-                block = shards[i][
-                    start_idx:start_idx + _DEVICE_LOCAL_BLOCK_SIZE]
-                parts.append(runners[i](jax.device_put(block, devices[i])))
+                blocks = np.stack([
+                    shard[start_idx:start_idx + _DEVICE_LOCAL_BLOCK_SIZE]
+                    for shard in shards])
+                parts.append(shared_runner(blocks))
             jax.block_until_ready(parts[-1])
-            values = np.concatenate([np.asarray(part) for part in parts])
-            return values, time.perf_counter() - start
-
-        if n_dev == 1:
-            results = [run_device(0)]
+            values = np.concatenate(
+                [np.asarray(part) for part in parts], axis=1)
+            duration = time.perf_counter() - start
+            results = [(values[i], duration) for i in range(n_dev)]
         else:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=n_dev) as executor:
-                results = list(executor.map(run_device, range(n_dev)))
+            def run_device(i):
+                start = time.perf_counter()
+                parts = []
+                for start_idx in range(0, capacities[i],
+                                       _DEVICE_LOCAL_BLOCK_SIZE):
+                    block = shards[i][
+                        start_idx:start_idx + _DEVICE_LOCAL_BLOCK_SIZE]
+                    parts.append(
+                        runners[i](jax.device_put(block, devices[i])))
+                jax.block_until_ready(parts[-1])
+                values = np.concatenate([np.asarray(part) for part in parts])
+                return values, time.perf_counter() - start
+
+            if n_dev == 1:
+                results = [run_device(0)]
+            else:
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=n_dev) as executor:
+                    results = list(executor.map(run_device, range(n_dev)))
 
         durations = np.empty(n_dev)
         was_warmed = state["warmed"]
@@ -643,7 +677,7 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
         # Exclude compilation and calls too small to exercise every device
         # from the throughput model.  A proposed change is adopted only when
         # it survives fixed-block padding and clears the material-gain gate.
-        if (was_warmed and np.all(counts > 0)
+        if (not shared_pmap and was_warmed and np.all(counts > 0)
                 and np.all(durations > 0.0)):
             throughput = capacities / durations
             observed = _project_device_weights(throughput)
@@ -675,6 +709,8 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
             "last_seconds": state["last_seconds"].copy(),
             "profile_samples": state["profile_samples"],
             "block_size": _DEVICE_LOCAL_BLOCK_SIZE,
+            "execution_mode": ("shared pmap" if shared_pmap
+                               else "device-local jit"),
             "rebalance_attempts": state["rebalance_attempts"],
             "rebalances": state["rebalances"],
             "last_rebalance_gain": state["last_rebalance_gain"],
@@ -1122,6 +1158,20 @@ def _variant_suffix(model):
     return "_" + "_".join(parts) if parts else ""
 
 
+def _phi_integration_suffix(model):
+    return ("_peakpartition"
+            if model.phi_integration == "peak-partition" else "")
+
+
+def _objective_policy(model):
+    if model.phi_integration == "peak-partition":
+        return (
+            f"{_DE_PEAK_PARTITION_POLICY}:"
+            f"sys{model._n_phi_partition_sys}:"
+            f"hv{model._n_phi_partition_hv}")
+    return _DE_OBJECTIVE_POLICY
+
+
 def _init_block(gal_cfg, model):
     """Variant-specific [init...] block (init_ecc / init_qw / init_ecc_qw)
     selected by use_ecc/use_quadratic_warp, falling back to [init]."""
@@ -1168,7 +1218,8 @@ def _load_de_checkpoint(path, lo, hi, names, sizes):
     return d
 
 
-def _validate_de_checkpoint_policy(checkpoint, path):
+def _validate_de_checkpoint_policy(
+        checkpoint, path, objective_policy=_DE_OBJECTIVE_POLICY):
     """Reject incompatible algorithm, objective, seed, or schedule state."""
     saved_algorithm = (
         str(np.asarray(checkpoint["algorithm"]).item())
@@ -1202,10 +1253,10 @@ def _validate_de_checkpoint_policy(checkpoint, path):
     saved_objective = (
         str(np.asarray(checkpoint["objective_policy"]).item())
         if "objective_policy" in checkpoint.files else None)
-    if saved_objective != _DE_OBJECTIVE_POLICY:
+    if saved_objective != objective_policy:
         raise ValueError(
             f"Checkpoint objective policy is {saved_objective or 'legacy'!r}, "
-            f"requested {_DE_OBJECTIVE_POLICY!r}; start a fresh run.")
+            f"requested {objective_policy!r}; start a fresh run.")
 
 
 def _screen_eval(batch_eval, x, desc, chunk=512):
@@ -1241,11 +1292,11 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
     sobol_normed = jnp.asarray((sobol_points - lo) / scale)
 
     t0 = time.time()
-    logp_all = -_screen_eval(batch_eval, sobol_normed, "Sobol screen")
+    logp_all = -_screen_eval(batch_eval, sobol_normed, "Sobol candidates")
     valid = np.isfinite(logp_all)
     logp_all = np.where(valid, logp_all, -np.inf)
     best_sobol = logp_all[valid].max() if np.any(valid) else -np.inf
-    fprint(f"Sobol done in {time.time() - t0:.1f}s "
+    fprint(f"Sobol candidates done in {time.time() - t0:.1f}s "
            f"({valid.sum()}/{N_sobol} valid, "
            f"best logP={best_sobol:.1f})")
 
@@ -1268,17 +1319,17 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
     if seeds.shape[0]:
         population = np.vstack(((seeds - lo) / scale, population))
     fitness = _screen_eval(
-        batch_eval, jnp.asarray(population), "initial population")
+        batch_eval, jnp.asarray(population), "Initial-population candidates")
     jax.block_until_ready(fitness)
     if population.shape[0] != pop_size:
         raise RuntimeError(
             f"DE initial population has {population.shape[0]} members, "
             f"expected {pop_size}.")
     if seeds.shape[0]:
-        fprint(f"Initial population: {population.shape[0]} members "
+        fprint(f"Initial DE population: {population.shape[0]} members "
                f"({seeds.shape[0]} seeded, {n_sobol} Sobol)")
     else:
-        fprint(f"Initial population: {population.shape[0]} Sobol members")
+        fprint(f"Initial DE population: {population.shape[0]} Sobol members")
     return jnp.asarray(population), jnp.asarray(fitness)
 
 
@@ -1293,7 +1344,7 @@ _FLOOR_UNIT = dict(_PESCE_FLOOR_UNITS)
 def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             resume_path=None, checkpoint_interval=900.0,
             seed_points=None, fixed_params=None, reference_params=None,
-            reference_status=()):
+            reference_status=(), objective_policy=_DE_OBJECTIVE_POLICY):
     log2_N = int(opt_cfg.get("log2_N", 16))
     pop_size = int(opt_cfg.get("pop_size", 1000))
     max_generations = int(opt_cfg.get("max_generations", 5000))
@@ -1324,25 +1375,26 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     ckpt = None
     if resume_path is not None:
         ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
-        _validate_de_checkpoint_policy(ckpt, resume_path)
+        _validate_de_checkpoint_policy(
+            ckpt, resume_path, objective_policy=objective_policy)
     # seed_points arrive in full target.names order; drop the fixed columns.
     if fixed and seed_points is not None:
         free_idx = [target.names.index(n) for n in names]
         seed_points = np.asarray(seed_points)[:, free_idx]
 
     fsection("L-SHADE MAP optimizer")
-    fprint(f"{D}D, pop={pop_size}, max_gen={max_generations}, "
+    fprint(f"{D}D, pop={pop_size}, max_generations={max_generations}, "
            f"patience={patience}, one candidate per GPU wave")
     fprint(f"current-to-pbest/1, success-history F/CR, "
            f"linear pop {pop_size}->{min_pop_size} over "
-           f"the first {reduction_evaluations:,} DE evaluations")
-    fprint("population-reduction horizon only; NFE is not capped and does "
-           "not terminate the optimiser")
+           f"the first {reduction_evaluations:,} DE candidate evaluations")
+    fprint("population-reduction horizon only; candidate evaluations are not "
+           "capped and do not terminate the optimiser")
     fprint("seed policy: data-derived ridge + Sobol only; "
            "Pesce/Reid is scored as a reference and never inserted")
-    fprint("initial population: seed points + scrambled Sobol screen"
+    fprint("initial DE population: seed points + scrambled Sobol candidates"
            if seed_points is not None
-           else "initial population: scrambled Sobol screen only")
+           else "initial DE population: scrambled Sobol candidates only")
     for name, lower, upper in zip(names, lo, hi):
         fprint(f"  {name:20s}: [{lower:.4g}, {upper:.4g}]")
     if fixed:
@@ -1362,7 +1414,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
                     if checkpoint_path is not None else ":memory:")
     exact_archive = _ExactArchive(
         archive_path, D, resume=resume_path is not None,
-        objective_policy=_DE_OBJECTIVE_POLICY)
+        objective_policy=objective_policy)
 
     def exact_eval(points, desc=None):
         return exact_archive(batch_eval, points, desc=desc)
@@ -1371,7 +1423,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     reference_logp = None
     if reference_params is None:
         # A new process always needs to compile, independently of archive
-        # resume state.  The fixed block compiles on every selected device.
+        # resume state. Homogeneous GPUs share one pmap compilation; mixed
+        # devices retain one device-local compilation each.
         warmup = batch_eval(jnp.full((1, D), 0.5))
         jax.block_until_ready(warmup)
     else:
@@ -1386,8 +1439,10 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             warmup = batch_eval(jnp.asarray(reference_point))
             jax.block_until_ready(warmup)
         reference_logp = -float(np.asarray(reference_fitness)[0])
+    execution_mode = batch_eval.device_profile()["execution_mode"]
     fprint(f"JIT compiled in {time.time() - t0:.1f}s "
-           f"(n_dev={n_dev}, fixed {_DEVICE_LOCAL_BLOCK_SIZE}-candidate "
+           f"(n_dev={n_dev}, {execution_mode}, "
+           f"fixed {_DEVICE_LOCAL_BLOCK_SIZE}-candidate "
            "device block; one candidate per wave)")
     peak = _device_peak_gb()
     if peak is not None:
@@ -1486,7 +1541,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             "algorithm": np.asarray(_DE_ALGORITHM),
             "seed_policy": np.asarray(_DE_SEED_POLICY),
             "population_schedule": np.asarray(_DE_POPULATION_SCHEDULE),
-            "objective_policy": np.asarray(_DE_OBJECTIVE_POLICY),
+            "objective_policy": np.asarray(objective_policy),
             "initial_pop_size": np.asarray(initial_pop_size),
             "min_pop_size": np.asarray(min_pop_size),
             "de_evaluations": np.asarray(de_evaluations),
@@ -1519,7 +1574,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             + exact_archive.write_seconds)
         per_generation = host_seconds / max(1, timed_generations)
         fprint(
-            f"  {label}: {timed_generations} gen; "
+            f"  {label}: {timed_generations} generations; "
             f"exact-eval={exact_archive.evaluation_seconds:.2f}s, "
             f"host={host_seconds:.2f}s ({per_generation:.3f}s/gen): "
             f"trials={phase_timing['trials']:.2f}s, "
@@ -1552,12 +1607,13 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
                 f"{profile['rebalance_attempts']}, last predicted gain="
                 f"{profile['last_rebalance_gain']:.1%})")
 
-    fsection(f"DE (L-SHADE, pop={len(population)}, "
-             f"max_gen={max_generations}, "
-             f"start={gen_start})")
+    fsection(f"DE generations (L-SHADE, pop={len(population)}, "
+             f"max_generations={max_generations}, "
+             f"start_generation={gen_start})")
     last_ckpt = time.time()
     final_gen = gen_start
-    de_progress = trange(max_generations - gen_start, desc="DE")
+    de_progress = trange(
+        max_generations - gen_start, desc="DE generations", unit="gen")
     for step in de_progress:
         gen = gen_start + step
         final_gen = gen + 1
@@ -1616,7 +1672,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             de_progress.set_postfix_str(
                 f"logP={current_best:.2f}, pop={len(population)}, "
                 f"{distance_name}={best_d:.2f}, "
-                f"nfe={de_evaluations}, "
+                f"candidate_evals={de_evaluations}, "
                 f"stale={gens_without_improvement}/{patience}")
         phase_timing["update"] += time.perf_counter() - phase_start
         timed_generations += 1
@@ -1631,11 +1687,11 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
                 extra=checkpoint_extra())
             phase_timing["checkpoint"] += time.perf_counter() - phase_start
             last_ckpt = time.time()
-            fprint(f"  checkpoint: gen {gen + 1}")
+            fprint(f"  checkpoint: generation {gen + 1}")
             report_timing("cumulative timing")
 
         if gens_without_improvement >= patience:
-            fprint(f"  converged at gen {final_gen}")
+            fprint(f"  converged at generation {final_gen}")
             break
 
     if checkpoint_path is not None:
@@ -1751,6 +1807,13 @@ def main(argv=None):
                              "--fix-globals-pesce scores that reference "
                              "without running DE.")
     parser.add_argument("--spot-batch", type=int, default=None)
+    parser.add_argument(
+        "--phi-integration", choices=("fixed-grid", "peak-partition"),
+        default=None,
+        help="Phi integration used by the DE 2D marginal. Default: config "
+             "value (fixed-grid in config_maser.toml). peak-partition uses "
+             "fixed-size numerical peak searches in both systemic "
+             "half-planes and one half-plane per HV group.")
     parser.add_argument("--gpu-mem", type=float, default=None,
                         help="GPU VRAM hint in GB for the auto batch planner. "
                              "Only disambiguates the V100 16/32GB variant "
@@ -1807,8 +1870,13 @@ def main(argv=None):
 
     n_dev, gpu_devices = _resolve_n_devices(args.n_devices)
     if n_dev > 1:
-        fprint(f"DE population assigned by adaptive weighted round-robin "
-               f"over {n_dev} same-node GPU(s).")
+        if _use_shared_pmap(n_dev, gpu_devices):
+            fprint(f"DE population assigned by round-robin over {n_dev} "
+                   "homogeneous same-node GPU(s) with one shared pmap "
+                   "executable.")
+        else:
+            fprint(f"DE population assigned by adaptive weighted round-robin "
+                   f"over {n_dev} same-node GPU(s).")
 
     fsection(f"Loading {args.galaxy} data")
     data = load_megamaser_spots(
@@ -1842,6 +1910,17 @@ def main(argv=None):
     config["model"]["galaxies"] = {
         g: dict(blk) for g, blk in master_cfg["model"]["galaxies"].items()}
     gal_blk = config["model"]["galaxies"][args.galaxy]
+    if args.phi_integration is not None:
+        gal_blk["phi_integration"] = args.phi_integration
+    selected_phi_integration = gal_blk.get(
+        "phi_integration", config["model"].get(
+            "phi_integration", "fixed-grid"))
+    if selected_phi_integration == "peak-partition":
+        # CPU PjRt reproducibly exits while deserialising this loop/JVP-heavy
+        # executable from JAX's persistent cache. Recompile the opt-in graph
+        # rather than risking a failed resume; ordinary fixed grids keep the
+        # persistent cache.
+        jax.config.update("jax_enable_compilation_cache", False)
 
     def _grid_val(key):
         return gal_blk.get(key, config["model"].get(key))
@@ -1891,8 +1970,13 @@ def main(argv=None):
     # smallest production GPU and therefore default to true all-spot exact
     # evaluation.  Explicit CLI/per-galaxy controls still win, and other/f64
     # targets retain the conservative VRAM planner (notably NGC4258).
-    plan_sb, plan_available, plan_info = _plan_de_batch(
-        model, int(opt_cfg.get("pop_size", 1000)), gpu_mem_gb=args.gpu_mem)
+    if model.phi_integration == "peak-partition":
+        plan_sb, plan_available = None, False
+        plan_info = "peak-partition memory planner is not GPU-calibrated"
+    else:
+        plan_sb, plan_available, plan_info = _plan_de_batch(
+            model, int(opt_cfg.get("pop_size", 1000)),
+            gpu_mem_gb=args.gpu_mem)
     target_spot_batch, spot_batch_source = _de_spot_batch_policy(
         args.galaxy, bool(jax.config.jax_enable_x64), args.spot_batch,
         cfg_spot_batch, plan_sb)
@@ -1928,6 +2012,10 @@ def main(argv=None):
     fprint("inner solve: joint 2D (r_ang, phi) marginal per spot, "
            f"n_r_global={model._n_r_global}, "
            f"n_refine_steps={model._n_refine_steps}")
+    fprint(f"phi integration: {model.phi_integration}")
+    if model.phi_integration == "peak-partition":
+        fprint("persistent JAX compilation cache: disabled for the "
+               "peak-partition executable")
 
     fsection(
         f"{'Fixed-global latent MAP' if fixed_globals else 'DE MAP'} "
@@ -1949,7 +2037,8 @@ def main(argv=None):
         floor_suffix = "_pescefloors" if args.fix_floors_pesce else ""
         ckpt_path = os.path.join(
             ckpt_dir,
-            f"de_ckpt_rmap{_variant_suffix(model)}{floor_suffix}"
+            f"de_ckpt_rmap{_variant_suffix(model)}"
+            f"{_phi_integration_suffix(model)}{floor_suffix}"
             "_lshade_nopesce.npz")
         resume_path = (
             ckpt_path if args.resume and os.path.isfile(ckpt_path)
@@ -1977,9 +2066,17 @@ def main(argv=None):
         fprint("DE batching: one candidate per GPU wave, "
                f"spot_batch={target.spot_batch}{sb_flag} "
                f"({spot_batch_source}; None = all spots at once)")
+        if model.phi_integration == "peak-partition":
+            fprint("DE memory plan: peak-partition is not yet GPU-calibrated; "
+                   "using explicit/per-galaxy spot batching")
         fprint(f"DE device executable: fixed {_DEVICE_LOCAL_BLOCK_SIZE}-"
                "candidate block of sequential one-candidate waves "
                "(padding is excluded from NFE/archive)")
+        if _use_shared_pmap(n_dev, gpu_devices):
+            fprint("DE multi-GPU compilation: one shared pmap executable "
+                   "for homogeneous devices")
+        fprint("DE reduction compilation: phi integrands materialised before "
+               "log-sum reductions")
         # Echo the conservative planner for diagnostics even when the measured
         # float32 all-spots policy intentionally supersedes it.
         if plan_available:
@@ -2010,7 +2107,8 @@ def main(argv=None):
             checkpoint_interval=args.checkpoint_interval_minutes * 60.0,
             seed_points=seed_points, fixed_params=fixed_floors,
             reference_params=pesce_params,
-            reference_status=pesce_status)
+            reference_status=pesce_status,
+            objective_policy=_objective_policy(model))
         pesce_logp = run_info["reference_logp"]
         run_summary = f"generations = {run_info['generations']}"
     dt = time.time() - t0

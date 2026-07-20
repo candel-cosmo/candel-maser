@@ -29,12 +29,22 @@ from candel.model.maser_physics import (  # noqa: E402
     keplerian_speed, lorentz_factor, predict_acceleration_los,
     predict_position, predict_velocity_los)
 from candel.model.model_H0_maser import (  # noqa: E402
-    _combine_cached_phi_marginal, _neg_half_chi2_quadform,
+    _combine_cached_phi_marginal, _compile_friendly_logsumexp,
+    _neg_half_chi2_quadform,
     neg_half_chi2_acceleration,
     neg_half_chi2_position, neg_half_chi2_velocity)
 
 V_SYS_OBS = 7000.0   # known observation constant (km/s)
 DV_SYS = 3.0         # small fitted systemic offset; v_sys = V_SYS_OBS + DV_SYS
+
+
+def test_phi_logsumexp_blocks_input_fusion():
+    x = jnp.arange(12.0).reshape(3, 4)
+    compiled = jax.jit(_compile_friendly_logsumexp)
+    assert "optimization_barrier" in compiled.lower(x).as_text()
+    np.testing.assert_array_equal(
+        compiled(x),
+        jax.jit(lambda y: jax.scipy.special.logsumexp(y, axis=-1))(x))
 
 
 def make_inputs(seed=0):

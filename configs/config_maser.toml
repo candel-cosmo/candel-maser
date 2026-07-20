@@ -23,6 +23,13 @@ mass_parameterization = "eta"  # choices: "eta", "log_mbh"
 R_phys_lo = 0.01
 R_phys_hi = 1.5
 
+# DE phi marginalisation. "fixed-grid" is the production default.
+# "peak-partition" locates stationary points on fixed-size half-plane scans,
+# refines them numerically, and integrates the resulting peak/tail partitions.
+phi_integration = "fixed-grid"
+n_phi_partition_sys = 513  # nodes in each systemic half-plane
+n_phi_partition_hv = 257   # nodes in the red/blue half-plane
+
 # HV (red/blue): 3 uniform sub-ranges centred on the peak:
 #   [peak-outer, peak-inner]  (n_phi_hv_low points)
 #   [peak-inner, peak+inner]  (n_phi_hv_high points, dense)
