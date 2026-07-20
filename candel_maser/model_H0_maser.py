@@ -1373,12 +1373,16 @@ class MaserDiskModel(ModelBase):
         else:
             raise ValueError(f"Unknown maser type {type_key!r}.")
 
-        parts = [self._phi_partition_log_integral(
-            r_pre, lo, hi, n_scan, **partition_kw) for lo, hi in ranges]
-        values, roots, overflows = zip(*parts)
-        return (logsumexp(jnp.stack(values), axis=0),
-                jnp.max(jnp.stack(roots), axis=0),
-                jnp.any(jnp.stack(overflows), axis=0))
+        bounds = jnp.asarray(ranges, dtype=r_pre["r_ang"].dtype)
+
+        def integrate_half(bound):
+            return self._phi_partition_log_integral(
+                r_pre, bound[0], bound[1], n_scan, **partition_kw)
+
+        values, roots, overflows = jax.vmap(integrate_half)(bounds)
+        return (logsumexp(values, axis=0),
+                jnp.max(roots, axis=0),
+                jnp.any(overflows, axis=0))
 
     def _phi_eval_shared_r(self, r_pre, sin_phi, cos_phi,
                            sin2=None, cos2=None, sincos=None,

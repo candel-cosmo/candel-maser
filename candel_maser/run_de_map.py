@@ -346,8 +346,15 @@ _DE_POPULATION_SCHEDULE = "nfe_linear"
 _DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v1"
 _DE_PEAK_PARTITION_POLICY = "peak_partition_v1"
 _CANDIDATES_PER_GPU_WAVE = 1
+_PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE = 8
 _F32_ALL_SPOT_GALAXIES = frozenset((
     "CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789"))
+
+
+def _de_candidates_per_wave(model):
+    return (_PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE
+            if model.phi_integration == "peak-partition"
+            else _CANDIDATES_PER_GPU_WAVE)
 
 
 def _initial_de_seed_points(data_seeds):
@@ -549,24 +556,32 @@ def _use_shared_pmap(n_dev, devices):
             and len({device.device_kind for device in devices}) == 1)
 
 
-def _make_batched_fitness(fitness_one, n_dev, devices):
+def _make_batched_fitness(fitness_one, n_dev, devices,
+                          candidates_per_wave=_CANDIDATES_PER_GPU_WAVE):
     """Return ``batch_eval(x_normed (M,D)[, desc]) -> fitness (M,)``.
 
-    Every device evaluates exactly one candidate per JAX wave.  A fixed-size
-    executable contains several sequential waves, eliminating population- and
-    rebalance-dependent input shapes. Homogeneous multi-GPU jobs compile one
-    shared ``pmap`` executable; heterogeneous devices retain concurrent
-    device-local JITs and weighted round-robin assignment. Output is restored
-    to input order on the host. Finite padding is excluded from the exact
-    archive and algorithmic NFE count.
+    A fixed-size executable evaluates ``candidates_per_wave`` candidates
+    concurrently, eliminating population- and rebalance-dependent input
+    shapes. Homogeneous multi-GPU jobs compile one shared ``pmap`` executable;
+    heterogeneous devices retain concurrent device-local JITs and weighted
+    round-robin assignment. Output is restored to input order on the host.
+    Finite padding is excluded from the exact archive and algorithmic NFE
+    count.
     """
+    candidates_per_wave = int(candidates_per_wave)
+    if (candidates_per_wave < 1
+            or _DEVICE_LOCAL_BLOCK_SIZE % candidates_per_wave != 0):
+        raise ValueError(
+            "candidates_per_wave must be a positive divisor of the "
+            f"device block size ({_DEVICE_LOCAL_BLOCK_SIZE}).")
     vmapped = jax.vmap(fitness_one)
 
     def per_device(block):
-        # Preserve the batch-one executable used in production while mapping
-        # a small fixed device-local block sequentially inside one compiled
-        # call.  Candidate intermediates therefore never coexist.
-        return jax.lax.map(vmapped, block[:, None, :]).reshape(-1)
+        if candidates_per_wave == _DEVICE_LOCAL_BLOCK_SIZE:
+            return vmapped(block)
+        waves = block.reshape(
+            -1, candidates_per_wave, block.shape[-1])
+        return jax.lax.map(vmapped, waves).reshape(-1)
 
     n_dev = max(1, int(n_dev))
     devices = tuple(devices[:n_dev])
@@ -588,6 +603,7 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
         "warmed": False,
         "rebalance_attempts": 0,
         "rebalances": 0,
+        "candidates_per_wave": candidates_per_wave,
         "last_rebalance_gain": 0.0,
         "total_candidates": np.zeros(n_dev, dtype=np.int64),
         "total_real_candidates": np.zeros(n_dev, dtype=np.int64),
@@ -709,6 +725,7 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
             "last_seconds": state["last_seconds"].copy(),
             "profile_samples": state["profile_samples"],
             "block_size": _DEVICE_LOCAL_BLOCK_SIZE,
+            "candidates_per_wave": state["candidates_per_wave"],
             "execution_mode": ("shared pmap" if shared_pmap
                                else "device-local jit"),
             "rebalance_attempts": state["rebalance_attempts"],
@@ -1117,9 +1134,9 @@ def _plan_de_batch(model, pop_size, mem_frac=0.7, k_live=8, gpu_mem_gb=None):
     unknown, so the caller keeps its configured defaults (e.g. CPU).
     ``gpu_mem_gb`` only selects the V100 16/32GB variant.
 
-    Production always evaluates one DE candidate per GPU wave.  VRAM can
-    enlarge only the exact spot batch; candidate vectorisation remains a
-    development-only benchmark facility.
+    Fixed-grid production evaluates one DE candidate per GPU wave. Peak
+    partition bypasses this planner and evaluates its smaller eight-candidate
+    block concurrently.
     """
     n_r = model._n_r_local + model._n_r_global
     n_phi = max(int(pc["sin_phi"].shape[0])
@@ -1382,9 +1399,12 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         free_idx = [target.names.index(n) for n in names]
         seed_points = np.asarray(seed_points)[:, free_idx]
 
+    candidates_per_wave = _de_candidates_per_wave(target.model)
     fsection("L-SHADE MAP optimizer")
     fprint(f"{D}D, pop={pop_size}, max_generations={max_generations}, "
-           f"patience={patience}, one candidate per GPU wave")
+           f"patience={patience}, "
+           f"{candidates_per_wave} candidate"
+           f"{'s' if candidates_per_wave != 1 else ''} per GPU wave")
     fprint(f"current-to-pbest/1, success-history F/CR, "
            f"linear pop {pop_size}->{min_pop_size} over "
            f"the first {reduction_evaluations:,} DE candidate evaluations")
@@ -1409,7 +1429,9 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         x = jnp.asarray(lo) + x_normed * jnp.asarray(scale)
         return -logp(x)
 
-    batch_eval = _make_batched_fitness(fitness_one, n_dev, devices)
+    batch_eval = _make_batched_fitness(
+        fitness_one, n_dev, devices,
+        candidates_per_wave=candidates_per_wave)
     archive_path = (checkpoint_path + ".sqlite"
                     if checkpoint_path is not None else ":memory:")
     exact_archive = _ExactArchive(
@@ -1443,7 +1465,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     fprint(f"JIT compiled in {time.time() - t0:.1f}s "
            f"(n_dev={n_dev}, {execution_mode}, "
            f"fixed {_DEVICE_LOCAL_BLOCK_SIZE}-candidate "
-           "device block; one candidate per wave)")
+           f"device block; {candidates_per_wave} candidate"
+           f"{'s' if candidates_per_wave != 1 else ''} per wave)")
     peak = _device_peak_gb()
     if peak is not None:
         fprint(f"device-0 peak after warmup: {peak:.1f} GB "
@@ -2063,14 +2086,18 @@ def main(argv=None):
         fprint("Pesce/Reid reference is not part of the DE initial "
                "population.")
         sb_flag = " [--spot-batch]" if args.spot_batch is not None else ""
-        fprint("DE batching: one candidate per GPU wave, "
+        candidates_per_wave = _de_candidates_per_wave(model)
+        fprint(f"DE batching: {candidates_per_wave} candidate"
+               f"{'s' if candidates_per_wave != 1 else ''} per GPU wave, "
                f"spot_batch={target.spot_batch}{sb_flag} "
                f"({spot_batch_source}; None = all spots at once)")
         if model.phi_integration == "peak-partition":
             fprint("DE memory plan: peak-partition is not yet GPU-calibrated; "
                    "using explicit/per-galaxy spot batching")
+        n_waves = _DEVICE_LOCAL_BLOCK_SIZE // candidates_per_wave
         fprint(f"DE device executable: fixed {_DEVICE_LOCAL_BLOCK_SIZE}-"
-               "candidate block of sequential one-candidate waves "
+               f"candidate block in {n_waves} "
+               f"wave{'s' if n_waves != 1 else ''} "
                "(padding is excluded from NFE/archive)")
         if _use_shared_pmap(n_dev, gpu_devices):
             fprint("DE multi-GPU compilation: one shared pmap executable "

@@ -87,10 +87,10 @@ one shared `pmap` executable when the same GPU model supplies every device, so
 cold startup compiles the objective once rather than once per GPU. Phi
 integrands are materialised before their log-sum reductions so XLA does not
 build the very slow fused reduction kernels seen on the 60,001-point NGC4258
-grid. Each device
-runs immutable eight-candidate blocks whose entries are evaluated sequentially,
-so only one candidate's intermediates are live at a time and population
-shrinkage cannot trigger new input shapes. Heterogeneous devices retain
+grid. Each device runs immutable eight-candidate blocks, so population
+shrinkage cannot trigger new input shapes. Fixed-grid entries remain
+sequential to cap memory; peak-partition evaluates all eight concurrently to
+fill the GPU with its smaller working set. Heterogeneous devices retain
 concurrent device-local JITs, learn bounded per-device throughput weights, and
 adopt a weighted assignment only when its block-aware predicted makespan
 improves by at least 2%. Candidate vectorisation is an implementation invariant
