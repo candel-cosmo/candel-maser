@@ -344,17 +344,21 @@ _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
 _DE_POPULATION_SCHEDULE = "nfe_linear"
 _DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v1"
-_DE_PEAK_PARTITION_POLICY = "peak_partition_v1"
+_DE_PEAK_PARTITION_POLICY = "peak_partition_v2"
 _CANDIDATES_PER_GPU_WAVE = 1
 _PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE = 8
 _F32_ALL_SPOT_GALAXIES = frozenset((
     "CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789"))
 
 
-def _de_candidates_per_wave(model):
-    return (_PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE
-            if model.phi_integration == "peak-partition"
-            else _CANDIDATES_PER_GPU_WAVE)
+def _de_candidates_per_wave(model, peak_override=None):
+    if model.phi_integration == "peak-partition":
+        return (_PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE
+                if peak_override is None else int(peak_override))
+    if peak_override is not None:
+        raise ValueError(
+            "peak candidate-wave override requires peak-partition")
+    return _CANDIDATES_PER_GPU_WAVE
 
 
 def _initial_de_seed_points(data_seeds):
@@ -402,9 +406,12 @@ def _logp_2d_terms(target, theta):
     """
     model = target.model
     phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
-    # Circular scan and union columns use the same integrand (quadratic-form
-    # in x64, residual in f32), so reuse the 128 scan columns.
-    reuse_scan = model.phi_integration == "fixed-grid" and not model.use_ecc
+    # Peak-partition caches evaluated values (plus overflow masks), so its
+    # global scan can be reused for circular and eccentric models. The fixed
+    # grid retains its exact circular-only algebraic reuse.
+    reuse_scan = (model.phi_integration == "peak-partition"
+                  or (model.phi_integration == "fixed-grid"
+                      and not model.use_ecc))
     built = model._build_conditional_r_grids(
         phys_args[2], phys_args[3], phys_args[4], phys_args[16],
         phys_args[8], phys_args[15], phys_args, phys_kw,
@@ -1361,7 +1368,8 @@ _FLOOR_UNIT = dict(_PESCE_FLOOR_UNITS)
 def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             resume_path=None, checkpoint_interval=900.0,
             seed_points=None, fixed_params=None, reference_params=None,
-            reference_status=(), objective_policy=_DE_OBJECTIVE_POLICY):
+            reference_status=(), objective_policy=_DE_OBJECTIVE_POLICY,
+            peak_candidates_per_wave=None):
     log2_N = int(opt_cfg.get("log2_N", 16))
     pop_size = int(opt_cfg.get("pop_size", 1000))
     max_generations = int(opt_cfg.get("max_generations", 5000))
@@ -1399,7 +1407,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         free_idx = [target.names.index(n) for n in names]
         seed_points = np.asarray(seed_points)[:, free_idx]
 
-    candidates_per_wave = _de_candidates_per_wave(target.model)
+    candidates_per_wave = _de_candidates_per_wave(
+        target.model, peak_candidates_per_wave)
     fsection("L-SHADE MAP optimizer")
     fprint(f"{D}D, pop={pop_size}, max_generations={max_generations}, "
            f"patience={patience}, "
@@ -1837,6 +1846,12 @@ def main(argv=None):
              "value (fixed-grid in config_maser.toml). peak-partition uses "
              "fixed-size numerical peak searches in both systemic "
              "half-planes and one half-plane per HV group.")
+    parser.add_argument(
+        "--peak-candidates-per-wave", type=int, choices=(1, 2, 4, 8),
+        default=None,
+        help="Concurrent candidates per GPU in peak-partition mode. "
+             "Default: 8. Use 2 or 4 for hardware calibration if 8 lowers "
+             "throughput; this does not change the objective.")
     parser.add_argument("--gpu-mem", type=float, default=None,
                         help="GPU VRAM hint in GB for the auto batch planner. "
                              "Only disambiguates the V100 16/32GB variant "
@@ -1938,11 +1953,16 @@ def main(argv=None):
     selected_phi_integration = gal_blk.get(
         "phi_integration", config["model"].get(
             "phi_integration", "fixed-grid"))
-    if selected_phi_integration == "peak-partition":
-        # CPU PjRt reproducibly exits while deserialising this loop/JVP-heavy
-        # executable from JAX's persistent cache. Recompile the opt-in graph
-        # rather than risking a failed resume; ordinary fixed grids keep the
-        # persistent cache.
+    if (args.peak_candidates_per_wave is not None
+            and selected_phi_integration != "peak-partition"):
+        raise SystemExit(
+            "--peak-candidates-per-wave requires "
+            "--phi-integration peak-partition.")
+    if (selected_phi_integration == "peak-partition"
+            and jax.default_backend() != "gpu"):
+        # CPU PjRt reproducibly exited while deserialising the former
+        # partition executable. Keep the conservative CPU guard; GPU jobs
+        # retain the persistent cache so restarts can reuse their executable.
         jax.config.update("jax_enable_compilation_cache", False)
 
     def _grid_val(key):
@@ -2032,13 +2052,18 @@ def main(argv=None):
             if args.fix_floors_pesce:
                 raise SystemExit(
                     f"--fix-floors-pesce needs Pesce floors: {exc}") from exc
+    r_refinement = (
+        "three-point global-scan interpolation"
+        if model.phi_integration == "peak-partition"
+        else f"Brent steps={model._n_refine_steps}")
     fprint("inner solve: joint 2D (r_ang, phi) marginal per spot, "
            f"n_r_global={model._n_r_global}, "
-           f"n_refine_steps={model._n_refine_steps}")
+           f"r-centre={r_refinement}")
     fprint(f"phi integration: {model.phi_integration}")
     if model.phi_integration == "peak-partition":
-        fprint("persistent JAX compilation cache: disabled for the "
-               "peak-partition executable")
+        cache_state = ("enabled on GPU" if jax.default_backend() == "gpu"
+                       else "disabled on CPU")
+        fprint("persistent JAX compilation cache: " + cache_state)
 
     fsection(
         f"{'Fixed-global latent MAP' if fixed_globals else 'DE MAP'} "
@@ -2086,14 +2111,15 @@ def main(argv=None):
         fprint("Pesce/Reid reference is not part of the DE initial "
                "population.")
         sb_flag = " [--spot-batch]" if args.spot_batch is not None else ""
-        candidates_per_wave = _de_candidates_per_wave(model)
+        candidates_per_wave = _de_candidates_per_wave(
+            model, args.peak_candidates_per_wave)
         fprint(f"DE batching: {candidates_per_wave} candidate"
                f"{'s' if candidates_per_wave != 1 else ''} per GPU wave, "
                f"spot_batch={target.spot_batch}{sb_flag} "
                f"({spot_batch_source}; None = all spots at once)")
         if model.phi_integration == "peak-partition":
-            fprint("DE memory plan: peak-partition is not yet GPU-calibrated; "
-                   "using explicit/per-galaxy spot batching")
+            fprint("DE memory plan: peak-partition uses the selected "
+                   "candidate wave and explicit/per-galaxy spot batching")
         n_waves = _DEVICE_LOCAL_BLOCK_SIZE // candidates_per_wave
         fprint(f"DE device executable: fixed {_DEVICE_LOCAL_BLOCK_SIZE}-"
                f"candidate block in {n_waves} "
@@ -2135,7 +2161,8 @@ def main(argv=None):
             seed_points=seed_points, fixed_params=fixed_floors,
             reference_params=pesce_params,
             reference_status=pesce_status,
-            objective_policy=_objective_policy(model))
+            objective_policy=_objective_policy(model),
+            peak_candidates_per_wave=args.peak_candidates_per_wave)
         pesce_logp = run_info["reference_logp"]
         run_summary = f"generations = {run_info['generations']}"
     dt = time.time() - t0

@@ -28,6 +28,7 @@ COMPUTE_EVIDENCE=false
 INIT_STRATEGY=""
 SPOT_BATCH=""
 PHI_INTEGRATION=""
+PEAK_CANDIDATES_PER_WAVE=""
 ADD_ECC=false
 ADD_QW=false
 MATCH_REID=false
@@ -162,6 +163,9 @@ DE optimiser options passed to run_maser.py --sampler de:
                          fixed-grid. peak-partition numerically locates and
                          refines peaks in two independent systemic half-planes
                          and one half-plane for each high-velocity group.
+  --peak-candidates-per-wave 1|2|4|8
+                         Concurrent candidates per GPU for peak-partition.
+                         Default: 8; try 2 or 4 when calibrating throughput.
 Cluster options:
   MCMC jobs submit as CPU-only jobs. DE and --evidence request GPU.
   Joint H0 follows the selected node/queue: GPU queues request GPU; CPU queues
@@ -346,6 +350,9 @@ while [[ $# -gt 0 ]]; do
             SPOT_BATCH="$2"; SINGLE_ARGS+=("$1" "$2"); shift 2 ;;
         --phi-integration)
             PHI_INTEGRATION="$2"; DE_ARGS+=("$1" "$2"); shift 2 ;;
+        --peak-candidates-per-wave)
+            PEAK_CANDIDATES_PER_WAVE="$2"
+            DE_ARGS+=("$1" "$2"); shift 2 ;;
         --add-ecc|--add-quadratic-warp)
             case "$1" in
                 --add-ecc) ADD_ECC=true ;;
@@ -384,6 +391,18 @@ if [[ -n "$PHI_INTEGRATION" && "$PHI_INTEGRATION" != "fixed-grid" \
       && "$PHI_INTEGRATION" != "peak-partition" ]]; then
     echo "[ERROR] --phi-integration must be fixed-grid or peak-partition"
     exit 1
+fi
+if [[ -n "$PEAK_CANDIDATES_PER_WAVE" ]]; then
+    case "$PEAK_CANDIDATES_PER_WAVE" in
+        1|2|4|8) ;;
+        *) echo "[ERROR] --peak-candidates-per-wave must be 1, 2, 4, or 8"
+           exit 1 ;;
+    esac
+    if [[ "$PHI_INTEGRATION" != "peak-partition" ]]; then
+        echo "[ERROR] --peak-candidates-per-wave requires" \
+             "--phi-integration peak-partition"
+        exit 1
+    fi
 fi
 JOINT_H0_MODE=false
 if [[ "$INFER_H0" == true ]]; then
