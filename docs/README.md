@@ -90,11 +90,13 @@ build the very slow fused reduction kernels seen on the 60,001-point NGC4258
 grid. Each device runs immutable eight-candidate blocks, so population
 shrinkage cannot trigger new input shapes. Fixed-grid entries remain
 sequential to cap memory; peak-partition evaluates all eight concurrently to
-fill the GPU with its smaller working set. Heterogeneous devices retain
-concurrent device-local JITs, learn bounded per-device throughput weights, and
+fill the GPU with its smaller working set. Peak-partition accepts
+`--peak-candidates-per-wave 1|2|4|8` for card-specific throughput calibration;
+the setting changes only batching, not the objective. Heterogeneous devices
+retain concurrent device-local JITs, learn bounded per-device throughput weights, and
 adopt a weighted assignment only when its block-aware predicted makespan
-improves by at least 2%. Candidate vectorisation is an implementation invariant
-and has no configuration or command-line toggle. Padding is evaluated but
+improves by at least 2%. Fixed-grid candidate batching remains an implementation
+invariant. Padding is evaluated but
 excluded from the archive and algorithmic NFE count.
 The SQLite sidecar persists deterministic 64-bit
 fingerprints, so a resume loads the compact fingerprint table instead of every
@@ -197,15 +199,25 @@ GPU-shaped peak-partition quadrature, pass:
 
 This mode always searches the two systemic half-planes independently using
 513 nodes per half-plane, and uses 257 nodes for each red/blue half-plane. It
-then numerically refines stationary points and integrates fixed-size peak/tail
-partitions. The same strategy is used for the global-radius scan, radius-centre
-refinement, and final joint `(r_ang, phi)` quadrature. It supports circular and
-eccentric models and uses a separate checkpoint/objective identity. The mode
-currently recompiles on process start: persistent-cache reload of this
-loop/JVP-heavy executable failed reproducibly in CPU PjRt testing, so the
-fixed-grid path alone retains the persistent JAX compilation cache. Its GPU
-memory planner is also not yet calibrated; explicit `--spot-batch` and the
-per-galaxy config remain authoritative.
+then locates extrema from neighbouring likelihood values, refines all fixed-size
+brackets in parallel, and integrates peak/tail partitions. All 128 global
+radii are scanned concurrently, and radius-only position, velocity, and
+acceleration terms are precomputed once. The global-radius scan uses a
+three-point log-radius interpolation for the local-grid centre, avoiding the
+former nested 32-step radial Brent solve. Its phi marginals are reused in the
+final local/global union, including for eccentric models. On float32 paths,
+the global extrema also seed the 256 local-radius nodes; a 65-node guard and a
+fixed 256-pair full-scan fallback retain the original result when interpolation
+is unsafe. Float64 retains the full local half-plane scans: NGC4258 tests found
+that extrema reuse could otherwise shift very sharp eccentric likelihoods by
+more than float64 rounding. Peak-partition v3 therefore rejects older peak
+checkpoints rather than mixing objective values.
+GPU jobs retain the persistent JAX compilation cache; CPU runs keep the
+conservative cache-disable guard after an earlier PjRt deserialisation failure.
+Its GPU memory planner is not yet calibrated, so explicit `--spot-batch` and
+the per-galaxy config remain authoritative. To compare candidate concurrency
+on a particular GPU, rerun with `--peak-candidates-per-wave 2`, `4`, and `8`
+and compare the steady Sobol `cand/s`; 8 remains the default.
 
 Important explicit-latent controls:
 
