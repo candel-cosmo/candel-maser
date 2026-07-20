@@ -205,13 +205,11 @@ radii are scanned concurrently, and radius-only position, velocity, and
 acceleration terms are precomputed once. The global-radius scan uses a
 three-point log-radius interpolation for the local-grid centre, avoiding the
 former nested 32-step radial Brent solve. Its phi marginals are reused in the
-final local/global union, including for eccentric models. On float32 paths,
-the global extrema also seed the 256 local-radius nodes; a 65-node guard and a
-fixed 256-pair full-scan fallback retain the original result when interpolation
-is unsafe. Float64 retains the full local half-plane scans: NGC4258 tests found
-that extrema reuse could otherwise shift very sharp eccentric likelihoods by
-more than float64 rounding. Peak-partition v3 therefore rejects older peak
-checkpoints rather than mixing objective values.
+final local/global union, including for eccentric models. At every precision,
+each of the 256 local-radius nodes performs the original full 513/257-node
+half-plane scan. Local phi-extrema reuse was removed after NGC4258 tests found
+that it could shift very sharp eccentric likelihoods. Peak-partition v4
+therefore rejects older peak checkpoints rather than mixing objective values.
 GPU jobs retain the persistent JAX compilation cache; CPU runs keep the
 conservative cache-disable guard after an earlier PjRt deserialisation failure.
 Its GPU memory planner is not yet calibrated, so explicit `--spot-batch` and
