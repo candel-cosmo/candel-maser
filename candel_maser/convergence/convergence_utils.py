@@ -182,6 +182,38 @@ def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
     return out
 
 
+def dense_r_phi_reference_per_spot(model, phys_args, phys_kw, n_r, n_phi,
+                                   r_chunk, spot_batch,
+                                   partition_support=True):
+    """Per-spot float64 reference on a full-support log-r x phi grid."""
+    n_r, n_phi = int(n_r), int(n_phi)
+    r_chunk = int(r_chunk)
+    if n_r < 3 or n_phi < 3 or r_chunk < 1:
+        raise ValueError("n_r and n_phi must be >= 3; r_chunk must be positive.")
+
+    dtype = jnp.asarray(phys_args[2]).dtype
+    if dtype != jnp.float64:
+        raise ValueError(
+            "the full r x phi acceptance reference requires float64.")
+    r_min, r_max = model.r_ang_range(phys_args[2])
+    log_r = jnp.linspace(jnp.log(r_min), jnp.log(r_max), n_r, dtype=dtype)
+    r_grid = jnp.exp(log_r)
+    log_w_r = trapz_log_weights(r_grid)
+    total = np.full(model.n_spots, -np.inf, dtype=np.float64)
+    for start in range(0, n_r, r_chunk):
+        stop = min(start + r_chunk, n_r)
+        shape = (model.n_spots, stop - start)
+        r_values = np.broadcast_to(
+            np.asarray(r_grid[start:stop]), shape)
+        log_weights = np.broadcast_to(
+            np.asarray(log_w_r[start:stop]), shape)
+        partial = dense_phi_reference_per_spot(
+            model, phys_args, phys_kw, r_values, n_phi, spot_batch,
+            log_w_r=log_weights, partition_support=partition_support)
+        total = np.logaddexp(total, partial)
+    return total
+
+
 def bruteforce_ll_fixed_r(model, phys_args, phys_kw, r_ang, ref_cfg):
     """Per-type full-2π φ brute force at a fixed r_ang vector.
 

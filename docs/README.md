@@ -217,32 +217,103 @@ the per-galaxy config remain authoritative. To compare candidate concurrency
 on a particular GPU, rerun with `--peak-candidates-per-wave 2`, `4`, and `8`
 and compare the steady Sobol `cand/s`; 8 remains the default.
 
-### Peak-partition validation
+### Fixed-grid versus peak-partition validation
 
-`convergence/validate_phi_partition.py` is the acceptance suite for the
-peak-partition integrator. It constructs the production DE target, parameter
-layout, constrained bounds, variant-specific configured point, and Pesce/Reid
-point through `run_de_map.py`; it does not implement a second physical
-likelihood. Scrambled Sobol candidates use the same DE box. Optional local
-Sobol clouds are reflected inside that box.
+`convergence/validate_phi_partition.py` compares the two production phi
+integrators, `fixed-grid` and `peak-partition`, inside the complete
+conditional-radius likelihood. It constructs the production DE target,
+parameter layout, constrained bounds, variant-specific configured point, and
+Pesce/Reid point through `run_de_map.py`; it does not implement a second
+physical likelihood. The default candidate set is 4 scrambled Sobol points
+from the DE box plus the config and Pesce/Reid anchors.
 
-For each candidate, the suite first checks a sequence of float64 dense
-fixed-grid references on the exact peak-partition half-plane support and only
-compares peak-partition with the finest level when the requested
-consecutive-level gates are satisfied. It tests both a
-fixed-radius phi marginal and the complete conditional-radius marginal on the
-exact radial nodes and weights built by production, so only the phi treatment
-changes. Production uses the configured galaxy precision; NGC4258 remains
-forced to float64.
+Both production methods are compared per spot with the same independent
+float64 reference. That reference integrates a log-uniform radial grid over
+the full physical support and a uniform phi grid over the matching physical
+half-plane support. Its default paired convergence sequence is
+`5001 x 2501`, `10001 x 5001`, and `20001 x 10001` radial-by-phi nodes;
+NGC4258 instead uses `5001 x 50001`, `10001 x 100001`, and
+`20001 x 200001`, matching the 200001-node dense phi reference used in the
+earlier NGC4258 benchmark. Explicit reference-level flags override these
+defaults. The radial axis is chunked to control memory. The finest reference
+is accepted only when the requested consecutive-level gates pass. Production
+uses the configured galaxy precision; NGC4258 remains forced to float64.
 
-Submit a lightweight NGC6323 GPU smoke test:
+Submit the default circular validation for every configured galaxy:
+
+```bash
+bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu
+```
+
+Restrict the run to one galaxy with `--galaxies`:
+
+```bash
+bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu \
+    --galaxies NGC6323
+```
+
+On a laptop, use explicit local mode. This permits the CPU backend; restricting
+the run to one galaxy is recommended for the first check:
+
+```bash
+bash scripts/megamaser/convergence/validate_phi_partition.sh --local \
+    --galaxies NGC6323
+```
+
+The terminal, JSON, and Markdown outputs report the configured phi-integration
+default separately from both tested methods. They show the fixed-grid phi
+sizes, peak-partition scan sizes, production conditional-radius grid, the
+paired dense reference grids, each method minus the reference, each method
+relative to its Pesce/Reid likelihood, and peak-partition minus fixed-grid.
+Candidate tables use one row per point and show the finest reference
+log-likelihood, total absolute error, worst-spot absolute error, and a
+per-candidate `eval s` column timing the pure production objective (one warm
+evaluation, median of `timing_repeats`) for each method; method-dependent
+values are printed as `fixed-grid | peak-partition`. Reference-convergence
+failures and root-capacity overflows are listed below the table.
+The current config default is `fixed-grid`; the validator does not change it.
+
+Every candidate is judged against the full dense float64 reference ladder.
+On a cache miss every level is computed; an exact cache hit loads the complete
+ladder instead. Production compilation, timing, and both production integrator
+evaluations are intentionally rerun, so seeing `Timing both production methods`
+or `Evaluating ...` does not imply that the dense reference is being recomputed.
+The terminal prints `Reference cache HIT ... dense ladder skipped` before a
+cached result is used. Broad Sobol points from the DE box can still land
+on needle-like posterior geometry whose dense reference never converges (one
+trapezoid node holds the whole integral), even though the point is tens of
+thousands of nats below the config anchor and thus posterior-irrelevant. The
+gate and railing machinery is a pure classifier: after every candidate is
+fully evaluated, the converged anchors (config, Pesce/Reid) and local clouds
+calibrate a per-case deficit gate at 100x the worst legitimate deficit, floored
+at 1000 nats. A broad Sobol point is flagged posterior-irrelevant when both its
+production and finest-reference log-likelihoods fall below that gate and its
+geometry rails (closed-form radius seeds clipped to the support edge, or
+red/blue high-velocity phi peaks argmaxed at the phi=0 boundary). Flagged
+points are fully reported with their real reference log-likelihood and error
+columns, marked `[IRRELEVANT]`, and their failures -- unconverged references or
+comparison mismatches -- are excused from the verdict and listed separately
+from hard failures. They never count toward the case or overall PASS/FAIL in
+either direction. A candidate that takes the full ladder and genuinely FAILs
+without being flagged irrelevant still fails the case: excusal is reserved for
+posterior-irrelevant needle geometry, never for integrator mismatches on
+relevant points. Classification is disabled for a case when no anchor reference
+converges, in which case nothing is flagged. The headline reads e.g. `PASS
+(K irrelevant: posterior-irrelevant geometry, excused)`.
+
+The default all-galaxy run is intentionally expensive: it evaluates 6 points
+per galaxy (4 Sobol + config + Pesce/Reid) at three very large 2D reference
+grids. Run one galaxy first when calibrating memory and wall time.
+
+Submit a lightweight NGC6323 GPU smoke test with only the config point and
+reduced reference grids:
 
 ```bash
 bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu -- \
     --galaxies NGC6323 --variants circular \
     --sobol-candidates 0 --no-pesce-point \
-    --fixed-phi-levels 20001,40001,80001 \
-    --conditional-phi-levels 10001,20001,40001 \
+    --reference-r-levels 501,1001,2001 \
+    --reference-phi-levels 251,501,1001 \
     --reference-spot-batch 2 --timing-repeats 2
 ```
 
@@ -253,25 +324,65 @@ candidate set:
 bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu \
     --mem 32 -- \
     --galaxies NGC4258 --variants eccentric --sobol-candidates 0 \
-    --fixed-phi-levels 30001,60001,120001 \
-    --conditional-phi-levels 15001,30001,60001 \
     --spot-batch 4 --reference-spot-batch 1 \
     --candidate-wave 2 --timing-repeats 2
 ```
 
-A broader acceptance run can add Sobol and local candidates, for example
-`--sobol-candidates 16 --local-sobol 4`. Accuracy, ranking, overflow, and
-reference-convergence tolerances are explicit command-line options shown by
-`--help`. Any unconverged reference, finite-mask mismatch, excessive per-spot
-or total error, ranking inversion, or root overflow makes the command exit
-non-zero.
+For a quick laptop orchestration check, keep one config point and use small
+grids; these are not acceptance-quality references:
+
+```bash
+bash scripts/megamaser/convergence/validate_phi_partition.sh --local \
+    --galaxies NGC6323 --sobol-candidates 0 --no-pesce-point \
+    --reference-r-levels 51,101,201 \
+    --reference-phi-levels 51,101,201 --timing-repeats 1
+```
+
+Accuracy, ranking, overflow, and reference-convergence tolerances are explicit
+command-line options shown by `--help`. Any unconverged reference, finite-mask
+mismatch, excessive per-spot or total error, ranking inversion, or root
+overflow makes the command exit non-zero.
 
 Each run writes `validation.json` (all candidates, consecutive reference
 levels, and every per-spot diagnostic) and `validation.md` (candidate,
 population, convergence, ranking, worst-spot, aggregate, timing, memory, and
 reproduction tables). Expensive reference arrays are cached by candidate,
-galaxy, variant, radial nodes and weights, grid sequence, dtype, configuration,
-objective policy, git revision, and source hash; `--no-cache` disables reuse.
+galaxy, variant, paired grid sequence, chunking, dtype, physical configuration,
+backend, and a hash of the model/reference sources. Production objective
+policies, integration-node overrides, the git revision, and validator-only
+reporting code are excluded because they cannot change the dense reference.
+Entries expire after 48 hours; `--no-cache` disables reuse, while
+`--clean-cache` deletes the cache and exits without running validation.
+
+```bash
+bash scripts/megamaser/convergence/validate_phi_partition.sh --clean-cache
+```
+
+### Numerical-setting experiments
+
+The validator accepts repeatable, method-specific numerical overrides without
+editing `config_maser.toml`. For example, test a cheaper peak scan for NGC6264
+against the same candidates and cached references with:
+
+```bash
+bash scripts/megamaser/convergence/validate_phi_partition.sh --local \
+    --galaxies NGC6264 \
+    --scheme-setting peak-partition.n_phi_partition_sys=257 \
+    --scheme-setting peak-partition.n_phi_partition_hv=129
+```
+
+The whitelist is shown below. Fixed-grid exposes its three phi node counts;
+peak-partition exposes its two scan counts; both expose the
+config-backed conditional-radius controls. Overrides are recorded separately
+for each method in the terminal, JSON, and Markdown reports. Keep the galaxy,
+variant, seed, candidate options, and reference options fixed across trials.
+An agent can treat a zero exit code and `passed: true` as the feasibility gate,
+then rank feasible trials by the selected method's warmed throughput in
+`cases[].timing`. Local CPU trials are suitable for accuracy and workflow
+checks; final performance choices must be repeated on the production GPU.
+The NGC6264 pilot protocol, pass/fail boundary, and follow-up plan are recorded
+in `docs/notes/megamaser_phi_agentic_tuning.md`.
+
 The production objective timing separates the cold compile/evaluation from
 warmed throughput and records backend peak memory when JAX exposes it.
 

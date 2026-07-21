@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Validate peak-partition phi integration against converged references.
+"""Compare fixed-grid and peak-partition against converged 2D references.
 
 The production model supplies every physical prediction, transform, prior,
-spot split, conditional-radius grid, and peak-partition evaluation.  This
-script only supplies deterministic candidates, dense matching-support
-reference levels, convergence gates, timing, caching, and reports.
+spot split, conditional-radius grid, and both production phi integrators.
+This script only supplies deterministic candidates, dense full-support
+r x phi reference levels, convergence gates, timing, caching, and reports.
 """
 import argparse
 import copy
@@ -47,14 +47,43 @@ if str(MASER_DIR) not in sys.path:
 import run_de_map as de  # noqa: E402
 try:  # noqa: E402
     from .convergence_utils import (cast_floats, cast_model_floats,
-                                    dense_phi_reference_per_spot)
+                                    dense_r_phi_reference_per_spot)
 except ImportError:  # direct script execution
     from convergence_utils import (cast_floats, cast_model_floats,
-                                   dense_phi_reference_per_spot)
+                                   dense_r_phi_reference_per_spot)
 
 
-SCHEMA_VERSION = 1
-REFERENCE_POLICY = "partition_support_trapezoid_f64_frozen_r_v1"
+SCHEMA_VERSION = 4
+REFERENCE_CACHE_SCHEMA_VERSION = 4
+REFERENCE_POLICY = "full_support_log_r_partition_phi_trapezoid_f64_v1"
+REFERENCE_CACHE_TTL_SECONDS = 48 * 60 * 60
+# Scheme-specific numerical experiments belong in these per-galaxy overrides;
+# reports retain the resolved settings separately for each scheme.
+INTEGRATION_SCHEMES = {
+    "fixed-grid": {"phi_integration": "fixed-grid"},
+    "peak-partition": {"phi_integration": "peak-partition"},
+}
+METHODS = tuple(INTEGRATION_SCHEMES)
+COMMON_SCHEME_SETTINGS = {
+    "n_r_local": (int, 3),
+    "n_r_global": (int, 3),
+    "K_sigma": (float, 0.0),
+    "n_refine_steps": (int, 1),
+    "refine_r_center": (bool, None),
+}
+SCHEME_SETTINGS = {
+    "fixed-grid": {
+        **COMMON_SCHEME_SETTINGS,
+        "n_phi_sys": (int, 3),
+        "n_phi_hv_high": (int, 3),
+        "n_phi_hv_low": (int, 3),
+    },
+    "peak-partition": {
+        **COMMON_SCHEME_SETTINGS,
+        "n_phi_partition_sys": (int, 3),
+        "n_phi_partition_hv": (int, 3),
+    },
+}
 VARIANTS = {
     "circular": (False, False),
     "eccentric": (True, False),
@@ -68,21 +97,45 @@ VARIANT_ALIASES = {
     "ecc_qw": "eccentric-quadratic-warp",
 }
 POPULATIONS = ("systemic", "red", "blue")
+DEFAULT_REFERENCE_R_LEVELS = (5001, 10001, 20001)
+DEFAULT_REFERENCE_PHI_LEVELS = (2501, 5001, 10001)
+NGC4258_REFERENCE_PHI_LEVELS = (50001, 100001, 200001)
+
+# Irrelevance classifier.  Every candidate is judged against the full dense
+# reference ladder (computed or loaded exactly from cache); this only labels
+# posterior-irrelevant broad Sobol needles so their failures are excused from
+# the verdict.  A candidate is flagged when
+# its production deficit falls below a gate set at ``GATE_MULTIPLIER`` times
+# the worst legitimate (anchor/local-cloud) deficit, floored at ``GATE_FLOOR``
+# nats, its finest-reference deficit also clears the gate, and its needle
+# geometry rails.
+GATE_FLOOR = -1000.0
+GATE_MULTIPLIER = 100.0
+RAILING_FRACTION_THRESHOLD = 0.1
+PHI_EDGE_CELLS = 2
 
 
 def _source_hash():
-    """Hash objective and validator sources so dirty code invalidates caches."""
+    """Hash code that can change the physical dense reference values.
+
+    The validator itself is deliberately excluded: reporting, CLI, and
+    production-setting changes must not invalidate an unchanged reference.
+    ``REFERENCE_POLICY`` is bumped when the reference algorithm changes.
+    """
     paths = (
         REPO_ROOT / "candel/model/model_H0_maser.py",
         MASER_DIR / "run_de_map.py",
         SCRIPT_DIR / "convergence_utils.py",
-        Path(__file__).resolve(),
     )
     digest = hashlib.sha256()
     for path in paths:
         digest.update(str(path.relative_to(REPO_ROOT)).encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+def _validator_source_hash():
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 def _numerical_settings(model):
@@ -93,6 +146,9 @@ def _numerical_settings(model):
         if parameter.default is not inspect.Parameter.empty
     }
     return {
+        "n_phi_sys": int(model._n_phi_sys),
+        "n_phi_hv_high": int(model._n_phi_hv_high),
+        "n_phi_hv_low": int(model._n_phi_hv_low),
         "n_phi_partition_sys": int(model._n_phi_partition_sys),
         "n_phi_partition_hv": int(model._n_phi_partition_hv),
         "n_r_local": int(model._n_r_local),
@@ -130,16 +186,6 @@ def _sha256_json(value):
     return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
 
 
-def _array_sha256(*arrays):
-    digest = hashlib.sha256()
-    for value in arrays:
-        arr = np.ascontiguousarray(value)
-        digest.update(str(arr.dtype).encode())
-        digest.update(str(arr.shape).encode())
-        digest.update(arr.tobytes())
-    return digest.hexdigest()
-
-
 def _parse_levels(value):
     try:
         levels = tuple(int(item) for item in value.split(","))
@@ -163,15 +209,80 @@ def _variant(value):
     return value
 
 
+def _parse_scheme_setting(value):
+    """Parse and validate ``METHOD.KEY=VALUE`` numerical overrides."""
+    try:
+        qualified_key, raw = value.split("=", 1)
+        method, key = qualified_key.split(".", 1)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "scheme settings must use METHOD.KEY=VALUE") from exc
+    if method not in SCHEME_SETTINGS:
+        raise argparse.ArgumentTypeError(
+            f"unknown integration method {method!r}; choose from "
+            f"{', '.join(METHODS)}")
+    if key not in SCHEME_SETTINGS[method]:
+        allowed = ", ".join(sorted(SCHEME_SETTINGS[method]))
+        raise argparse.ArgumentTypeError(
+            f"{key!r} is not tunable for {method}; choose from {allowed}")
+    expected, minimum = SCHEME_SETTINGS[method][key]
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid JSON scalar {raw!r} for {method}.{key}") from exc
+    if expected is bool:
+        valid_type = isinstance(parsed, bool)
+    elif expected is int:
+        valid_type = isinstance(parsed, int) and not isinstance(parsed, bool)
+    else:
+        valid_type = (isinstance(parsed, (int, float))
+                      and not isinstance(parsed, bool))
+        parsed = float(parsed) if valid_type else parsed
+    if not valid_type:
+        raise argparse.ArgumentTypeError(
+            f"{method}.{key} requires a {expected.__name__} value")
+    if minimum is not None:
+        valid_value = parsed >= minimum if expected is int else parsed > minimum
+        if not valid_value:
+            relation = ">=" if expected is int else ">"
+            raise argparse.ArgumentTypeError(
+                f"{method}.{key} must be {relation} {minimum:g}")
+    return method, key, parsed
+
+
+def _scheme_overrides(settings):
+    overrides = {method: {} for method in METHODS}
+    for method, key, value in settings:
+        if key in overrides[method]:
+            raise ValueError(
+                f"duplicate --scheme-setting for {method}.{key}")
+        overrides[method][key] = value
+    return overrides
+
+
+def _reference_grids(galaxy, args):
+    phi_levels = args.reference_phi_levels
+    if phi_levels is None:
+        phi_levels = (NGC4258_REFERENCE_PHI_LEVELS
+                      if galaxy == "NGC4258"
+                      else DEFAULT_REFERENCE_PHI_LEVELS)
+    if len(args.reference_r_levels) != len(phi_levels):
+        raise ValueError(
+            "--reference-r-levels and --reference-phi-levels must have "
+            "the same number of entries.")
+    return tuple(zip(args.reference_r_levels, phi_levels))
+
+
 def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--galaxies", nargs="+", default=["NGC6323"])
+    parser.add_argument(
+        "--galaxies", nargs="+",
+        default=list(de._MASTER_CFG["model"]["galaxies"]),
+        help="Galaxies to validate (default: all configured galaxies).")
     parser.add_argument("--variants", nargs="+", type=_variant,
                         default=["circular"])
-    parser.add_argument("--profiles", nargs="+",
-                        choices=("fixed-r", "conditional-r"),
-                        default=["fixed-r", "conditional-r"])
-    parser.add_argument("--sobol-candidates", type=int, default=8)
+    parser.add_argument("--sobol-candidates", type=int, default=4)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--local-sobol", type=int, default=0,
                         help="Extra Sobol points around each available config "
@@ -182,11 +293,13 @@ def _parser():
     parser.add_argument("--no-config-point", action="store_true")
     parser.add_argument("--no-pesce-point", action="store_true")
     parser.add_argument(
-        "--fixed-phi-levels", type=_parse_levels,
-        default=_parse_levels("25001,50001,100001"))
+        "--reference-r-levels", type=_parse_levels,
+        default=DEFAULT_REFERENCE_R_LEVELS)
     parser.add_argument(
-        "--conditional-phi-levels", type=_parse_levels,
-        default=_parse_levels("12501,25001,50001"))
+        "--reference-phi-levels", type=_parse_levels,
+        default=None,
+        help="Phi reference levels (default: 2501,5001,10001; "
+             "NGC4258: 50001,100001,200001).")
     parser.add_argument("--reference-tail-levels", type=int, default=3,
                         help="Number of final levels whose consecutive "
                              "comparisons must pass (default: 3).")
@@ -202,13 +315,24 @@ def _parser():
     parser.add_argument("--max-root-overflows", type=int, default=0)
     parser.add_argument("--spot-batch", type=int, default=None,
                         help="Production spot-batch override.")
-    parser.add_argument("--reference-spot-batch", type=int, default=1)
+    parser.add_argument("--reference-spot-batch", type=int, default=4)
+    parser.add_argument("--reference-r-chunk", type=int, default=32)
     parser.add_argument("--candidate-wave", type=int,
-                        choices=(1, 2, 4, 8), default=None)
+                        choices=(1, 2, 4, 8), default=None,
+                        help="Peak-partition candidate-wave override.")
+    parser.add_argument(
+        "--scheme-setting", action="append", type=_parse_scheme_setting,
+        default=[], metavar="METHOD.KEY=VALUE",
+        help="Override one whitelisted production numerical setting; may be "
+             "repeated (for example peak-partition.n_phi_partition_sys=257).")
     parser.add_argument("--n-devices", type=int, default=1)
     parser.add_argument("--timing-repeats", type=int, default=3)
     parser.add_argument("--cache-dir", type=Path, default=None)
-    parser.add_argument("--no-cache", action="store_true")
+    cache = parser.add_mutually_exclusive_group()
+    cache.add_argument("--no-cache", action="store_true")
+    cache.add_argument(
+        "--clean-cache", action="store_true",
+        help="Delete cached dense references and exit without validating.")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--allow-cpu", action="store_true",
                         help="Permit a non-GPU backend for development only.")
@@ -225,22 +349,21 @@ def _validate_args(args):
         raise ValueError("Sobol candidate counts must be non-negative.")
     if not 0.0 < args.local_radius <= 0.5:
         raise ValueError("--local-radius must be in (0, 0.5].")
-    if args.reference_spot_batch < 1:
-        raise ValueError("--reference-spot-batch must be positive.")
+    if args.reference_spot_batch < 1 or args.reference_r_chunk < 1:
+        raise ValueError("reference spot batch and r chunk must be positive.")
     if args.spot_batch is not None and args.spot_batch < 1:
         raise ValueError("--spot-batch must be positive.")
     if args.timing_repeats < 1 or args.n_devices < 1:
         raise ValueError("timing repeats and device count must be positive.")
     if args.reference_tail_levels < 2:
         raise ValueError("--reference-tail-levels must be at least 2.")
-    for profile, levels in (("fixed-r", args.fixed_phi_levels),
-                            ("conditional-r",
-                             args.conditional_phi_levels)):
-        if (profile in args.profiles
-                and args.reference_tail_levels > len(levels)):
+    for galaxy in args.galaxies:
+        grids = _reference_grids(galaxy, args)
+        if args.reference_tail_levels > len(grids):
             raise ValueError(
-                f"{profile} has {len(levels)} levels but "
+                f"the {galaxy} reference has {len(grids)} levels but "
                 f"--reference-tail-levels={args.reference_tail_levels}.")
+    _scheme_overrides(args.scheme_setting)
 
 
 def error_statistics(test, reference):
@@ -365,6 +488,9 @@ def _write_model_config(config, data, dtype):
 def _build_case(galaxy, variant, args, seed):
     master = de._MASTER_CFG
     gcfg = master["model"]["galaxies"][galaxy]
+    configured_phi_integration = gcfg.get(
+        "phi_integration", master["model"].get(
+            "phi_integration", "fixed-grid"))
     data = de.load_megamaser_spots(
         de.data_path("data", "Megamaser"), galaxy,
         v_sys_obs=gcfg["v_sys_obs"])
@@ -376,14 +502,25 @@ def _build_case(galaxy, variant, args, seed):
     case_gcfg = config["model"]["galaxies"][galaxy]
     case_gcfg["use_ecc"], case_gcfg["use_quadratic_warp"] = (
         VARIANTS[variant])
-    case_gcfg["phi_integration"] = "peak-partition"
     if args.spot_batch is not None:
         case_gcfg["conditional_spot_batch"] = int(args.spot_batch)
 
     production_f64 = bool(gcfg.get("force_f64", False))
     production_dtype = jnp.float64 if production_f64 else jnp.float32
-    model = _write_model_config(config, data, production_dtype)
-    reference_model = _write_model_config(config, data, jnp.float64)
+    method_configs = {}
+    models = {}
+    scheme_overrides = _scheme_overrides(args.scheme_setting)
+    for method, overrides in INTEGRATION_SCHEMES.items():
+        method_config = copy.deepcopy(config)
+        method_config["model"]["galaxies"][galaxy].update(overrides)
+        method_config["model"]["galaxies"][galaxy].update(
+            scheme_overrides[method])
+        method_configs[method] = method_config
+        models[method] = _write_model_config(
+            method_config, data, production_dtype)
+    model = models["peak-partition"]
+    reference_model = _write_model_config(
+        method_configs["fixed-grid"], data, jnp.float64)
 
     suffix = de._variant_suffix(model)
     variant_init_name = "init" + suffix if suffix else "init"
@@ -429,13 +566,19 @@ def _build_case(galaxy, variant, args, seed):
     target_batch, batch_source = de._de_spot_batch_policy(
         galaxy, production_f64, args.spot_batch,
         configured_batch, None)
-    target = de.MaserBlackJaxTarget(
-        model, de._h_ref(model), init_params, spot_batch=target_batch)
+    targets = {
+        method: de.MaserBlackJaxTarget(
+            method_model, de._h_ref(method_model), init_params,
+            spot_batch=target_batch)
+        for method, method_model in models.items()
+    }
+    target = targets["peak-partition"]
     reference_init = cast_floats(init_params, jnp.float64)
     reference_target = de.MaserBlackJaxTarget(
         reference_model, de._h_ref(reference_model), reference_init,
         spot_batch=args.reference_spot_batch)
-    if target.names != reference_target.names:
+    if (any(candidate.names != target.names for candidate in targets.values())
+            or target.names != reference_target.names):
         raise RuntimeError("production and reference target layouts differ.")
 
     sobol_n_sigma = master.get("optimise", {}).get("sobol_n_sigma", 5)
@@ -446,8 +589,10 @@ def _build_case(galaxy, variant, args, seed):
         "config": config,
         "config_hash": _sha256_json(config["model"]),
         "model": model,
+        "models": models,
         "reference_model": reference_model,
         "target": target,
+        "targets": targets,
         "reference_target": reference_target,
         "init_params": init_params,
         "init_status": init_status,
@@ -459,10 +604,16 @@ def _build_case(galaxy, variant, args, seed):
         "hi": hi,
         "production_dtype": (
             "float64" if production_f64 else "float32"),
+        "configured_phi_integration": configured_phi_integration,
+        "validated_phi_integrations": list(METHODS),
         "spot_batch": target_batch,
         "spot_batch_source": batch_source,
         "source_hash": _source_hash(),
-        "numerical_settings": _numerical_settings(model),
+        "scheme_setting_overrides": scheme_overrides,
+        "numerical_settings": {
+            method: _numerical_settings(method_model)
+            for method, method_model in models.items()
+        },
     }
 
 
@@ -501,11 +652,10 @@ def _candidate_rows(case, args, seed):
                 (values >= lo) & (values <= hi))),
         })
 
-    broad = _sobol(args.sobol_candidates, len(names), seed)
-    for index, unit in enumerate(broad):
-        add(f"scrambled Sobol seed={seed} index={index}", "sobol",
-            lo + unit * scale)
-
+    # Order anchors and their local clouds before the broad Sobol points so
+    # the report reads anchor-first; the irrelevance gate is calibrated on the
+    # legitimate high-posterior candidates.  Ids are per-source_kind counters,
+    # so this ordering does not change any candidate id.
     anchors = []
     if not args.no_config_point:
         if case["init_status"] is None:
@@ -538,6 +688,11 @@ def _candidate_rows(case, args, seed):
             local = _reflect_unit_box(local)
             add(f"local Sobol around {kind} index={index}",
                 f"local-{kind}", lo + local * scale)
+
+    broad = _sobol(args.sobol_candidates, len(names), seed)
+    for index, unit in enumerate(broad):
+        add(f"scrambled Sobol seed={seed} index={index}", "sobol",
+            lo + unit * scale)
 
     if not rows:
         raise ValueError("candidate collection is empty.")
@@ -577,44 +732,211 @@ def _partition_diagnostics(model, type_key, idx, r_ang, phys_args, phys_kw,
             overflow.reshape(-1, *overflow.shape[2:])[:n_idx])
 
 
-def _production_evaluator(case):
+def _gate(legit_scores, anchor_score):
+    """Posterior-deficit gate: min(floor, multiplier x worst legit deficit)."""
+    worst_legit = min(legit_scores) - anchor_score
+    return min(GATE_FLOOR, GATE_MULTIPLIER * worst_legit)
+
+
+def _irrelevant_decision(delta_prod, delta_ref, gate,
+                         radius_railed, phi_railed):
+    """Flag only needles: both deficits below the gate and a railed axis."""
+    return bool(delta_prod < gate and delta_ref < gate
+                and (radius_railed or phi_railed))
+
+
+def _candidate_score(candidate_result):
+    """Best production data log-likelihood over the two phi integrators."""
+    return max(record["test_total_log_likelihood"]
+               for record in candidate_result["methods"].values())
+
+
+def _calibrate_gate(legit):
+    """Irrelevance gate and best-anchor reference from legit candidates.
+
+    ``legit`` are the fully-evaluated config, Pesce/Reid, and local cloud
+    candidate results (broad Sobol points excluded).  Returns None when no
+    anchor has a converged reference, which disables flagging for the case.
+    """
+    anchors = [
+        cr for cr in legit
+        if cr["source_kind"] in ("config", "pesce-reid")
+        and cr["methods"]["fixed-grid"][
+            "reference_convergence"]["converged"]]
+    if not anchors:
+        return None
+    best = max(anchors, key=_candidate_score)
+    anchor_score = _candidate_score(best)
+    legit_scores = [_candidate_score(cr) for cr in legit]
+    return {
+        "gate": _gate(legit_scores, anchor_score),
+        "anchor_score": anchor_score,
+        "anchor_reference_total": best["methods"]["fixed-grid"][
+            "reference_total_log_likelihood"],
+        "worst_legit": min(legit_scores) - anchor_score,
+    }
+
+
+def _relevant_pass(candidates):
+    """Case pass over candidates NOT flagged irrelevant.
+
+    Irrelevant needles never count toward pass or fail: a failing irrelevant
+    candidate cannot fail the case, and an all-irrelevant set contributes
+    nothing.  Rankings apply the same filter separately.
+    """
+    return all(candidate["passed"] for candidate in candidates
+               if not candidate["irrelevant"])
+
+
+def _railing_diagnostics(case, values):
+    """Needle-geometry fractions: railed radius seeds and railed phi peaks.
+
+    Reuses the production model kernels on the same physical path the
+    evaluator takes.  Radius railing counts closed-form seeds clipped to
+    the support edge; phi railing counts red/blue HV peaks argmaxed at the
+    phi=0 boundary where the LOS orbital velocity vanishes.  The systemic
+    group is never scanned (phi=0 is a partition seam there, not a peak).
+    """
     model = case["model"]
     target = case["target"]
     names = case["names"]
     dtype = (jnp.float64 if case["production_dtype"] == "float64"
              else jnp.float32)
-    n_r = model._n_r_local + model._n_r_global
+    values = jnp.asarray(values, dtype=dtype)
+    theta = target.complete_params(de._flat_to_theta(values, names))
+    phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
+
+    r_est, _, r_min, r_max = model._closed_form_seeds(
+        phys_args[2], phys_args[3], phys_args[4], phys_args[16],
+        phys_args[8], phys_args[15])
+    r_est = np.asarray(jax.device_get(r_est))
+    r_min, r_max = float(r_min), float(r_max)
+    valid = np.asarray(jax.device_get(
+        model.is_highvel | model._all_has_accel.astype(bool)))
+    railed = ((r_est <= 1.01 * r_min * (1.0 + 1e-6))
+              | (r_est >= 0.99 * r_max * (1.0 - 1e-6))) & valid
+    n_valid = int(np.count_nonzero(valid))
+    radius_fraction = (float(np.count_nonzero(railed) / n_valid)
+                       if n_valid else 0.0)
+
+    r_est_j = jnp.asarray(r_est, dtype=dtype)
+    n_railed_phi = 0
+    n_hv = 0
+    for type_key, idx in (("red", model._idx_red), ("blue", model._idx_blue)):
+        n = int(idx.shape[0])
+        if not n:
+            continue
+        r_pre = model._r_precompute(
+            r_est_j[idx], idx, *phys_args, **phys_kw,
+            has_any_accel=model._group_has_any_accel(type_key))
+        subs = model._phi_subranges[type_key]
+        n_scan = int(model._phi_partition_scan_size(type_key))
+        phi_scan = jnp.linspace(
+            subs[0][0], subs[-1][1], n_scan, dtype=r_pre["r_ang"].dtype)
+        arg = np.asarray(jax.device_get(
+            jnp.argmax(model._phi_value(r_pre, phi_scan), axis=-1)))
+        n_railed_phi += int(np.count_nonzero(
+            (arg <= PHI_EDGE_CELLS) | (arg >= n_scan - 1 - PHI_EDGE_CELLS)))
+        n_hv += n
+    phi_fraction = float(n_railed_phi / n_hv) if n_hv else 0.0
+    return radius_fraction, phi_fraction
+
+
+def _full_result(case, candidate, production, grids, args, cache_dir,
+                 record_railing):
+    """Full-reference-ladder candidate result with raw per-method verdict."""
+    candidate_result = {
+        key: value for key, value in candidate.items() if key != "values"}
+    candidate_result["parameters"] = {
+        name: float(value)
+        for name, value in zip(case["names"], candidate["values"])}
+    reference, cache_info = _reference_levels(
+        case, candidate, grids, args, cache_dir)
+    candidate_result["methods"] = {}
+    for method in METHODS:
+        method_values = production[method]
+        record = _method_record(
+            case, method, method_values["conditional_ll"],
+            method_values["conditional_overflow"],
+            method_values["conditional_roots"], reference,
+            grids, cache_info, args)
+        record["root_capacity_overflow_node_count"] = int(
+            method_values["conditional_overflow_nodes"])
+        candidate_result["methods"][method] = record
+    if record_railing:
+        radius_fraction, phi_fraction = _railing_diagnostics(
+            case, candidate["values"])
+        candidate_result["railing"] = {
+            "radius_railed_fraction": radius_fraction,
+            "phi_railed_fraction": phi_fraction}
+    candidate_result["peak_minus_fixed_log_likelihood"] = (
+        candidate_result["methods"]["peak-partition"][
+            "test_total_log_likelihood"]
+        - candidate_result["methods"]["fixed-grid"][
+            "test_total_log_likelihood"])
+    candidate_result["passed"] = all(
+        value["passed"] for value in candidate_result["methods"].values())
+    return candidate_result
+
+
+def _classify_irrelevant(case, candidate, candidate_result, calibration):
+    """Label a fully-evaluated broad Sobol candidate posterior-irrelevant.
+
+    Sets ``irrelevant`` on ``candidate_result`` (and, when flagged, an
+    ``irrelevance`` dict).  Deltas use the finest-level reference total that
+    the full ladder already produced -- no separate coarse computation.
+    """
+    candidate_result["irrelevant"] = False
+    if candidate_result["source_kind"] != "sobol" or calibration is None:
+        return
+    delta_prod = _candidate_score(candidate_result) - (
+        calibration["anchor_score"])
+    delta_ref = (candidate_result["methods"]["fixed-grid"][
+        "reference_total_log_likelihood"]
+        - calibration["anchor_reference_total"])
+    radius_fraction, phi_fraction = _railing_diagnostics(
+        case, candidate["values"])
+    if _irrelevant_decision(
+            delta_prod, delta_ref, calibration["gate"],
+            radius_fraction >= RAILING_FRACTION_THRESHOLD,
+            phi_fraction >= RAILING_FRACTION_THRESHOLD):
+        candidate_result["irrelevant"] = True
+        candidate_result["irrelevance"] = {
+            "gate": calibration["gate"],
+            "anchor_score": calibration["anchor_score"],
+            "anchor_reference_total": calibration["anchor_reference_total"],
+            "delta_production": delta_prod,
+            "delta_reference": delta_ref,
+            "radius_railed_fraction": radius_fraction,
+            "phi_railed_fraction": phi_fraction,
+        }
+
+
+def _production_evaluator(case, method):
+    model = case["models"][method]
+    target = case["targets"][method]
+    names = case["names"]
+    dtype = (jnp.float64 if case["production_dtype"] == "float64"
+             else jnp.float32)
 
     def evaluate(values):
         values = jnp.asarray(values, dtype=dtype)
         theta = target.complete_params(de._flat_to_theta(values, names))
         phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
-        r_fixed, _, _, _ = model._closed_form_seeds(
-            phys_args[2], phys_args[3], phys_args[4], phys_args[16],
-            phys_args[8], phys_args[15])
-
-        fixed_groups = model._spot_groups_from_r(r_fixed)
-        fixed_ll = model._eval_phi_marginal(
-            fixed_groups, phys_args, phys_kw, spot_batch=target.spot_batch)
-        fixed_roots = jnp.zeros(model.n_spots, dtype=jnp.int32)
-        fixed_overflow = jnp.zeros(model.n_spots, dtype=bool)
-        for type_key, idx, r_group, _ in fixed_groups:
-            roots, overflow = _partition_diagnostics(
-                model, type_key, idx, r_group, phys_args, phys_kw,
-                target.spot_batch)
-            fixed_roots = fixed_roots.at[idx].set(roots.astype(jnp.int32))
-            fixed_overflow = fixed_overflow.at[idx].set(overflow)
-
-        groups, caches = model._build_conditional_r_grids(
+        reuse_scan = (method == "peak-partition"
+                      or (method == "fixed-grid" and not model.use_ecc))
+        built = model._build_conditional_r_grids(
             phys_args[2], phys_args[3], phys_args[4], phys_args[16],
             phys_args[8], phys_args[15], phys_args, phys_kw,
-            return_scan_cache=True)
+            return_scan_cache=reuse_scan)
+        if reuse_scan:
+            groups, caches = built
+        else:
+            groups, caches = built, [None] * len(built)
         conditional_ll = jnp.zeros(model.n_spots, dtype=dtype)
         conditional_roots = jnp.zeros(model.n_spots, dtype=jnp.int32)
         conditional_overflow = jnp.zeros(model.n_spots, dtype=bool)
         conditional_overflow_nodes = jnp.zeros((), dtype=jnp.int32)
-        r_conditional = jnp.zeros((model.n_spots, n_r), dtype=dtype)
-        log_w_conditional = jnp.zeros((model.n_spots, n_r), dtype=dtype)
 
         for group, cache in zip(groups, caches):
             type_key, idx, r_union, log_w_r = group
@@ -623,28 +945,20 @@ def _production_evaluator(case):
                 model._group_has_any_accel(type_key), phys_args, phys_kw,
                 (None if target.spot_batch is None else
                  min(int(target.spot_batch), int(idx.shape[0]))), cache)
-            roots, overflow_nodes = _partition_diagnostics(
-                model, type_key, idx, r_union, phys_args, phys_kw,
-                target.spot_batch)
-            any_overflow = jnp.any(overflow_nodes, axis=-1)
             conditional_ll = conditional_ll.at[idx].set(ll)
-            conditional_roots = conditional_roots.at[idx].set(
-                jnp.max(roots, axis=-1).astype(jnp.int32))
-            conditional_overflow = conditional_overflow.at[idx].set(
-                any_overflow)
-            conditional_overflow_nodes += jnp.sum(
-                overflow_nodes, dtype=jnp.int32)
-            r_conditional = r_conditional.at[idx].set(r_union)
-            log_w_conditional = log_w_conditional.at[idx].set(log_w_r)
+            if method == "peak-partition":
+                roots, overflow_nodes = _partition_diagnostics(
+                    model, type_key, idx, r_union, phys_args, phys_kw,
+                    target.spot_batch)
+                conditional_roots = conditional_roots.at[idx].set(
+                    jnp.max(roots, axis=-1).astype(jnp.int32))
+                conditional_overflow = conditional_overflow.at[idx].set(
+                    jnp.any(overflow_nodes, axis=-1))
+                conditional_overflow_nodes += jnp.sum(
+                    overflow_nodes, dtype=jnp.int32)
 
         return {
-            "fixed_ll": fixed_ll,
-            "fixed_r": r_fixed,
-            "fixed_roots": fixed_roots,
-            "fixed_overflow": fixed_overflow,
             "conditional_ll": conditional_ll,
-            "conditional_r": r_conditional,
-            "conditional_log_w_r": log_w_conditional,
             "conditional_roots": conditional_roots,
             "conditional_overflow": conditional_overflow,
             "conditional_overflow_nodes": conditional_overflow_nodes,
@@ -672,13 +986,14 @@ def _device_memory():
     return rows
 
 
-def _time_production(case, candidates, args):
+def _time_production(case, candidates, args, method):
     names, lo, hi = case["names"], case["lo"], case["hi"]
     dtype = (jnp.float64 if case["production_dtype"] == "float64"
              else jnp.float32)
     lo_j = jnp.asarray(lo, dtype=dtype)
     scale_j = jnp.asarray(hi - lo, dtype=dtype)
-    logp = de._make_logp(case["target"], names)
+    model = case["models"][method]
+    logp = de._make_logp(case["targets"][method], names)
 
     def fitness_one(unit):
         values = lo_j + jnp.asarray(unit, dtype=dtype) * scale_j
@@ -689,7 +1004,7 @@ def _time_production(case, candidates, args):
         raise ValueError(
             f"requested {args.n_devices} devices, found {len(devices)}")
     candidate_wave = de._de_candidates_per_wave(
-        case["model"], args.candidate_wave)
+        model, args.candidate_wave if method == "peak-partition" else None)
     batch_eval = de._make_batched_fitness(
         fitness_one, args.n_devices, devices,
         candidates_per_wave=candidate_wave)
@@ -723,18 +1038,54 @@ def _time_production(case, candidates, args):
     }
 
 
-def _reference_metadata(case, candidate, profile, levels, production,
-                        git_revision):
-    if profile == "fixed-r":
-        radial_hash = _array_sha256(production["fixed_r"])
-    else:
-        radial_hash = _array_sha256(
-            production["conditional_r"],
-            production["conditional_log_w_r"])
+def _timing_comparison(timing):
+    """Head-to-head speedup of peak-partition over fixed-grid."""
+    fixed = timing["fixed-grid"]
+    peak = timing["peak-partition"]
     return {
-        "schema": SCHEMA_VERSION,
+        "steady_speedup_peak_over_fixed": (
+            fixed["steady_evaluation_seconds"]
+            / peak["steady_evaluation_seconds"]),
+        "cold_speedup_peak_over_fixed": (
+            fixed["cold_compile_and_evaluate_seconds"]
+            / peak["cold_compile_and_evaluate_seconds"]),
+        "throughput_ratio_peak_over_fixed": (
+            peak["throughput_candidates_per_second"]
+            / fixed["throughput_candidates_per_second"]),
+    }
+
+
+def _time_candidates(case, candidates, args):
+    """Per-candidate seconds for the pure production objective, per method.
+
+    Times ``de._make_logp`` only -- NOT ``_production_evaluator``, whose
+    peak-partition path also runs root-counting diagnostics that would
+    unfairly inflate the peak column.  The pure logp is the number relevant
+    to DE throughput.  One warm evaluation compiles; each candidate is then
+    the median of ``timing_repeats`` evaluations.  Keyed by candidate id.
+    """
+    dtype = (jnp.float64 if case["production_dtype"] == "float64"
+             else jnp.float32)
+    seconds = {candidate["id"]: {} for candidate in candidates}
+    for method in METHODS:
+        logp = jax.jit(de._make_logp(case["targets"][method], case["names"]))
+        values = [jnp.asarray(candidate["values"], dtype=dtype)
+                  for candidate in candidates]
+        jax.block_until_ready(logp(values[0]))
+        for candidate, value in zip(candidates, values):
+            reps = []
+            for _ in range(args.timing_repeats):
+                start = time.perf_counter()
+                jax.block_until_ready(logp(value))
+                reps.append(time.perf_counter() - start)
+            seconds[candidate["id"]][method] = float(np.median(reps))
+    return seconds
+
+
+def _reference_metadata(case, candidate, grids, args):
+    return {
+        "schema": REFERENCE_CACHE_SCHEMA_VERSION,
         "policy": REFERENCE_POLICY,
-        "git_revision": git_revision,
         "source_hash": case["source_hash"],
         "jax_version": jax.__version__,
         "jaxlib_version": jaxlib.__version__,
@@ -742,21 +1093,16 @@ def _reference_metadata(case, candidate, profile, levels, production,
         "device_kinds": sorted({
             device.device_kind for device in jax.devices()}),
         "config_hash": case["config_hash"],
-        "objective_policy": de._objective_policy(case["model"]),
         "galaxy": case["galaxy"],
         "variant": case["variant"],
-        "profile": profile,
-        "phi_levels": list(levels),
+        "reference_grids": [
+            {"n_r": n_r, "n_phi": n_phi} for n_r, n_phi in grids],
+        "r_chunk": args.reference_r_chunk,
+        "spot_batch": args.reference_spot_batch,
         "dtype": "float64",
         "production_dtype": case["production_dtype"],
         "candidate_names": list(case["names"]),
         "candidate_values": candidate["values"].tolist(),
-        "radial_hash": radial_hash,
-        "radial_settings": {
-            "n_r_local": case["model"]._n_r_local,
-            "n_r_global": case["model"]._n_r_global,
-            "K_sigma": case["model"]._K_sigma,
-        },
     }
 
 
@@ -764,6 +1110,13 @@ def _load_reference_cache(cache_dir, metadata):
     key = reference_cache_key(metadata)
     path = cache_dir / f"{key}.npz"
     if not path.is_file():
+        return None, path
+    try:
+        age = time.time() - path.stat().st_mtime
+    except FileNotFoundError:
+        return None, path
+    if age >= REFERENCE_CACHE_TTL_SECONDS:
+        path.unlink(missing_ok=True)
         return None, path
     with np.load(path, allow_pickle=False) as cached:
         saved = str(np.asarray(cached["metadata"]).item())
@@ -783,55 +1136,79 @@ def _save_reference_cache(path, metadata, values):
     os.replace(tmp, path)
 
 
-def _reference_levels(case, candidate, profile, levels, production, args,
-                      cache_dir, git_revision):
-    metadata = _reference_metadata(
-        case, candidate, profile, levels, production, git_revision)
+def _clean_reference_cache(cache_dir):
+    if not cache_dir.is_dir():
+        return 0
+    paths = list(cache_dir.glob("*.npz"))
+    for path in paths:
+        path.unlink(missing_ok=True)
+    return len(paths)
+
+
+def _reference_cache_dir(args):
+    return args.cache_dir or Path(de.results_path(
+        de._MASTER_CFG["io"].get("root_output", "results/Megamaser"),
+        "convergence", "reference_cache"))
+
+
+def _reference_levels(case, candidate, grids, args, cache_dir):
+    metadata = _reference_metadata(case, candidate, grids, args)
     cache_path = None
     if not args.no_cache:
         cached, cache_path = _load_reference_cache(cache_dir, metadata)
         if cached is not None:
-            expected_shape = (len(levels), case["model"].n_spots)
+            expected_shape = (len(grids), case["model"].n_spots)
             if cached.shape != expected_shape:
                 raise RuntimeError(
                     f"reference cache shape {cached.shape} does not match "
                     f"{expected_shape}: {cache_path}")
+            age_hours = max(
+                0.0, (time.time() - cache_path.stat().st_mtime) / 3600.0)
+            print(
+                f"  Reference cache HIT {cache_path.stem[:12]} "
+                f"(age {age_hours:.2f} h): dense ladder skipped.",
+                flush=True)
             return cached, {
                 "cache_hit": True, "cache_key": cache_path.stem,
-                "cache_path": str(cache_path), "level_seconds": [],
+                "cache_path": str(cache_path),
+                "cache_age_hours": age_hours, "level_seconds": [],
             }
+
+    cache_key = reference_cache_key(metadata)
+    if args.no_cache:
+        print("  Reference cache disabled: computing dense ladder.",
+              flush=True)
+    else:
+        print(f"  Reference cache MISS {cache_key[:12]}: computing dense "
+              "ladder.", flush=True)
 
     values = jnp.asarray(candidate["values"], dtype=jnp.float64)
     theta = case["reference_target"].complete_params(
         de._flat_to_theta(values, case["names"]))
     phys_args, phys_kw = case["reference_model"].phys_from_params_jax(
         theta, case["reference_target"].h)
-    if profile == "fixed-r":
-        r_ang = production["fixed_r"]
-        log_w_r = None
-    else:
-        r_ang = production["conditional_r"]
-        log_w_r = production["conditional_log_w_r"]
-
     reference = []
     level_seconds = []
-    for level in levels:
+    for n_r, n_phi in grids:
+        print(f"    Dense reference {n_r}x{n_phi}...", end="", flush=True)
         start = time.perf_counter()
-        reference.append(dense_phi_reference_per_spot(
+        reference.append(dense_r_phi_reference_per_spot(
             case["reference_model"], phys_args, phys_kw,
-            r_ang, level, args.reference_spot_batch,
-            log_w_r=log_w_r, partition_support=True))
-        level_seconds.append(time.perf_counter() - start)
+            n_r, n_phi, args.reference_r_chunk,
+            args.reference_spot_batch, partition_support=True))
+        seconds = time.perf_counter() - start
+        level_seconds.append(seconds)
+        print(f" {seconds:.2f} s", flush=True)
     reference = np.stack(reference)
     if not args.no_cache:
         if cache_path is None:
-            cache_path = cache_dir / (
-                reference_cache_key(metadata) + ".npz")
+            cache_path = cache_dir / (cache_key + ".npz")
         _save_reference_cache(cache_path, metadata, reference)
     return reference, {
         "cache_hit": False,
-        "cache_key": reference_cache_key(metadata),
+        "cache_key": cache_key,
         "cache_path": None if args.no_cache else str(cache_path),
+        "cache_age_hours": None,
         "level_seconds": level_seconds,
     }
 
@@ -844,8 +1221,8 @@ def _population_labels(model):
     return labels
 
 
-def _profile_record(case, profile, test, overflow, roots, reference,
-                    levels, cache_info, args):
+def _method_record(case, method, test, overflow, roots, reference,
+                   grids, cache_info, args):
     criteria = {
         "total_atol": args.reference_total_atol,
         "spot_atol": args.reference_spot_atol,
@@ -854,11 +1231,11 @@ def _profile_record(case, profile, test, overflow, roots, reference,
     convergence = reference_convergence(
         reference, args.reference_tail_levels, criteria)
     labels = _population_labels(case["model"])
-    for previous_n, current_n, previous, current, row in zip(
-            levels, levels[1:], reference, reference[1:],
+    for previous_grid, current_grid, previous, current, row in zip(
+            grids, grids[1:], reference, reference[1:],
             convergence["comparisons"]):
-        row["previous_n_phi"] = int(previous_n)
-        row["current_n_phi"] = int(current_n)
+        row["previous_n_r"], row["previous_n_phi"] = previous_grid
+        row["current_n_r"], row["current_n_phi"] = current_grid
         row["previous_total_log_likelihood"] = float(np.sum(previous))
         row["current_total_log_likelihood"] = float(np.sum(current))
         row["spots"] = []
@@ -928,12 +1305,12 @@ def _profile_record(case, profile, test, overflow, roots, reference,
             "root_capacity_overflow": bool(overflow[index]),
         })
     return {
-        "profile": profile,
+        "method": method,
         "reference_levels": [
-            {"n_phi": level,
+            {"n_r": grid[0], "n_phi": grid[1],
              "total_log_likelihood": float(np.sum(values)),
              "finite_spots": int(np.count_nonzero(np.isfinite(values)))}
-            for level, values in zip(levels, reference)],
+            for grid, values in zip(grids, reference)],
         "reference_convergence": convergence,
         "reference_cache": cache_info,
         "test_total_log_likelihood": float(np.sum(test)),
@@ -949,14 +1326,30 @@ def _profile_record(case, profile, test, overflow, roots, reference,
     }
 
 
+def _add_pesce_deltas(case_result):
+    """Record tested log-likelihood differences relative to Pesce/Reid."""
+    pesce = next((candidate for candidate in case_result["candidates"]
+                  if candidate["source_kind"] == "pesce-reid"), None)
+    for candidate in case_result["candidates"]:
+        for method, result in candidate["methods"].items():
+            if pesce is None or method not in pesce["methods"]:
+                delta = None
+            else:
+                delta = (
+                    result["test_total_log_likelihood"]
+                    - pesce["methods"][method][
+                        "test_total_log_likelihood"])
+            result["delta_log_likelihood_vs_pesce"] = delta
+
+
 def _case_rankings(case_result, args):
-    labels = [candidate["id"] for candidate in case_result["candidates"]]
+    scored = [candidate for candidate in case_result["candidates"]
+              if not candidate.get("irrelevant")]
+    labels = [candidate["id"] for candidate in scored]
     rankings = {}
-    for profile in args.profiles:
-        levels = (args.fixed_phi_levels if profile == "fixed-r"
-                  else args.conditional_phi_levels)
-        records = [candidate["profiles"][profile]
-                   for candidate in case_result["candidates"]]
+    grids = _reference_grids(case_result["galaxy"], args)
+    for method in METHODS:
+        records = [candidate["methods"][method] for candidate in scored]
         level_totals = np.asarray([
             record["_reference_totals"] for record in records]).T
         consecutive = []
@@ -967,8 +1360,10 @@ def _case_rankings(case_result, args):
             consecutive.append({
                 "previous_level_index": index,
                 "current_level_index": index + 1,
-                "previous_n_phi": int(levels[index]),
-                "current_n_phi": int(levels[index + 1]),
+                "previous_n_r": int(grids[index][0]),
+                "previous_n_phi": int(grids[index][1]),
+                "current_n_r": int(grids[index + 1][0]),
+                "current_n_phi": int(grids[index + 1][1]),
                 "count": len(inversions),
                 "inversions": inversions,
             })
@@ -979,7 +1374,7 @@ def _case_rankings(case_result, args):
         reference_pass = all(
             row["count"] <= args.max_ranking_inversions for row in tail)
         test_pass = len(test_inversions) <= args.max_ranking_inversions
-        rankings[profile] = {
+        rankings[method] = {
             "reference_consecutive": consecutive,
             "reference_tail_inversion_count": sum(
                 row["count"] for row in tail),
@@ -996,12 +1391,14 @@ def _case_rankings(case_result, args):
 
 
 def _case_worst(case_result, limit=10):
+    scored = [candidate for candidate in case_result["candidates"]
+              if not candidate.get("irrelevant")]
     worst = {}
-    for profile in case_result["candidates"][0]["profiles"]:
+    for method in scored[0]["methods"]:
         candidates = []
         spots = []
-        for candidate in case_result["candidates"]:
-            record = candidate["profiles"][profile]
+        for candidate in scored:
+            record = candidate["methods"][method]
             comparison = record["comparison"]
             candidates.append((
                 comparison["finite_mask_mismatches"],
@@ -1020,7 +1417,7 @@ def _case_worst(case_result, limit=10):
                  else row["absolute_error"])),
             reverse=True)
         mismatches, value, candidate_id, source = candidates[0]
-        worst[profile] = {
+        worst[method] = {
             "candidate": candidate_id,
             "point_source": source,
             "finite_mask_mismatches": mismatches,
@@ -1044,13 +1441,16 @@ def _aggregate(report):
     grouped = defaultdict(list)
     for case in report["cases"]:
         for candidate in case["candidates"]:
-            for profile, result in candidate["profiles"].items():
+            for method, result in candidate["methods"].items():
                 key = (case["galaxy"], case["variant"],
-                       candidate["source_kind"], profile)
-                grouped[key].append(result)
+                       candidate["source_kind"], method)
+                grouped[key].append(
+                    (bool(candidate.get("irrelevant")), result))
     rows = []
     for key, values in sorted(grouped.items()):
-        comparisons = [value["comparison"] for value in values]
+        scored = [result for irrelevant, result in values if not irrelevant]
+        flagged = [result for irrelevant, result in values if irrelevant]
+        comparisons = [value["comparison"] for value in scored]
 
         def finite_max(field):
             entries = [row[field] for row in comparisons
@@ -1061,16 +1461,21 @@ def _aggregate(report):
             "galaxy": key[0],
             "variant": key[1],
             "point_source": key[2],
-            "profile": key[3],
+            "method": key[3],
             "candidate_count": len(values),
-            "passed": all(value["passed"] for value in values),
+            "irrelevant": len(flagged),
+            "passed": (all(value["passed"] for value in scored)
+                       if scored else None),
             "reference_unconverged": sum(
                 not value["reference_convergence"]["converged"]
-                for value in values),
+                for value in scored),
+            "unconverged_excused": sum(
+                not value["reference_convergence"]["converged"]
+                for value in flagged),
             "finite_mask_mismatches": sum(
                 row["finite_mask_mismatches"] for row in comparisons),
             "root_capacity_overflows": sum(
-                value["root_capacity_overflow_count"] for value in values),
+                value["root_capacity_overflow_count"] for value in scored),
             "worst_absolute_total_error": finite_max(
                 "absolute_total_error"),
             "worst_absolute_spot_error": finite_max(
@@ -1088,47 +1493,153 @@ def _fmt(value, precision=".3g"):
     return format(float(value), precision)
 
 
+def _paired(values, precision=".3g", separator=" | "):
+    def format_value(value):
+        if value is None:
+            return "n/a"
+        return str(value) if precision is None else _fmt(value, precision)
+
+    return separator.join(format_value(value) for value in values)
+
+
+def _first_relevant(case):
+    """First non-irrelevant candidate; anchors are ordered first and kept."""
+    return next(candidate for candidate in case["candidates"]
+                if not candidate.get("irrelevant"))
+
+
+def _count_irrelevant(report):
+    return sum(1 for case in report["cases"]
+               for candidate in case["candidates"]
+               if candidate.get("irrelevant"))
+
+
+def _conclusion(report):
+    verdict = "PASS" if report["passed"] else "FAIL"
+    n_irrelevant = _count_irrelevant(report)
+    if n_irrelevant:
+        verdict += (f" ({n_irrelevant} irrelevant: posterior-irrelevant "
+                    "geometry, excused)")
+    return verdict
+
+
+def _candidate_table_row(galaxy, variant, candidate, separator):
+    """One candidate row with real numbers; irrelevant rows carry a marker."""
+    source = candidate["source_kind"]
+    cid = candidate["id"] + (
+        " [IRRELEVANT]" if candidate.get("irrelevant") else "")
+    results = [candidate["methods"][method] for method in METHODS]
+    comparisons = [result["comparison"] for result in results]
+    seconds = candidate.get("production_seconds") or {}
+    return (
+        f"| {galaxy} | {variant} | {source} | {cid} | "
+        f"{_fmt(results[0]['reference_total_log_likelihood'], '.6g')} | "
+        f"{_paired([r['absolute_total_error'] for r in comparisons], separator=separator)} | "
+        f"{_paired([r['max_absolute_spot_error'] for r in comparisons], separator=separator)} | "
+        f"{_paired([seconds.get(method) for method in METHODS], '.3g', separator)} |")
+
+
 def _markdown(report):
     lines = [
-        "# Megamaser peak-partition validation", "",
-        f"**Conclusion: {'PASS' if report['passed'] else 'FAIL'}**", "",
+        "# Megamaser fixed-grid versus peak-partition validation", "",
+        f"**Conclusion: {_conclusion(report)}**", "",
         "## Candidate results", "",
-        "| Galaxy | Variant | Source | Candidate | Profile | Ref converged | "
-        "Test logL | Ref logL | abs total error | max spot | p99 spot | "
-        "RMS spot | mask mismatch | overflows | Pass |",
-        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "Errors are absolute log-likelihood differences. Paired values are "
+        "`fixed-grid | peak-partition` phi integration. Every candidate is "
+        "judged against the full dense reference ladder; rows marked "
+        "`[IRRELEVANT]` are "
+        "flagged posterior-irrelevant geometry, fully evaluated but excused "
+        "from the verdict. `eval s` is the per-candidate pure production "
+        "objective (one warm evaluation, median of `timing_repeats`); the "
+        "timing section reports the batched throughput. Exact fresh cache "
+        "hits load the complete dense ladder instead of recomputing it.",
+        "",
+        "| Galaxy | Variant | Source | Candidate | Finest reference logL | "
+        "abs total error (fixed \\| peak) | "
+        "worst spot error (fixed \\| peak) | eval s (fixed \\| peak) |",
+        "|---|---|---|---|---:|---:|---:|---:|",
     ]
     for case in report["cases"]:
         for candidate in case["candidates"]:
-            for profile, result in candidate["profiles"].items():
-                comparison = result["comparison"]
-                lines.append(
-                    f"| {case['galaxy']} | {case['variant']} | "
-                    f"{candidate['source_kind']} | {candidate['id']} | "
-                    f"{profile} | "
-                    f"{result['reference_convergence']['converged']} | "
-                    f"{_fmt(result['test_total_log_likelihood'], '.6g')} | "
-                    f"{_fmt(result['reference_total_log_likelihood'], '.6g')} | "
-                    f"{_fmt(comparison['absolute_total_error'])} | "
-                    f"{_fmt(comparison['max_absolute_spot_error'])} | "
-                    f"{_fmt(comparison['p99_absolute_spot_error'])} | "
-                    f"{_fmt(comparison['rms_spot_error'])} | "
-                    f"{comparison['finite_mask_mismatches']} | "
-                    f"{result['root_capacity_overflow_count']} | "
-                    f"{result['passed']} |")
+            lines.append(_candidate_table_row(
+                case["galaxy"], case["variant"], candidate, " \\| "))
+
+    flagged_rows = []
+    contrast_rows = []
+    for case in report["cases"]:
+        for candidate in case["candidates"]:
+            if candidate.get("irrelevant"):
+                flag = candidate["irrelevance"]
+                flagged_rows.append(
+                    f"- {case['galaxy']}/{case['variant']}/"
+                    f"{candidate['id']}: "
+                    f"delta_production={_fmt(flag['delta_production'])}, "
+                    f"delta_reference={_fmt(flag['delta_reference'])}, "
+                    f"radius railed={_fmt(flag['radius_railed_fraction'])}, "
+                    f"phi railed={_fmt(flag['phi_railed_fraction'])}")
+            elif candidate.get("railing"):
+                rail = candidate["railing"]
+                contrast_rows.append(
+                    f"- {case['galaxy']}/{case['variant']}/"
+                    f"{candidate['id']} ({candidate['source_kind']}): "
+                    f"radius railed={_fmt(rail['radius_railed_fraction'])}, "
+                    f"phi railed={_fmt(rail['phi_railed_fraction'])}")
+    if flagged_rows:
+        lines.extend(["", "**Flagged posterior-irrelevant:**", ""])
+        if contrast_rows:
+            lines.append("Anchor geometry for contrast (never flagged):")
+            lines.extend(contrast_rows)
+            lines.append("")
+        lines.append("Flagged candidates:")
+        lines.extend(flagged_rows)
+
+    unconverged = []
+    excused = []
+    overflows = []
+    for case in report["cases"]:
+        for candidate in case["candidates"]:
+            label = f"{case['galaxy']}/{case['variant']}/{candidate['id']}"
+            if not candidate["methods"]["fixed-grid"][
+                    "reference_convergence"]["converged"]:
+                (excused if candidate.get("irrelevant")
+                 else unconverged).append(label)
+            if candidate.get("irrelevant"):
+                continue
+            for method, result in candidate["methods"].items():
+                spots = result["root_capacity_overflow_count"]
+                nodes = result.get(
+                    "root_capacity_overflow_node_count", spots)
+                if spots or nodes:
+                    overflows.append(
+                        f"{label} ({method} phi integration): "
+                        f"{spots} spots, {nodes} radial nodes")
+    if unconverged:
+        lines.extend([
+            "", "**Reference not converged (FAIL):** "
+            + ", ".join(unconverged)])
+    if excused:
+        lines.extend([
+            "", "**Reference not converged (expected for needle geometry, "
+            "excused):** " + ", ".join(excused)])
+    if overflows:
+        lines.extend(["", "**Root-capacity overflows:**", ""])
+        lines.extend(f"- {row}" for row in overflows)
 
     lines.extend([
-        "", "## Aggregate by galaxy, variant, point source, and profile", "",
-        "| Galaxy | Variant | Source | Profile | N | Unconverged refs | "
+        "", "## Aggregate by galaxy, variant, point source, and phi integration", "",
+        "| Galaxy | Variant | Source | Phi integration | N | Irrelevant | "
+        "Unconverged refs | Unconverged excused | "
         "mask mismatch | overflows | worst abs total | worst spot | "
         "worst p99 | worst RMS | Pass |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for row in report["aggregate"]:
         lines.append(
             f"| {row['galaxy']} | {row['variant']} | "
-            f"{row['point_source']} | {row['profile']} | "
-            f"{row['candidate_count']} | {row['reference_unconverged']} | "
+            f"{row['point_source']} | {row['method']} | "
+            f"{row['candidate_count']} | {row['irrelevant']} | "
+            f"{row['reference_unconverged']} | "
+            f"{row['unconverged_excused']} | "
             f"{row['finite_mask_mismatches']} | "
             f"{row['root_capacity_overflows']} | "
             f"{_fmt(row['worst_absolute_total_error'])} | "
@@ -1138,42 +1649,44 @@ def _markdown(report):
 
     lines.extend([
         "", "## Reference convergence", "",
-        "| Galaxy | Variant | Candidate | Profile | n_phi | next n_phi | "
+        "| Galaxy | Variant | Candidate | n_r x n_phi | "
+        "next n_r x n_phi | "
         "abs total change | max spot | median | p95 | p99 | RMS | "
         "mask mismatch | Pass |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for case in report["cases"]:
         for candidate in case["candidates"]:
-            for profile, result in candidate["profiles"].items():
-                for row in result["reference_convergence"]["comparisons"]:
-                    lines.append(
-                        f"| {case['galaxy']} | {case['variant']} | "
-                        f"{candidate['id']} | {profile} | "
-                        f"{row['previous_n_phi']} | {row['current_n_phi']} | "
-                        f"{_fmt(row['absolute_total_error'])} | "
-                        f"{_fmt(row['max_absolute_spot_error'])} | "
-                        f"{_fmt(row['median_absolute_spot_error'])} | "
-                        f"{_fmt(row['p95_absolute_spot_error'])} | "
-                        f"{_fmt(row['p99_absolute_spot_error'])} | "
-                        f"{_fmt(row['rms_spot_error'])} | "
-                        f"{row['finite_mask_mismatches']} | "
-                        f"{row['passed']} |")
+            result = candidate["methods"]["fixed-grid"]
+            for row in result["reference_convergence"]["comparisons"]:
+                lines.append(
+                    f"| {case['galaxy']} | {case['variant']} | "
+                    f"{candidate['id']} | "
+                    f"{row['previous_n_r']} x {row['previous_n_phi']} | "
+                    f"{row['current_n_r']} x {row['current_n_phi']} | "
+                    f"{_fmt(row['absolute_total_error'])} | "
+                    f"{_fmt(row['max_absolute_spot_error'])} | "
+                    f"{_fmt(row['median_absolute_spot_error'])} | "
+                    f"{_fmt(row['p95_absolute_spot_error'])} | "
+                    f"{_fmt(row['p99_absolute_spot_error'])} | "
+                    f"{_fmt(row['rms_spot_error'])} | "
+                    f"{row['finite_mask_mismatches']} | "
+                    f"{row['passed']} |")
 
     lines.extend([
         "", "## Errors by spot population", "",
-        "| Galaxy | Variant | Candidate | Profile | Population | "
+        "| Galaxy | Variant | Candidate | Phi integration | Population | "
         "signed total | max spot | median | p95 | p99 | RMS | "
         "mask mismatch |",
         "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for case in report["cases"]:
         for candidate in case["candidates"]:
-            for profile, result in candidate["profiles"].items():
+            for method, result in candidate["methods"].items():
                 for population, row in result["errors_by_population"].items():
                     lines.append(
                         f"| {case['galaxy']} | {case['variant']} | "
-                        f"{candidate['id']} | {profile} | {population} | "
+                        f"{candidate['id']} | {method} | {population} | "
                         f"{_fmt(row['signed_total_error'])} | "
                         f"{_fmt(row['max_absolute_spot_error'])} | "
                         f"{_fmt(row['median_absolute_spot_error'])} | "
@@ -1184,30 +1697,31 @@ def _markdown(report):
 
     lines.extend([
         "", "## Rankings and worst spots", "",
-        "| Galaxy | Variant | Profile | Reference ranking inversions | "
+        "Rankings and worst spots exclude irrelevant candidates.", "",
+        "| Galaxy | Variant | Phi integration | Reference ranking inversions | "
         "test/reference inversions | Worst candidate | Worst spot error |",
         "|---|---|---|---:|---:|---|---:|",
     ])
     for case in report["cases"]:
-        for profile, ranking in case["rankings"].items():
+        for method, ranking in case["rankings"].items():
             reference_count = ranking["reference_tail_inversion_count"]
-            worst = case["worst"][profile]
+            worst = case["worst"][method]
             lines.append(
-                f"| {case['galaxy']} | {case['variant']} | {profile} | "
+                f"| {case['galaxy']} | {case['variant']} | {method} | "
                 f"{reference_count} | "
                 f"{ranking['test_vs_reference']['count']} | "
                 f"{worst['candidate']} | "
                 f"{_fmt(worst['max_absolute_spot_error'])} |")
     lines.extend([
-        "", "| Galaxy | Variant | Profile | Candidate | Spot | Population | "
+        "", "| Galaxy | Variant | Phi integration | Candidate | Spot | Population | "
         "signed error | absolute error | roots | overflow |",
         "|---|---|---|---|---:|---|---:|---:|---:|---:|",
     ])
     for case in report["cases"]:
-        for profile, worst in case["worst"].items():
+        for method, worst in case["worst"].items():
             for spot in worst["spots"]:
                 lines.append(
-                    f"| {case['galaxy']} | {case['variant']} | {profile} | "
+                    f"| {case['galaxy']} | {case['variant']} | {method} | "
                     f"{spot['candidate']} | {spot['spot']} | "
                     f"{spot['population']} | {_fmt(spot['signed_error'])} | "
                     f"{_fmt(spot['absolute_error'])} | "
@@ -1216,27 +1730,61 @@ def _markdown(report):
 
     lines.extend(["", "## Timing and memory", ""])
     for case in report["cases"]:
-        timing = case["timing"]
+        settings = case["numerical_settings"]
+        fixed_settings = settings["fixed-grid"]
+        peak_settings = settings["peak-partition"]
+        reference_grids = " -> ".join(
+            f"{level['n_r']} x {level['n_phi']}"
+            for level in _first_relevant(case)["methods"][
+                "fixed-grid"]["reference_levels"])
         lines.extend([
             f"### {case['galaxy']} / {case['variant']}", "",
             f"- Production dtype: `{case['production_dtype']}`",
+            f"- Configured phi integration: "
+            f"`{case['configured_phi_integration']}`",
+            "- Radius treatment: `conditional-r` only",
+            "- Validation methods: `fixed-grid`, `peak-partition`",
+            "- Explicit scheme-setting overrides: "
+            f"`{_canonical_json(case['scheme_setting_overrides'])}`",
+            "- Fixed-grid phi nodes: "
+            f"`{fixed_settings['n_phi_sys']}` per systemic sub-range; "
+            f"`{fixed_settings['n_phi_hv_high']}` in the high-velocity core "
+            f"and `{fixed_settings['n_phi_hv_low']}` per outer wing",
+            "- Peak-partition scan phi nodes: "
+            f"`{peak_settings['n_phi_partition_sys']}` systemic and "
+            f"`{peak_settings['n_phi_partition_hv']}` high velocity",
+            "- Conditional-r nodes: fixed-grid "
+            f"`{fixed_settings['n_r_local']}` local + "
+            f"`{fixed_settings['n_r_global']}` global; peak-partition "
+            f"`{peak_settings['n_r_local']}` local + "
+            f"`{peak_settings['n_r_global']}` global",
+            f"- Dense full-support r x phi grids: `{reference_grids}`",
             f"- Spot batch: `{case['spot_batch']}` "
             f"({case['spot_batch_source']})",
-            f"- Cold compile + evaluation: "
-            f"{timing['cold_compile_and_evaluate_seconds']:.3f} s",
-            f"- Estimated compile component: "
-            f"{timing['estimated_compile_seconds']:.3f} s",
-            f"- Warm steady evaluation: "
-            f"{timing['steady_evaluation_seconds']:.3f} s",
-            f"- Throughput: "
-            f"{timing['throughput_candidates_per_second']:.3f} candidates/s",
-            f"- Backend memory stats: `{_canonical_json(timing['memory'])}`",
-            f"- Backend memory after validation: "
-            f"`{_canonical_json(timing['memory_after_validation'])}`",
-            f"- Evaluator profile: "
-            f"`{_canonical_json(timing['device_profile'])}`",
-            "",
         ])
+        for method, timing in case["timing"].items():
+            lines.extend([
+                f"- `{method}` cold compile + evaluation: "
+                f"{timing['cold_compile_and_evaluate_seconds']:.3f} s",
+                f"- `{method}` estimated compile component: "
+                f"{timing['estimated_compile_seconds']:.3f} s",
+                f"- `{method}` warm steady evaluation: "
+                f"{timing['steady_evaluation_seconds']:.3f} s",
+                f"- `{method}` throughput: "
+                f"{timing['throughput_candidates_per_second']:.3f} "
+                "candidates/s",
+                f"- `{method}` backend memory stats: "
+                f"`{_canonical_json(timing['memory'])}`",
+                f"- `{method}` evaluator profile: "
+                f"`{_canonical_json(timing['device_profile'])}`",
+            ])
+        comparison = case["timing_comparison"]
+        lines.extend([
+            "- Peak-partition vs fixed-grid: steady speedup "
+            f"{comparison['steady_speedup_peak_over_fixed']:.2f}x, "
+            f"cold {comparison['cold_speedup_peak_over_fixed']:.2f}x",
+            "- Backend memory after validation: "
+            f"`{_canonical_json(case['memory_after_validation'])}`", ""])
 
     reproduction = {
         "run": report["metadata"],
@@ -1244,10 +1792,16 @@ def _markdown(report):
             "galaxy": case["galaxy"],
             "variant": case["variant"],
             "production_dtype": case["production_dtype"],
+            "configured_phi_integration": case[
+                "configured_phi_integration"],
+            "validated_phi_integrations": case[
+                "validated_phi_integrations"],
             "spot_batch": case["spot_batch"],
             "spot_batch_source": case["spot_batch_source"],
-            "objective_policy": case["objective_policy"],
+            "objective_policies": case["objective_policies"],
             "numerical_settings": case["numerical_settings"],
+            "scheme_setting_overrides": case[
+                "scheme_setting_overrides"],
             "model_configuration": case["model_configuration"],
             "parameter_names": case["parameter_names"],
             "de_bounds": case["de_bounds"],
@@ -1260,51 +1814,186 @@ def _markdown(report):
     return "\n".join(lines)
 
 
+def _print_reference_convergence(case):
+    """Console consecutive dense-grid convergence ladder (method-independent).
+
+    The fixed-grid record is canonical: the reference is the same for both
+    integrators, so ``_markdown`` reads it too.
+    """
+    print("\nReference convergence (consecutive dense-grid levels):",
+          flush=True)
+    header = (f"{'candidate':<20} {'grid pair':<26} {'ref logL':>14} "
+              f"{'abs total':>12} {'worst spot':>12} {'RMS':>11} {'pass':>6}")
+    print(header, flush=True)
+    print("-" * len(header), flush=True)
+    for candidate in case["candidates"]:
+        cid = candidate["id"] + (
+            " [IRR]" if candidate.get("irrelevant") else "")
+        for row in candidate["methods"]["fixed-grid"][
+                "reference_convergence"]["comparisons"]:
+            pair = (f"{row['previous_n_r']}x{row['previous_n_phi']} -> "
+                    f"{row['current_n_r']}x{row['current_n_phi']}")
+            print(
+                f"{cid:<20} {pair:<26} "
+                f"{_fmt(row['current_total_log_likelihood'], '.6g'):>14} "
+                f"{_fmt(row['absolute_total_error']):>12} "
+                f"{_fmt(row['max_absolute_spot_error']):>12} "
+                f"{_fmt(row['rms_spot_error']):>11} "
+                f"{str(row['passed']):>6}", flush=True)
+
+
 def _print_case(case):
     print("\n" + "=" * 88, flush=True)
     print(f"{case['galaxy']} / {case['variant']} / "
           f"{case['production_dtype']}", flush=True)
     print("=" * 88, flush=True)
+    print(
+        "Phi integration: configured="
+        f"{case['configured_phi_integration']}; comparing="
+        "fixed-grid vs peak-partition", flush=True)
+    print("Radius treatment: conditional-r only", flush=True)
+    print("Explicit scheme-setting overrides: "
+          f"{_canonical_json(case['scheme_setting_overrides'])}",
+          flush=True)
+    settings = case["numerical_settings"]
+    fixed_settings = settings["fixed-grid"]
+    peak_settings = settings["peak-partition"]
+    print(
+        "Fixed-grid phi nodes: "
+        f"{fixed_settings['n_phi_sys']} per systemic sub-range; "
+        f"{fixed_settings['n_phi_hv_high']} high-velocity core + "
+        f"{fixed_settings['n_phi_hv_low']} per outer wing", flush=True)
+    print(
+        "Peak-partition scan phi nodes: "
+        f"{peak_settings['n_phi_partition_sys']} (systemic), "
+        f"{peak_settings['n_phi_partition_hv']} (high velocity)", flush=True)
+    print(
+        "Conditional-r grids: fixed-grid="
+        f"{fixed_settings['n_r_local']}+{fixed_settings['n_r_global']}; "
+        "peak-partition="
+        f"{peak_settings['n_r_local']}+{peak_settings['n_r_global']} "
+        "(local+global radial nodes)", flush=True)
+    reference_grids = " -> ".join(
+        f"{level['n_r']}x{level['n_phi']}"
+        for level in _first_relevant(case)["methods"][
+            "fixed-grid"]["reference_levels"])
+    print("Dense full-support r x phi reference grids: "
+          f"{reference_grids}", flush=True)
+    calibration = case["gate_calibration"]
+    if calibration["enabled"]:
+        print(
+            "Irrelevance gate: enabled; "
+            f"gate={_fmt(calibration['gate'], '.6g')}, "
+            f"anchor score={_fmt(calibration['anchor_score'], '.6g')}, "
+            f"worst legit deficit={_fmt(calibration['worst_legit'])}",
+            flush=True)
+    else:
+        print(f"Irrelevance gate: disabled ({calibration['reason']})",
+              flush=True)
+    print(
+        "Paired values: fixed-grid | peak-partition phi integration",
+        flush=True)
+    print("Errors are absolute log-likelihood differences", flush=True)
     for message in case["candidate_status"]:
-        print(f"SKIP: {message}", flush=True)
-    timing = case["timing"]
-    print(f"Timing: cold={timing['cold_compile_and_evaluate_seconds']:.3f}s, "
-          f"steady={timing['steady_evaluation_seconds']:.3f}s, "
-          f"throughput={timing['throughput_candidates_per_second']:.3f} "
-          "candidate/s", flush=True)
-    header = (f"{'candidate':<20} {'profile':<14} {'ref':<5} "
-              f"{'abs total':>11} {'max spot':>11} {'p99':>11} "
-              f"{'mask':>5} {'overflow':>8} {'result':>7}")
+        print(f"NOTE: {message}", flush=True)
+    for method, timing in case["timing"].items():
+        print(f"Timing {method}: "
+              f"cold={timing['cold_compile_and_evaluate_seconds']:.3f}s, "
+              f"steady={timing['steady_evaluation_seconds']:.3f}s, "
+              f"throughput={timing['throughput_candidates_per_second']:.3f} "
+              "candidate/s", flush=True)
+    comparison = case["timing_comparison"]
+    print("Timing peak-partition vs fixed-grid: steady speedup "
+          f"{comparison['steady_speedup_peak_over_fixed']:.2f}x, "
+          f"cold {comparison['cold_speedup_peak_over_fixed']:.2f}x",
+          flush=True)
+    print("Per-candidate 'eval s' = pure production objective (one warm "
+          "evaluation, median repeats); case timing above is batched "
+          "throughput", flush=True)
+    print("", flush=True)
+    print("", flush=True)
+    header = (f"{'candidate':<20} {'reference logL':>16} "
+              f"{'abs total error fixed | peak':>30} "
+              f"{'worst spot error fixed | peak':>31} "
+              f"{'eval s fixed | peak':>22}")
     print(header, flush=True)
     print("-" * len(header), flush=True)
     for candidate in case["candidates"]:
-        for profile, result in candidate["profiles"].items():
-            comparison = result["comparison"]
-            print(
-                f"{candidate['id']:<20} {profile:<14} "
-                f"{str(result['reference_convergence']['converged']):<5} "
-                f"{_fmt(comparison['absolute_total_error']):>11} "
-                f"{_fmt(comparison['max_absolute_spot_error']):>11} "
-                f"{_fmt(comparison['p99_absolute_spot_error']):>11} "
-                f"{comparison['finite_mask_mismatches']:>5} "
-                f"{result['root_capacity_overflow_count']:>8} "
-                f"{'PASS' if result['passed'] else 'FAIL':>7}",
-                flush=True)
-    for profile, ranking in case["rankings"].items():
-        reference_inversions = ranking["reference_tail_inversion_count"]
-        worst = case["worst"][profile]
+        marker = " [IRR]" if candidate.get("irrelevant") else ""
+        results = [candidate["methods"][method] for method in METHODS]
+        comparisons = [result["comparison"] for result in results]
+        seconds = candidate.get("production_seconds") or {}
         print(
-            f"{profile}: reference ranking inversions="
-            f"{reference_inversions}, test/reference inversions="
-            f"{ranking['test_vs_reference']['count']}; worst="
-            f"{worst['candidate']} spot error="
-            f"{_fmt(worst['max_absolute_spot_error'])}", flush=True)
+            f"{candidate['id'] + marker:<20} "
+            f"{_fmt(results[0]['reference_total_log_likelihood'], '.6g'):>16} "
+            f"{_paired([r['absolute_total_error'] for r in comparisons]):>30} "
+            f"{_paired([r['max_absolute_spot_error'] for r in comparisons]):>31} "
+            f"{_paired([seconds.get(method) for method in METHODS], '.3g'):>22}",
+            flush=True)
+    _print_reference_convergence(case)
+    flagged = [candidate for candidate in case["candidates"]
+               if candidate.get("irrelevant")]
+    if flagged:
+        anchors = [candidate for candidate in case["candidates"]
+                   if candidate.get("railing") is not None]
+        if anchors:
+            contrast = ", ".join(
+                f"{candidate['id']} "
+                f"{_fmt(candidate['railing']['radius_railed_fraction'])}/"
+                f"{_fmt(candidate['railing']['phi_railed_fraction'])}"
+                for candidate in anchors)
+            print(f"Anchor railing contrast (radius/phi): {contrast}",
+                  flush=True)
+        print("\nFlagged posterior-irrelevant (fully evaluated, excused):",
+              flush=True)
+        for candidate in flagged:
+            flag = candidate["irrelevance"]
+            print(
+                f"  {candidate['id']}: "
+                f"delta_production={_fmt(flag['delta_production'])}, "
+                f"delta_reference={_fmt(flag['delta_reference'])}, "
+                f"radius railed={_fmt(flag['radius_railed_fraction'])}, "
+                f"phi railed={_fmt(flag['phi_railed_fraction'])}", flush=True)
+    unconverged = []
+    excused = []
+    for candidate in case["candidates"]:
+        if candidate["methods"]["fixed-grid"][
+                "reference_convergence"]["converged"]:
+            continue
+        (excused if candidate.get("irrelevant") else unconverged).append(
+            candidate["id"])
+    if unconverged:
+        print("\nWARNING: reference not converged (FAIL) for "
+              + ", ".join(unconverged), flush=True)
+    if excused:
+        print("Reference not converged (expected for needle geometry, "
+              "excused) for " + ", ".join(excused), flush=True)
+    overflow_rows = []
+    for candidate in case["candidates"]:
+        if candidate.get("irrelevant"):
+            continue
+        for method, result in candidate["methods"].items():
+            spots = result["root_capacity_overflow_count"]
+            nodes = result.get("root_capacity_overflow_node_count", spots)
+            if spots or nodes:
+                overflow_rows.append(
+                    f"{candidate['id']} ({method} phi integration): "
+                    f"{spots} spots, {nodes} radial nodes")
+    if overflow_rows:
+        print("\nRoot-capacity overflows:", flush=True)
+        for row in overflow_rows:
+            print(f"  {row}", flush=True)
 
 
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(raw_argv)
     _validate_args(args)
+    cache_dir = _reference_cache_dir(args)
+    if args.clean_cache:
+        count = _clean_reference_cache(cache_dir)
+        print(f"Removed {count} cached reference file(s) from {cache_dir}")
+        return 0
     if jax.default_backend() != "gpu" and not args.allow_cpu:
         raise SystemExit(
             f"GPU backend required; found {jax.default_backend()!r}. "
@@ -1319,9 +2008,6 @@ def main(argv=None):
     output_dir = args.output_dir or Path(de.results_path(
         de._MASTER_CFG["io"].get("root_output", "results/Megamaser"),
         "convergence", f"phi_partition_{stamp}"))
-    cache_dir = args.cache_dir or Path(de.results_path(
-        de._MASTER_CFG["io"].get("root_output", "results/Megamaser"),
-        "convergence", "reference_cache"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
     git = _git_metadata()
@@ -1335,21 +2021,40 @@ def main(argv=None):
         "config_path": str(de._CONFIG_PATH),
         "config_sha256": hashlib.sha256(
             Path(de._CONFIG_PATH).read_bytes()).hexdigest(),
-        "validator_source_sha256": _source_hash(),
+        "validator_source_sha256": _validator_source_hash(),
+        "reference_source_sha256": _source_hash(),
         "backend": jax.default_backend(),
         "jax_version": jax.__version__,
         "jaxlib_version": jaxlib.__version__,
         "devices": [str(device) for device in jax.devices()],
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "reference_policy": REFERENCE_POLICY,
-        "fixed_phi_levels": list(args.fixed_phi_levels),
-        "conditional_phi_levels": list(args.conditional_phi_levels),
+        "reference_r_levels": list(args.reference_r_levels),
+        "reference_phi_levels_override": (
+            None if args.reference_phi_levels is None
+            else list(args.reference_phi_levels)),
+        "reference_grids_by_galaxy": {
+            galaxy: [{"n_r": n_r, "n_phi": n_phi}
+                     for n_r, n_phi in _reference_grids(galaxy, args)]
+            for galaxy in args.galaxies
+        },
+        "reference_r_chunk": args.reference_r_chunk,
         "reference_spot_batch": args.reference_spot_batch,
+        "reference_cache_ttl_seconds": REFERENCE_CACHE_TTL_SECONDS,
         "sobol_seed": seed,
         "sobol_candidate_count": args.sobol_candidates,
         "local_sobol_per_anchor": args.local_sobol,
         "local_radius_de_unit_box": args.local_radius,
-        "profiles": args.profiles,
+        "radius_treatment": "conditional-r",
+        "methods": list(METHODS),
+        "scheme_setting_overrides": _scheme_overrides(
+            args.scheme_setting),
+        "irrelevance_policy": {
+            "gate_floor": GATE_FLOOR,
+            "gate_multiplier": GATE_MULTIPLIER,
+            "railing_fraction_threshold": RAILING_FRACTION_THRESHOLD,
+            "phi_edge_cells": PHI_EDGE_CELLS,
+        },
         "tolerances": {
             "reference_total_atol": args.reference_total_atol,
             "reference_spot_atol": args.reference_spot_atol,
@@ -1368,15 +2073,76 @@ def main(argv=None):
     for galaxy in args.galaxies:
         for variant in args.variants:
             case = _build_case(galaxy, variant, args, seed)
-            candidates, candidate_status = _candidate_rows(case, args, seed)
+            print(
+                f"Preparing {galaxy}/{variant}: configured phi integration="
+                f"{case['configured_phi_integration']}; comparing "
+                "fixed-grid vs peak-partition", flush=True)
+            candidates, candidate_status = _candidate_rows(
+                case, args, seed)
+            requested = args.sobol_candidates
+            grids = _reference_grids(galaxy, args)
+            settings = case["numerical_settings"]
+            fixed_settings = settings["fixed-grid"]
+            peak_settings = settings["peak-partition"]
+            source_counts = {}
+            for candidate in candidates:
+                kind = candidate["source_kind"]
+                source_counts[kind] = source_counts.get(kind, 0) + 1
+            source_summary = ", ".join(
+                f"{kind}={count}" for kind, count in source_counts.items())
+            print(
+                "Test: complete conditional-r likelihood; production "
+                "fixed-grid and peak-partition versus the same independent "
+                "float64 full-support r x phi reference", flush=True)
+            print(
+                "Production fixed-grid phi: "
+                f"systemic={fixed_settings['n_phi_sys']} per sub-range, "
+                f"HV core={fixed_settings['n_phi_hv_high']}, "
+                f"HV wing={fixed_settings['n_phi_hv_low']}", flush=True)
+            print(
+                "Production peak scan phi: "
+                f"systemic={peak_settings['n_phi_partition_sys']}, "
+                f"HV={peak_settings['n_phi_partition_hv']}", flush=True)
+            print(
+                "Production conditional-r grids: fixed-grid="
+                f"{fixed_settings['n_r_local']}+"
+                f"{fixed_settings['n_r_global']}; peak-partition="
+                f"{peak_settings['n_r_local']}+"
+                f"{peak_settings['n_r_global']} (local+global)", flush=True)
+            print(
+                "Reference r x phi grids: "
+                + " -> ".join(f"{n_r}x{n_phi}" for n_r, n_phi in grids)
+                + f"; r_chunk={args.reference_r_chunk}, "
+                f"spot_batch={args.reference_spot_batch}", flush=True)
+            print(
+                f"Candidates: {len(candidates)} total ({source_summary}); "
+                "each requires the full reference ladder (fresh exact cache "
+                "hits load it)", flush=True)
+            if any(case["scheme_setting_overrides"].values()):
+                print("Scheme-setting overrides: "
+                      f"{_canonical_json(case['scheme_setting_overrides'])}",
+                      flush=True)
+            print(
+                f"Timing both production methods over "
+                f"{len(candidates)} candidates...", flush=True)
             case_result = {
                 "galaxy": galaxy,
                 "variant": variant,
                 "production_dtype": case["production_dtype"],
+                "configured_phi_integration": case[
+                    "configured_phi_integration"],
+                "validated_phi_integrations": case[
+                    "validated_phi_integrations"],
+                "radius_treatment": "conditional-r",
                 "spot_batch": case["spot_batch"],
                 "spot_batch_source": case["spot_batch_source"],
-                "objective_policy": de._objective_policy(case["model"]),
+                "objective_policies": {
+                    method: de._objective_policy(case["models"][method])
+                    for method in METHODS
+                },
                 "numerical_settings": case["numerical_settings"],
+                "scheme_setting_overrides": case[
+                    "scheme_setting_overrides"],
                 "model_configuration": {
                     "defaults": {
                         key: value
@@ -1391,59 +2157,68 @@ def main(argv=None):
                     name: [float(lo), float(hi)]
                     for name, lo, hi in zip(
                         case["names"], case["lo"], case["hi"])},
-                "timing": _time_production(case, candidates, args),
+                "timing": {
+                    method: _time_production(
+                        case, candidates, args, method)
+                    for method in METHODS
+                },
                 "candidates": [],
                 "passed": True,
             }
-            evaluator = _production_evaluator(case)
-            for candidate in candidates:
-                print(f"Evaluating {galaxy}/{variant}/"
-                      f"{candidate['id']}...", flush=True)
-                production = _evaluate_production(
-                    evaluator, candidate["values"])
-                candidate_result = {
-                    key: value for key, value in candidate.items()
-                    if key != "values"
+            case_result["timing_comparison"] = _timing_comparison(
+                case_result["timing"])
+            candidate_seconds = _time_candidates(case, candidates, args)
+            evaluators = {
+                method: _production_evaluator(case, method)
+                for method in METHODS
+            }
+
+            # Every candidate is judged against the full dense ladder; exact
+            # fresh cache hits load those arrays instead of recomputing them.
+            for candidate_index, candidate in enumerate(candidates, start=1):
+                print(f"Evaluating {galaxy}/{variant}/{candidate['id']} "
+                      f"[{candidate_index}/{len(candidates)}]...", flush=True)
+                production = {
+                    method: _evaluate_production(
+                        evaluators[method], candidate["values"])
+                    for method in METHODS
                 }
-                candidate_result["parameters"] = {
-                    name: float(value) for name, value in zip(
-                        case["names"], candidate["values"])}
-                candidate_result["profiles"] = {}
-                if "fixed-r" in args.profiles:
-                    levels = args.fixed_phi_levels
-                    reference, cache_info = _reference_levels(
-                        case, candidate, "fixed-r", levels, production,
-                        args, cache_dir, git["revision"])
-                    candidate_result["profiles"]["fixed-r"] = (
-                        _profile_record(
-                            case, "fixed-r", production["fixed_ll"],
-                            production["fixed_overflow"],
-                            production["fixed_roots"], reference, levels,
-                            cache_info, args))
-                if "conditional-r" in args.profiles:
-                    levels = args.conditional_phi_levels
-                    reference, cache_info = _reference_levels(
-                        case, candidate, "conditional-r", levels,
-                        production, args, cache_dir, git["revision"])
-                    record = _profile_record(
-                        case, "conditional-r",
-                        production["conditional_ll"],
-                        production["conditional_overflow"],
-                        production["conditional_roots"], reference, levels,
-                        cache_info, args)
-                    record["root_capacity_overflow_node_count"] = int(
-                        production["conditional_overflow_nodes"])
-                    candidate_result["profiles"]["conditional-r"] = record
-                candidate_result["passed"] = all(
-                    value["passed"] for value
-                    in candidate_result["profiles"].values())
-                case_result["passed"] &= candidate_result["passed"]
+                candidate_result = _full_result(
+                    case, candidate, production, grids, args, cache_dir,
+                    record_railing=(candidate["source_kind"]
+                                    in ("config", "pesce-reid")))
+                candidate_result["production_seconds"] = candidate_seconds[
+                    candidate["id"]]
                 case_result["candidates"].append(candidate_result)
 
+            # Post-processing classifier: flag posterior-irrelevant needles so
+            # their failures are excused, without ever skipping their ladder.
+            calibration = None
+            if requested > 0:
+                calibration = _calibrate_gate([
+                    cr for cr in case_result["candidates"]
+                    if cr["source_kind"] != "sobol"])
+            if requested == 0:
+                case_result["gate_calibration"] = {
+                    "enabled": False, "reason": "no broad Sobol candidates"}
+            elif calibration is None:
+                case_result["gate_calibration"] = {
+                    "enabled": False,
+                    "reason": "no converged anchor reference"}
+            else:
+                case_result["gate_calibration"] = {
+                    "enabled": True, **calibration}
+
+            for candidate, candidate_result in zip(
+                    candidates, case_result["candidates"]):
+                _classify_irrelevant(
+                    case, candidate, candidate_result, calibration)
+            case_result["passed"] = _relevant_pass(case_result["candidates"])
+
+            _add_pesce_deltas(case_result)
             _case_rankings(case_result, args)
             _case_worst(case_result)
-            case_result["timing"]["memory_after_validation"] = (
-                _device_memory())
+            case_result["memory_after_validation"] = _device_memory()
             _print_case(case_result)
             report["passed"] &= case_result["passed"]
             report["cases"].append(case_result)
@@ -1458,7 +2233,7 @@ def main(argv=None):
     markdown_path.write_text(_markdown(clean_report))
 
     print("\n" + "=" * 88, flush=True)
-    print(f"OVERALL: {'PASS' if report['passed'] else 'FAIL'}", flush=True)
+    print(f"OVERALL: {_conclusion(report)}", flush=True)
     print(f"JSON: {json_path}", flush=True)
     print(f"Markdown: {markdown_path}", flush=True)
     return 0 if report["passed"] else 1
