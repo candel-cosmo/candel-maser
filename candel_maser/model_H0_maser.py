@@ -1318,7 +1318,8 @@ class MaserDiskModel(ModelBase):
         residual-stable predict/chi² path. `sin2/cos2/sincos` are the
         precomputed φ-basis; computed inline if omitted.
         """
-        if r_pre["ecc2"] is None and jax.config.jax_enable_x64:
+        if (r_pre["ecc2"] is None
+                and r_pre["r_ang"].dtype == jnp.float64):
             if sin2 is None:
                 sin2 = sin_phi * sin_phi
                 cos2 = cos_phi * cos_phi

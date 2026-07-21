@@ -89,7 +89,6 @@ from scipy.stats.qmc import Sobol  # noqa: E402
 from tqdm import trange  # noqa: E402
 
 from candel.inference.optimise import _prior_bounds  # noqa: E402
-from candel.inference.optimise import _reflect_bounds  # noqa: E402,E501
 from candel.inference.optimise import _select_distinct  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
@@ -747,6 +746,9 @@ def _make_batched_fitness(fitness_one, n_dev, devices,
 
 _ARCHIVE_FINGERPRINT_VERSION = "blake2b64-v1"
 _ARCHIVE_FINGERPRINT_BATCH = 10_000
+# Buffered exact-value rows are flushed to SQLite in one commit at each
+# checkpoint. The cap bounds RAM during the one-off Sobol screen.
+_ARCHIVE_WRITE_BUFFER_ROWS = 65_536
 
 
 class _ExactArchive:
@@ -832,6 +834,10 @@ class _ExactArchive:
         self.index_load_seconds = time.perf_counter() - t0
         self.hits = 0
         self.evaluations = 0
+        # Buffered (key -> fitness) rows and their fingerprints, committed on
+        # flush(). Lookups consult this buffer before touching SQL.
+        self._pending = {}
+        self._pending_fingerprints = []
         self.reset_timing()
 
     @staticmethod
@@ -857,12 +863,20 @@ class _ExactArchive:
                 continue
             pending[key] = [i]
 
+        # A fingerprint hit may reference a buffered, not-yet-written row, so
+        # the RAM buffer is consulted before issuing any SQL SELECT.
         possible_hits = [
             key for key in pending
             if self._fingerprint(key) in self._known_fingerprints]
         cached = {}
-        for start in range(0, len(possible_hits), 512):
-            keys = possible_hits[start:start + 512]
+        sql_hits = []
+        for key in possible_hits:
+            if key in self._pending:
+                cached[key] = self._pending[key]
+            else:
+                sql_hits.append(key)
+        for start in range(0, len(sql_hits), 512):
+            keys = sql_hits[start:start + 512]
             placeholders = ",".join("?" for _ in keys)
             rows = self.connection.execute(
                 "SELECT point, fitness FROM evaluations WHERE point IN ("
@@ -879,7 +893,7 @@ class _ExactArchive:
                 missing.append(indices[0])
         self.lookup_seconds += time.perf_counter() - lookup_start
         self.lookup_keys += len(pending)
-        self.lookup_queries += ((len(possible_hits) + 511) // 512)
+        self.lookup_queries += ((len(sql_hits) + 511) // 512)
 
         if missing:
             evaluation_start = time.perf_counter()
@@ -892,20 +906,33 @@ class _ExactArchive:
                 indices = pending[key]
                 out[indices] = value
             write_start = time.perf_counter()
-            self.connection.executemany(
-                "INSERT INTO evaluations VALUES (?, ?)",
-                [(key, float(value))
-                 for key, value in zip(missing_keys, values)])
-            fingerprints = [
+            new_fingerprints = [
                 self._fingerprint(key) for key in missing_keys]
-            self.connection.executemany(
-                "INSERT OR IGNORE INTO evaluation_fingerprints VALUES (?)",
-                [(fingerprint,) for fingerprint in fingerprints])
-            self.connection.commit()
-            self._known_fingerprints.update(fingerprints)
+            for key, value in zip(missing_keys, values):
+                self._pending[key] = float(value)
+            self._pending_fingerprints.extend(new_fingerprints)
+            self._known_fingerprints.update(new_fingerprints)
             self.write_seconds += time.perf_counter() - write_start
             self.evaluations += len(missing)
-        return jnp.asarray(out)
+            if len(self._pending) > _ARCHIVE_WRITE_BUFFER_ROWS:
+                self.flush()
+        return out
+
+    def flush(self):
+        """Commit buffered rows in one transaction and clear the buffer."""
+        if not self._pending:
+            return
+        write_start = time.perf_counter()
+        self.connection.executemany(
+            "INSERT INTO evaluations VALUES (?, ?)",
+            list(self._pending.items()))
+        self.connection.executemany(
+            "INSERT OR IGNORE INTO evaluation_fingerprints VALUES (?)",
+            [(fingerprint,) for fingerprint in self._pending_fingerprints])
+        self.connection.commit()
+        self._pending.clear()
+        self._pending_fingerprints.clear()
+        self.write_seconds += time.perf_counter() - write_start
 
     def reset_timing(self):
         """Reset per-optimisation-phase timing without changing counters."""
@@ -916,11 +943,45 @@ class _ExactArchive:
         self.lookup_queries = 0
 
     def count(self):
+        self.flush()
         return int(self.connection.execute(
             "SELECT COUNT(*) FROM evaluations").fetchone()[0])
 
     def close(self):
+        self.flush()
         self.connection.close()
+
+
+def _lshade_draw_indices(order, n_pbest, n, n_union, rng):
+    """Vectorised pbest/r1/r2 index draws for a whole L-SHADE population.
+
+    ``pbest[i]`` is uniform over ``order[:n_pbest]`` excluding ``i``; ``r1[i]``
+    uniform over ``[0, n)`` excluding ``{i, pbest[i]}``; ``r2[i]`` uniform over
+    ``[0, n_union)`` excluding ``{i, pbest[i], r1[i]}``.  Each forbidden set is
+    per-member; the constraints are enforced by masked rejection (redraw only
+    the offending members), which terminates fast in expectation.
+    """
+    idx = np.arange(n)
+    pool = order[:n_pbest]
+    pbest = pool[rng.integers(n_pbest, size=n)]
+    bad = pbest == idx
+    while np.any(bad):
+        sub = np.flatnonzero(bad)
+        pbest[sub] = pool[rng.integers(n_pbest, size=sub.size)]
+        bad = pbest == idx
+    r1 = rng.integers(n, size=n)
+    bad = (r1 == idx) | (r1 == pbest)
+    while np.any(bad):
+        sub = np.flatnonzero(bad)
+        r1[sub] = rng.integers(n, size=sub.size)
+        bad = (r1 == idx) | (r1 == pbest)
+    r2 = rng.integers(n_union, size=n)
+    bad = (r2 == idx) | (r2 == pbest) | (r2 == r1)
+    while np.any(bad):
+        sub = np.flatnonzero(bad)
+        r2[sub] = rng.integers(n_union, size=sub.size)
+        bad = (r2 == idx) | (r2 == pbest) | (r2 == r1)
+    return pbest, r1, r2
 
 
 def _lshade_trials(population, fitness, mutation_archive, m_f, m_cr, rng,
@@ -934,33 +995,39 @@ def _lshade_trials(population, fitness, mutation_archive, m_f, m_cr, rng,
     union = np.vstack([pop, archive]) if archive.size else pop
     order = np.argsort(fitness)
     n_pbest = max(2, min(n, int(np.ceil(pbest_fraction * n))))
-    memory_slots = rng.integers(len(m_f), size=n)
+    slot = rng.integers(len(m_f), size=n)
+
+    # F: Cauchy proposal per member, redrawing only non-positive draws
+    # (masked rejection), then clipped at 1.
     f = np.empty(n)
-    cr = np.empty(n)
+    bad = np.ones(n, dtype=bool)
+    while np.any(bad):
+        sub = np.flatnonzero(bad)
+        proposal = (m_f[slot[sub]]
+                    + 0.1 * np.tan(np.pi * (rng.random(sub.size) - 0.5)))
+        ok = proposal > 0.0
+        f[sub[ok]] = proposal[ok]
+        bad[sub[ok]] = False
+    np.minimum(f, 1.0, out=f)
+
+    # CR: Gaussian around the memory value, zeroed where the slot is inactive.
+    cr = np.clip(rng.normal(m_cr[slot], 0.1), 0.0, 1.0)
+    cr[m_cr[slot] < 0.0] = 0.0
+
+    pbest, r1, r2 = _lshade_draw_indices(order, n_pbest, n, len(union), rng)
+
+    # Truncate the mutant to the population dtype before reflection, matching
+    # the historical row-wise ``np.empty_like`` assignment.
     mutants = np.empty_like(pop)
+    mutants[:] = (pop + f[:, None] * (pop[pbest] - pop)
+                  + f[:, None] * (pop[r1] - union[r2]))
 
-    def draw_index(limit, forbidden):
-        while True:
-            value = int(rng.integers(limit))
-            if value not in forbidden:
-                return value
-
-    for i, slot in enumerate(memory_slots):
-        value = -1.0
-        while value <= 0.0:
-            value = m_f[slot] + 0.1 * np.tan(np.pi * (rng.random() - 0.5))
-        f[i] = min(value, 1.0)
-        cr[i] = (0.0 if m_cr[slot] < 0.0 else
-                 np.clip(rng.normal(m_cr[slot], 0.1), 0.0, 1.0))
-        pbest_pool = order[:n_pbest]
-        pbest_pool = pbest_pool[pbest_pool != i]
-        pbest = int(rng.choice(pbest_pool))
-        r1 = draw_index(n, {i, pbest})
-        r2 = draw_index(len(union), {i, pbest, r1})
-        mutants[i] = (pop[i] + f[i] * (pop[pbest] - pop[i])
-                      + f[i] * (pop[r1] - union[r2]))
-
-    mutants = np.asarray(_reflect_bounds(jnp.asarray(mutants)))
+    # Triangle-wave fold of out-of-bounds values back into [0, 1], in the
+    # population dtype (matches candel.inference.optimise._reflect_bounds).
+    mutants = np.abs(mutants)
+    cycle = np.floor(mutants).astype(np.int32)
+    frac = mutants - np.floor(mutants)
+    mutants = np.where(cycle % 2 == 0, frac, 1.0 - frac)
     cross = rng.random((n, dimension)) < cr[:, None]
     cross[np.arange(n), rng.integers(dimension, size=n)] = True
     return np.where(cross, mutants, pop), f, cr
@@ -1239,6 +1306,17 @@ def _load_de_checkpoint(path, lo, hi, names, sizes):
         raise ValueError("Checkpoint bounds do not match current model.")
     if list(d["names"]) != list(names) or list(d["sizes"]) != list(sizes):
         raise ValueError("Checkpoint parameter layout does not match.")
+    expected_dtype = np.dtype(
+        np.float64 if jax.config.jax_enable_x64 else np.float32)
+    state_dtypes = {
+        key: np.dtype(d[key].dtype) for key in ("population", "fitness")}
+    if any(dtype != expected_dtype for dtype in state_dtypes.values()):
+        saved = ", ".join(
+            f"{key}={dtype.name}" for key, dtype in state_dtypes.items())
+        raise ValueError(
+            f"Checkpoint DE-state precision ({saved}) does not match the "
+            f"current {expected_dtype.name} run; resume with the matching "
+            "--f64 setting or start a fresh run.")
     return d
 
 
@@ -1447,8 +1525,13 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         archive_path, D, resume=resume_path is not None,
         objective_policy=objective_policy)
 
+    # Reproduce the archive's historical device-transfer downcast: the SQLite
+    # cache holds float64, but x64-disabled runs consumed it as float32.
+    host_dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+
     def exact_eval(points, desc=None):
-        return exact_archive(batch_eval, points, desc=desc)
+        return np.asarray(
+            exact_archive(batch_eval, points, desc=desc), dtype=host_dtype)
 
     t0 = time.time()
     reference_logp = None
@@ -1495,14 +1578,14 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
                "was not inserted into the initial population.")
 
     if resume_path is not None:
-        key = jnp.asarray(ckpt["key"])
+        key = np.asarray(ckpt["key"])
         gen_start = int(ckpt["generation_counter"])
         gens_without_improvement = int(ckpt["gens_without_improvement"])
         best_logp_so_far = float(ckpt["best_logp_so_far"])
-        population = jnp.asarray(ckpt["population"])
-        fitness = jnp.asarray(ckpt["fitness"])
-        best_solution = jnp.asarray(ckpt["best_solution"])
-        best_fitness = jnp.asarray(ckpt["best_fitness"])
+        population = np.asarray(ckpt["population"])
+        fitness = np.asarray(ckpt["fitness"])
+        best_solution = np.asarray(ckpt["best_solution"])
+        best_fitness = np.asarray(ckpt["best_fitness"])
         initial_pop_size = int(
             ckpt["initial_pop_size"] if "initial_pop_size" in ckpt.files
             else len(population))
@@ -1536,6 +1619,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         population, fitness = _make_de_initial_population(
             exact_eval, lo, hi, pop_size, seed, N_sobol,
             min_dist_frac, seed_points=seed_points)
+        population = np.asarray(population)
+        fitness = np.asarray(fitness)
         key = jax.random.PRNGKey(seed)
         initial_pop_size = pop_size
         best_idx = int(np.argmin(np.asarray(fitness)))
@@ -1653,38 +1738,36 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         phase_start = time.perf_counter()
         trials, trial_f, trial_cr = _lshade_trials(
             population, fitness, mutation_archive, m_f, m_cr, rng)
-        trials = jnp.asarray(trials)
         phase_timing["trials"] += time.perf_counter() - phase_start
 
         trial_fitness = exact_eval(trials)
-        jax.block_until_ready(trial_fitness)
         phase_start = time.perf_counter()
         de_evaluations += current_size
-        improved = np.asarray(trial_fitness) < np.asarray(fitness)
+        improved = trial_fitness < fitness
         if np.any(improved):
-            old_fitness = np.asarray(fitness)
+            old_fitness = fitness
             mutation_archive = _append_mutation_archive(
-                mutation_archive, np.asarray(population)[improved],
+                mutation_archive, population[improved],
                 current_size, rng)
             memory_index = _update_lshade_memory(
                 m_f, m_cr, memory_index, trial_f[improved],
                 trial_cr[improved],
-                old_fitness[improved] - np.asarray(trial_fitness)[improved])
-        population = jnp.where(improved[:, None], trials, population)
-        fitness = jnp.where(improved, trial_fitness, fitness)
+                old_fitness[improved] - trial_fitness[improved])
+        population = np.where(improved[:, None], trials, population)
+        fitness = np.where(improved, trial_fitness, fitness)
 
         target_size = _linear_population_size(
             initial_pop_size, min_pop_size, de_evaluations,
             reduction_evaluations)
         if target_size < len(population):
-            keep = np.argsort(np.asarray(fitness))[:target_size]
+            keep = np.argsort(fitness)[:target_size]
             population = population[keep]
             fitness = fitness[keep]
             if len(mutation_archive) > target_size:
                 mutation_archive = mutation_archive[rng.choice(
                     len(mutation_archive), target_size, replace=False)]
 
-        gen_best_idx = int(np.argmin(np.asarray(fitness)))
+        gen_best_idx = int(np.argmin(fitness))
         gen_best_fitness = fitness[gen_best_idx]
         if float(gen_best_fitness) < float(best_fitness):
             best_fitness = gen_best_fitness
@@ -1711,6 +1794,9 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
 
         if (checkpoint_path is not None
                 and time.time() - last_ckpt >= checkpoint_interval):
+            # Commit buffered exact values so the archive is never staler than
+            # the checkpoint it serves on resume.
+            exact_archive.flush()
             phase_start = time.perf_counter()
             _save_de_checkpoint(
                 checkpoint_path, population, fitness, best_solution,
@@ -1727,6 +1813,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             break
 
     if checkpoint_path is not None:
+        exact_archive.flush()
         phase_start = time.perf_counter()
         _save_de_checkpoint(
             checkpoint_path, population, fitness, best_solution,
@@ -1739,7 +1826,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
            f"{exact_archive.hits} cache hits")
     exact_archive.close()
 
-    x_best = np.asarray(lo + best_solution * scale)
+    x_best = np.asarray(lo + jnp.asarray(best_solution) * scale)
     params_best = _flat_to_theta(jnp.asarray(x_best), names)
     params_best.update(fixed)
     theta = target.complete_params(params_best)

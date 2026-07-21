@@ -217,6 +217,64 @@ the per-galaxy config remain authoritative. To compare candidate concurrency
 on a particular GPU, rerun with `--peak-candidates-per-wave 2`, `4`, and `8`
 and compare the steady Sobol `cand/s`; 8 remains the default.
 
+### Peak-partition validation
+
+`convergence/validate_phi_partition.py` is the acceptance suite for the
+peak-partition integrator. It constructs the production DE target, parameter
+layout, constrained bounds, variant-specific configured point, and Pesce/Reid
+point through `run_de_map.py`; it does not implement a second physical
+likelihood. Scrambled Sobol candidates use the same DE box. Optional local
+Sobol clouds are reflected inside that box.
+
+For each candidate, the suite first checks a sequence of float64 dense
+fixed-grid references on the exact peak-partition half-plane support and only
+compares peak-partition with the finest level when the requested
+consecutive-level gates are satisfied. It tests both a
+fixed-radius phi marginal and the complete conditional-radius marginal on the
+exact radial nodes and weights built by production, so only the phi treatment
+changes. Production uses the configured galaxy precision; NGC4258 remains
+forced to float64.
+
+Submit a lightweight NGC6323 GPU smoke test:
+
+```bash
+bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu -- \
+    --galaxies NGC6323 --variants circular \
+    --sobol-candidates 0 --no-pesce-point \
+    --fixed-phi-levels 20001,40001,80001 \
+    --conditional-phi-levels 10001,20001,40001 \
+    --reference-spot-batch 2 --timing-repeats 2
+```
+
+Then exercise the forced-float64 eccentric NGC4258 path with a reduced
+candidate set:
+
+```bash
+bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu \
+    --mem 32 -- \
+    --galaxies NGC4258 --variants eccentric --sobol-candidates 0 \
+    --fixed-phi-levels 30001,60001,120001 \
+    --conditional-phi-levels 15001,30001,60001 \
+    --spot-batch 4 --reference-spot-batch 1 \
+    --candidate-wave 2 --timing-repeats 2
+```
+
+A broader acceptance run can add Sobol and local candidates, for example
+`--sobol-candidates 16 --local-sobol 4`. Accuracy, ranking, overflow, and
+reference-convergence tolerances are explicit command-line options shown by
+`--help`. Any unconverged reference, finite-mask mismatch, excessive per-spot
+or total error, ranking inversion, or root overflow makes the command exit
+non-zero.
+
+Each run writes `validation.json` (all candidates, consecutive reference
+levels, and every per-spot diagnostic) and `validation.md` (candidate,
+population, convergence, ranking, worst-spot, aggregate, timing, memory, and
+reproduction tables). Expensive reference arrays are cached by candidate,
+galaxy, variant, radial nodes and weights, grid sequence, dtype, configuration,
+objective policy, git revision, and source hash; `--no-cache` disables reuse.
+The production objective timing separates the cold compile/evaluation from
+warmed throughput and records backend peak memory when JAX exposes it.
+
 Important explicit-latent controls:
 
 ```toml

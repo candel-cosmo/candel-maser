@@ -19,6 +19,8 @@ marginal against a full-2pi phi reference. The helpers batch over the spot
 axis so the intermediate fits on a 12 GB GPU.
 """
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -55,38 +57,147 @@ def cast_model_floats(model, dtype):
     return model
 
 
+@partial(jax.jit, static_argnames=("model", "has_any_accel"))
+def _dense_fixed_r_group(model, idx, r_ang, phys_args, phys_kw,
+                         sin_phi, cos_phi, log_w_phi, *, has_any_accel):
+    """Fixed-shape dense-phi reference for padded spot batches."""
+    def body(_, values):
+        idx_b, r_b = values
+        r_pre = model._r_precompute(
+            r_b, idx_b, *phys_args, **phys_kw,
+            has_any_accel=has_any_accel)
+        nhc = model._phi_eval(r_pre, sin_phi, cos_phi)
+        ll = logsumexp(nhc + log_w_phi, axis=-1)
+        return None, r_pre["lnorm"] + r_pre["lnorm_a"] + ll
+
+    _, out = jax.lax.scan(body, None, (idx, r_ang))
+    return out.reshape(-1)
+
+
+@partial(jax.jit, static_argnames=("model", "has_any_accel"))
+def _dense_conditional_r_group(model, idx, r_ang, log_w_r,
+                               phys_args, phys_kw,
+                               sin_phi, cos_phi, log_w_phi, *,
+                               has_any_accel):
+    """Fixed-shape dense-phi reference on frozen conditional-r nodes."""
+    def body(_, values):
+        idx_b, r_b, log_w_r_b = values
+        r_pre = model._r_precompute(
+            r_b, idx_b, *phys_args, **phys_kw,
+            has_any_accel=has_any_accel)
+        nhc = model._phi_eval(r_pre, sin_phi, cos_phi)
+        ll_phi = logsumexp(nhc + log_w_phi, axis=-1)
+        ll = logsumexp(ll_phi + log_w_r_b, axis=-1)
+        return None, r_pre["lnorm"] + r_pre["lnorm_a"] + ll
+
+    _, out = jax.lax.scan(body, None, (idx, r_ang, log_w_r))
+    return out.reshape(-1)
+
+
+def _padded_group_chunks(idx, values, batch):
+    """Pad a spot group by cycling real rows, then split fixed chunks."""
+    idx = np.asarray(idx, dtype=np.int32)
+    n = len(idx)
+    batch = min(max(1, int(batch)), n)
+    n_pad = (-n) % batch
+    positions = np.arange(n + n_pad) % n
+    idx_chunks = idx[positions].reshape(-1, batch)
+    value_chunks = [
+        np.asarray(value)[idx][positions].reshape(
+            -1, batch, *np.asarray(value).shape[1:])
+        for value in values
+    ]
+    return idx_chunks, value_chunks, n
+
+
+def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
+                                 n_phi, spot_batch, log_w_r=None,
+                                 partition_support=False):
+    """Per-spot dense phi reference on fixed radial nodes.
+
+    ``r_ang`` is either ``(n_spots,)`` for the fixed-radius profile or
+    ``(n_spots, n_r)`` for the conditional-radius profile.  The latter also
+    requires matching per-spot ``log_w_r``.  Spot batches are padded and run
+    through ``lax.scan`` so every compiled iteration has one static shape.
+    The default retains the older full-2pi leakage diagnostic;
+    ``partition_support=True`` instead uses the exact half-plane support of
+    peak-partition for an apples-to-apples integrator comparison.
+    """
+    r_ang = np.asarray(r_ang)
+    if r_ang.shape[0] != model.n_spots:
+        raise ValueError(
+            f"r_ang first axis must have {model.n_spots} spots; "
+            f"got {r_ang.shape}.")
+    conditional = log_w_r is not None
+    if conditional and np.asarray(log_w_r).shape != r_ang.shape:
+        raise ValueError("log_w_r must match the conditional r_ang shape.")
+    if not conditional and r_ang.ndim != 1:
+        raise ValueError("fixed-r r_ang must be one-dimensional.")
+
+    dtype = jnp.asarray(phys_args[2]).dtype
+    out = np.empty(model.n_spots, dtype=np.float64)
+
+    for type_key, idx in (("sys", model._idx_sys),
+                          ("red", model._idx_red),
+                          ("blue", model._idx_blue)):
+        if not int(idx.shape[0]):
+            continue
+        values = [r_ang]
+        if conditional:
+            values.append(log_w_r)
+        idx_chunks, chunks, n = _padded_group_chunks(
+            idx, values, spot_batch)
+        common = (
+            model, jnp.asarray(idx_chunks), jnp.asarray(chunks[0], dtype),
+        )
+        kwargs = {"has_any_accel": model._group_has_any_accel(type_key)}
+        if not partition_support:
+            ranges = ((0.0, 2.0 * np.pi),)
+        elif type_key == "sys":
+            ranges = ((-np.pi, 0.0), (0.0, np.pi))
+        else:
+            subs = model._phi_subranges[type_key]
+            ranges = ((subs[0][0], subs[-1][1]),)
+        range_values = []
+        for phi_lo, phi_hi in ranges:
+            phi = jnp.linspace(
+                phi_lo, phi_hi, int(n_phi), dtype=dtype)
+            sin_phi = jnp.sin(phi)
+            cos_phi = jnp.cos(phi)
+            log_w_phi = trapz_log_weights(phi)
+            if conditional:
+                ll = _dense_conditional_r_group(
+                    *common, jnp.asarray(chunks[1], dtype),
+                    phys_args, phys_kw, sin_phi, cos_phi, log_w_phi, **kwargs)
+            else:
+                ll = _dense_fixed_r_group(
+                    *common, phys_args, phys_kw,
+                    sin_phi, cos_phi, log_w_phi, **kwargs)
+            range_values.append(np.asarray(
+                jax.device_get(jax.block_until_ready(ll)))[:n])
+        group_ll = range_values[0]
+        for values in range_values[1:]:
+            group_ll = np.logaddexp(group_ll, values)
+        out[np.asarray(idx)] = group_ll
+    return out
+
+
 def bruteforce_ll_fixed_r(model, phys_args, phys_kw, r_ang, ref_cfg):
     """Per-type full-2π φ brute force at a fixed r_ang vector.
 
     r_ang: shape (n_spots,) in mas.
-    ref_cfg: dict with keys n_phi, spot_batch. Runs at the model's
-        working dtype (controlled by process-level ``jax_enable_x64``).
+    ref_cfg: dict with keys n_phi, spot_batch. Runs at the dtype of the
+        supplied model parameters.
     Returns dict with keys 'sys', 'red', 'blue', 'total'.
     """
-    n_phi = int(ref_cfg["n_phi"])
-    spot_batch = int(ref_cfg["spot_batch"])
-
-    phi = jnp.linspace(0.0, 2 * jnp.pi, n_phi)
-    sin_phi = jnp.sin(phi)
-    cos_phi = jnp.cos(phi)
-    log_w = trapz_log_weights(phi)
-
-    r_ang = jnp.asarray(r_ang)
+    ll = dense_phi_reference_per_spot(
+        model, phys_args, phys_kw, r_ang,
+        int(ref_cfg["n_phi"]), int(ref_cfg["spot_batch"]))
     out = {}
-    for key, idx in [("sys", model._idx_sys),
+    for key, idx in (("sys", model._idx_sys),
                      ("red", model._idx_red),
-                     ("blue", model._idx_blue)]:
-        n = int(idx.shape[0])
-        if n == 0:
-            out[key] = 0.0
-            continue
-        parts = []
-        for s in range(0, n, spot_batch):
-            b = idx[s:s + spot_batch]
-            log_f = model._phi_integrand(
-                r_ang[b], sin_phi, cos_phi, b, *phys_args, **phys_kw)
-            parts.append(logsumexp(log_f + log_w, axis=-1))
-        out[key] = float(jnp.sum(jnp.concatenate(parts)))
+                     ("blue", model._idx_blue)):
+        out[key] = float(np.sum(ll[np.asarray(idx)]))
     out["total"] = out["sys"] + out["red"] + out["blue"]
     return out
 
