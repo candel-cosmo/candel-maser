@@ -75,6 +75,13 @@ if _ENABLE_F64:
     _jax_config.update("jax_enable_x64", True)
 
 import jax  # noqa: E402
+
+# Persistent XLA compilation cache: resubmits/restarts reuse the compiled
+# DE executable (keyed on HLO + jaxlib + GPU arch; results unaffected).
+if not os.environ.get("JAX_COMPILATION_CACHE_DIR"):
+    jax.config.update("jax_compilation_cache_dir",
+                      os.path.expanduser("~/.cache/candel_jax"))
+
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import tomli_w  # noqa: E402
@@ -82,7 +89,6 @@ from scipy.stats.qmc import Sobol  # noqa: E402
 from tqdm import trange  # noqa: E402
 
 from candel.inference.optimise import _prior_bounds  # noqa: E402
-from candel.inference.optimise import _reflect_bounds  # noqa: E402,E501
 from candel.inference.optimise import _select_distinct  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
@@ -336,9 +342,22 @@ def _normalise_theta_point(theta, names, lo, hi):
 _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
 _DE_POPULATION_SCHEDULE = "nfe_linear"
+_DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v2"
+_DE_PEAK_PARTITION_POLICY = "peak_partition_v6"
 _CANDIDATES_PER_GPU_WAVE = 1
+_PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE = 8
 _F32_ALL_SPOT_GALAXIES = frozenset((
     "CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789"))
+
+
+def _de_candidates_per_wave(model, peak_override=None):
+    if model.phi_integration == "peak-partition":
+        return (_PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE
+                if peak_override is None else int(peak_override))
+    if peak_override is not None:
+        raise ValueError(
+            "peak candidate-wave override requires peak-partition")
+    return _CANDIDATES_PER_GPU_WAVE
 
 
 def _initial_de_seed_points(data_seeds):
@@ -386,12 +405,23 @@ def _logp_2d_terms(target, theta):
     """
     model = target.model
     phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
-    groups = model._build_conditional_r_grids(
+    # Peak-partition caches evaluated values (plus overflow masks), so its
+    # global scan can be reused for circular and eccentric models. The fixed
+    # grid retains its exact circular-only algebraic reuse.
+    reuse_scan = (model.phi_integration == "peak-partition"
+                  or (model.phi_integration == "fixed-grid"
+                      and not model.use_ecc))
+    built = model._build_conditional_r_grids(
         phys_args[2], phys_args[3], phys_args[4], phys_args[16],
-        phys_args[8], phys_args[15], phys_args, phys_kw)
+        phys_args[8], phys_args[15], phys_args, phys_kw,
+        return_scan_cache=reuse_scan)
+    if reuse_scan:
+        groups, scan_cache = built
+    else:
+        groups, scan_cache = built, None
     ll = model._sum_phi_marginal(
         groups, phys_args, phys_kw, spot_batch=target.spot_batch,
-        remat=False)  # DE is gradient-free: skip rematerialisation overhead
+        remat=False, scan_cache=scan_cache)
     lp = _global_logprior(target, theta, ll.dtype)
     return lp, ll, phys_args, phys_kw
 
@@ -436,8 +466,8 @@ def _device_block_capacity(count, block_size=_DEVICE_LOCAL_BLOCK_SIZE):
     """Padded device-local work for ``count`` real candidates.
 
     Every visible device receives at least one block during the first call so
-    all device executables compile together.  Later calls retain exactly the
-    same executable shape; only the number of invocations changes.
+    it is ready for later work. Later calls retain exactly the same executable
+    shape; only the number of invocations changes.
     """
     if block_size < 1:
         raise ValueError("Device block size must be positive.")
@@ -525,26 +555,39 @@ def _predicted_rebalance_gain(n, current_weights, proposed_weights,
     return max(0.0, (current - proposed) / current)
 
 
-def _make_batched_fitness(fitness_one, n_dev, devices):
+def _use_shared_pmap(n_dev, devices):
+    """Compile homogeneous multi-device work once with pmap."""
+    devices = tuple(devices[:n_dev])
+    return (n_dev > 1 and len(devices) == n_dev
+            and len({device.device_kind for device in devices}) == 1)
+
+
+def _make_batched_fitness(fitness_one, n_dev, devices,
+                          candidates_per_wave=_CANDIDATES_PER_GPU_WAVE):
     """Return ``batch_eval(x_normed (M,D)[, desc]) -> fitness (M,)``.
 
-    Every device evaluates exactly one candidate per JAX wave.  A fixed-size
-    device-local executable contains several sequential waves, eliminating
-    population- and rebalance-dependent input shapes. ``n_dev > 1`` runs those
-    blocks concurrently on same-node devices. Candidates follow deterministic
-    weighted round-robin assignment; equal weights are ordinary round-robin.
-    Measured throughput changes the assignment only when the block-aware
-    predicted makespan improves materially. Output is restored to input order
-    on the host. Finite padding is excluded from the exact archive and
-    algorithmic NFE count.
+    A fixed-size executable evaluates ``candidates_per_wave`` candidates
+    concurrently, eliminating population- and rebalance-dependent input
+    shapes. Homogeneous multi-GPU jobs compile one shared ``pmap`` executable;
+    heterogeneous devices retain concurrent device-local JITs and weighted
+    round-robin assignment. Output is restored to input order on the host.
+    Finite padding is excluded from the exact archive and algorithmic NFE
+    count.
     """
+    candidates_per_wave = int(candidates_per_wave)
+    if (candidates_per_wave < 1
+            or _DEVICE_LOCAL_BLOCK_SIZE % candidates_per_wave != 0):
+        raise ValueError(
+            "candidates_per_wave must be a positive divisor of the "
+            f"device block size ({_DEVICE_LOCAL_BLOCK_SIZE}).")
     vmapped = jax.vmap(fitness_one)
 
     def per_device(block):
-        # Preserve the batch-one executable used in production while mapping
-        # a small fixed device-local block sequentially inside one compiled
-        # call.  Candidate intermediates therefore never coexist.
-        return jax.lax.map(vmapped, block[:, None, :]).reshape(-1)
+        if candidates_per_wave == _DEVICE_LOCAL_BLOCK_SIZE:
+            return vmapped(block)
+        waves = block.reshape(
+            -1, candidates_per_wave, block.shape[-1])
+        return jax.lax.map(vmapped, waves).reshape(-1)
 
     n_dev = max(1, int(n_dev))
     devices = tuple(devices[:n_dev])
@@ -553,8 +596,12 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
     if len(devices) != n_dev:
         raise ValueError(
             f"Requested {n_dev} evaluator devices, found {len(devices)}.")
-    runners = tuple(jax.jit(per_device, device=device)
-                    for device in devices)
+    shared_pmap = _use_shared_pmap(n_dev, devices)
+    shared_runner = (jax.pmap(per_device, devices=devices)
+                     if shared_pmap else None)
+    runners = (() if shared_pmap else
+               tuple(jax.jit(per_device, device=device)
+                     for device in devices))
     state = {
         "assignment_weights": np.full(n_dev, 1.0 / n_dev),
         "profile_weights": np.full(n_dev, 1.0 / n_dev),
@@ -562,6 +609,7 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
         "warmed": False,
         "rebalance_attempts": 0,
         "rebalances": 0,
+        "candidates_per_wave": candidates_per_wave,
         "last_rebalance_gain": 0.0,
         "total_candidates": np.zeros(n_dev, dtype=np.int64),
         "total_real_candidates": np.zeros(n_dev, dtype=np.int64),
@@ -589,24 +637,48 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
             shard[:len(idx)] = x[idx]
             shards.append(shard)
 
-        def run_device(i):
+        if shared_pmap:
+            shared_capacity = int(np.max(capacities))
+            for i, shard in enumerate(shards):
+                if shard.shape[0] < shared_capacity:
+                    padded = np.broadcast_to(
+                        x[:1], (shared_capacity,) + x.shape[1:]).copy()
+                    padded[:shard.shape[0]] = shard
+                    shards[i] = padded
+            capacities[:] = shared_capacity
             start = time.perf_counter()
             parts = []
-            for start_idx in range(0, capacities[i],
+            for start_idx in range(0, shared_capacity,
                                    _DEVICE_LOCAL_BLOCK_SIZE):
-                block = shards[i][
-                    start_idx:start_idx + _DEVICE_LOCAL_BLOCK_SIZE]
-                parts.append(runners[i](jax.device_put(block, devices[i])))
+                blocks = np.stack([
+                    shard[start_idx:start_idx + _DEVICE_LOCAL_BLOCK_SIZE]
+                    for shard in shards])
+                parts.append(shared_runner(blocks))
             jax.block_until_ready(parts[-1])
-            values = np.concatenate([np.asarray(part) for part in parts])
-            return values, time.perf_counter() - start
-
-        if n_dev == 1:
-            results = [run_device(0)]
+            values = np.concatenate(
+                [np.asarray(part) for part in parts], axis=1)
+            duration = time.perf_counter() - start
+            results = [(values[i], duration) for i in range(n_dev)]
         else:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=n_dev) as executor:
-                results = list(executor.map(run_device, range(n_dev)))
+            def run_device(i):
+                start = time.perf_counter()
+                parts = []
+                for start_idx in range(0, capacities[i],
+                                       _DEVICE_LOCAL_BLOCK_SIZE):
+                    block = shards[i][
+                        start_idx:start_idx + _DEVICE_LOCAL_BLOCK_SIZE]
+                    parts.append(
+                        runners[i](jax.device_put(block, devices[i])))
+                jax.block_until_ready(parts[-1])
+                values = np.concatenate([np.asarray(part) for part in parts])
+                return values, time.perf_counter() - start
+
+            if n_dev == 1:
+                results = [run_device(0)]
+            else:
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=n_dev) as executor:
+                    results = list(executor.map(run_device, range(n_dev)))
 
         durations = np.empty(n_dev)
         was_warmed = state["warmed"]
@@ -627,7 +699,7 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
         # Exclude compilation and calls too small to exercise every device
         # from the throughput model.  A proposed change is adopted only when
         # it survives fixed-block padding and clears the material-gain gate.
-        if (was_warmed and np.all(counts > 0)
+        if (not shared_pmap and was_warmed and np.all(counts > 0)
                 and np.all(durations > 0.0)):
             throughput = capacities / durations
             observed = _project_device_weights(throughput)
@@ -659,6 +731,9 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
             "last_seconds": state["last_seconds"].copy(),
             "profile_samples": state["profile_samples"],
             "block_size": _DEVICE_LOCAL_BLOCK_SIZE,
+            "candidates_per_wave": state["candidates_per_wave"],
+            "execution_mode": ("shared pmap" if shared_pmap
+                               else "device-local jit"),
             "rebalance_attempts": state["rebalance_attempts"],
             "rebalances": state["rebalances"],
             "last_rebalance_gain": state["last_rebalance_gain"],
@@ -671,14 +746,19 @@ def _make_batched_fitness(fitness_one, n_dev, devices):
 
 _ARCHIVE_FINGERPRINT_VERSION = "blake2b64-v1"
 _ARCHIVE_FINGERPRINT_BATCH = 10_000
+# Buffered exact-value rows are flushed to SQLite in one commit at each
+# checkpoint. The cap bounds RAM during the one-off Sobol screen.
+_ARCHIVE_WRITE_BUFFER_ROWS = 65_536
 
 
 class _ExactArchive:
     """Persistent exact-value cache for one optimiser checkpoint."""
 
-    def __init__(self, path, dimension, resume=False):
-        if path != ":memory:" and not resume and os.path.exists(path):
+    def __init__(self, path, dimension, resume=False, objective_policy=None):
+        archive_exists = path != ":memory:" and os.path.exists(path)
+        if archive_exists and not resume:
             os.unlink(path)
+            archive_exists = False
         self.connection = sqlite3.connect(path)
         self.connection.execute(
             "CREATE TABLE IF NOT EXISTS evaluations "
@@ -696,6 +776,19 @@ class _ExactArchive:
         self.connection.execute(
             "INSERT OR REPLACE INTO metadata VALUES ('dimension', ?)",
             (str(dimension),))
+        if objective_policy is not None:
+            row = self.connection.execute(
+                "SELECT value FROM metadata "
+                "WHERE key='objective_policy'").fetchone()
+            if archive_exists and (row is None or row[0] != objective_policy):
+                self.connection.close()
+                raise ValueError(
+                    "Exact-evaluation archive objective policy is "
+                    f"{row[0] if row else 'legacy'!r}, requested "
+                    f"{objective_policy!r}; start a fresh run.")
+            self.connection.execute(
+                "INSERT OR REPLACE INTO metadata VALUES "
+                "('objective_policy', ?)", (objective_policy,))
         self.connection.commit()
 
         backfill_start = time.perf_counter()
@@ -741,6 +834,10 @@ class _ExactArchive:
         self.index_load_seconds = time.perf_counter() - t0
         self.hits = 0
         self.evaluations = 0
+        # Buffered (key -> fitness) rows and their fingerprints, committed on
+        # flush(). Lookups consult this buffer before touching SQL.
+        self._pending = {}
+        self._pending_fingerprints = []
         self.reset_timing()
 
     @staticmethod
@@ -766,12 +863,20 @@ class _ExactArchive:
                 continue
             pending[key] = [i]
 
+        # A fingerprint hit may reference a buffered, not-yet-written row, so
+        # the RAM buffer is consulted before issuing any SQL SELECT.
         possible_hits = [
             key for key in pending
             if self._fingerprint(key) in self._known_fingerprints]
         cached = {}
-        for start in range(0, len(possible_hits), 512):
-            keys = possible_hits[start:start + 512]
+        sql_hits = []
+        for key in possible_hits:
+            if key in self._pending:
+                cached[key] = self._pending[key]
+            else:
+                sql_hits.append(key)
+        for start in range(0, len(sql_hits), 512):
+            keys = sql_hits[start:start + 512]
             placeholders = ",".join("?" for _ in keys)
             rows = self.connection.execute(
                 "SELECT point, fitness FROM evaluations WHERE point IN ("
@@ -788,7 +893,7 @@ class _ExactArchive:
                 missing.append(indices[0])
         self.lookup_seconds += time.perf_counter() - lookup_start
         self.lookup_keys += len(pending)
-        self.lookup_queries += ((len(possible_hits) + 511) // 512)
+        self.lookup_queries += ((len(sql_hits) + 511) // 512)
 
         if missing:
             evaluation_start = time.perf_counter()
@@ -801,20 +906,33 @@ class _ExactArchive:
                 indices = pending[key]
                 out[indices] = value
             write_start = time.perf_counter()
-            self.connection.executemany(
-                "INSERT INTO evaluations VALUES (?, ?)",
-                [(key, float(value))
-                 for key, value in zip(missing_keys, values)])
-            fingerprints = [
+            new_fingerprints = [
                 self._fingerprint(key) for key in missing_keys]
-            self.connection.executemany(
-                "INSERT OR IGNORE INTO evaluation_fingerprints VALUES (?)",
-                [(fingerprint,) for fingerprint in fingerprints])
-            self.connection.commit()
-            self._known_fingerprints.update(fingerprints)
+            for key, value in zip(missing_keys, values):
+                self._pending[key] = float(value)
+            self._pending_fingerprints.extend(new_fingerprints)
+            self._known_fingerprints.update(new_fingerprints)
             self.write_seconds += time.perf_counter() - write_start
             self.evaluations += len(missing)
-        return jnp.asarray(out)
+            if len(self._pending) > _ARCHIVE_WRITE_BUFFER_ROWS:
+                self.flush()
+        return out
+
+    def flush(self):
+        """Commit buffered rows in one transaction and clear the buffer."""
+        if not self._pending:
+            return
+        write_start = time.perf_counter()
+        self.connection.executemany(
+            "INSERT INTO evaluations VALUES (?, ?)",
+            list(self._pending.items()))
+        self.connection.executemany(
+            "INSERT OR IGNORE INTO evaluation_fingerprints VALUES (?)",
+            [(fingerprint,) for fingerprint in self._pending_fingerprints])
+        self.connection.commit()
+        self._pending.clear()
+        self._pending_fingerprints.clear()
+        self.write_seconds += time.perf_counter() - write_start
 
     def reset_timing(self):
         """Reset per-optimisation-phase timing without changing counters."""
@@ -825,11 +943,45 @@ class _ExactArchive:
         self.lookup_queries = 0
 
     def count(self):
+        self.flush()
         return int(self.connection.execute(
             "SELECT COUNT(*) FROM evaluations").fetchone()[0])
 
     def close(self):
+        self.flush()
         self.connection.close()
+
+
+def _lshade_draw_indices(order, n_pbest, n, n_union, rng):
+    """Vectorised pbest/r1/r2 index draws for a whole L-SHADE population.
+
+    ``pbest[i]`` is uniform over ``order[:n_pbest]`` excluding ``i``; ``r1[i]``
+    uniform over ``[0, n)`` excluding ``{i, pbest[i]}``; ``r2[i]`` uniform over
+    ``[0, n_union)`` excluding ``{i, pbest[i], r1[i]}``.  Each forbidden set is
+    per-member; the constraints are enforced by masked rejection (redraw only
+    the offending members), which terminates fast in expectation.
+    """
+    idx = np.arange(n)
+    pool = order[:n_pbest]
+    pbest = pool[rng.integers(n_pbest, size=n)]
+    bad = pbest == idx
+    while np.any(bad):
+        sub = np.flatnonzero(bad)
+        pbest[sub] = pool[rng.integers(n_pbest, size=sub.size)]
+        bad = pbest == idx
+    r1 = rng.integers(n, size=n)
+    bad = (r1 == idx) | (r1 == pbest)
+    while np.any(bad):
+        sub = np.flatnonzero(bad)
+        r1[sub] = rng.integers(n, size=sub.size)
+        bad = (r1 == idx) | (r1 == pbest)
+    r2 = rng.integers(n_union, size=n)
+    bad = (r2 == idx) | (r2 == pbest) | (r2 == r1)
+    while np.any(bad):
+        sub = np.flatnonzero(bad)
+        r2[sub] = rng.integers(n_union, size=sub.size)
+        bad = (r2 == idx) | (r2 == pbest) | (r2 == r1)
+    return pbest, r1, r2
 
 
 def _lshade_trials(population, fitness, mutation_archive, m_f, m_cr, rng,
@@ -843,33 +995,39 @@ def _lshade_trials(population, fitness, mutation_archive, m_f, m_cr, rng,
     union = np.vstack([pop, archive]) if archive.size else pop
     order = np.argsort(fitness)
     n_pbest = max(2, min(n, int(np.ceil(pbest_fraction * n))))
-    memory_slots = rng.integers(len(m_f), size=n)
+    slot = rng.integers(len(m_f), size=n)
+
+    # F: Cauchy proposal per member, redrawing only non-positive draws
+    # (masked rejection), then clipped at 1.
     f = np.empty(n)
-    cr = np.empty(n)
+    bad = np.ones(n, dtype=bool)
+    while np.any(bad):
+        sub = np.flatnonzero(bad)
+        proposal = (m_f[slot[sub]]
+                    + 0.1 * np.tan(np.pi * (rng.random(sub.size) - 0.5)))
+        ok = proposal > 0.0
+        f[sub[ok]] = proposal[ok]
+        bad[sub[ok]] = False
+    np.minimum(f, 1.0, out=f)
+
+    # CR: Gaussian around the memory value, zeroed where the slot is inactive.
+    cr = np.clip(rng.normal(m_cr[slot], 0.1), 0.0, 1.0)
+    cr[m_cr[slot] < 0.0] = 0.0
+
+    pbest, r1, r2 = _lshade_draw_indices(order, n_pbest, n, len(union), rng)
+
+    # Truncate the mutant to the population dtype before reflection, matching
+    # the historical row-wise ``np.empty_like`` assignment.
     mutants = np.empty_like(pop)
+    mutants[:] = (pop + f[:, None] * (pop[pbest] - pop)
+                  + f[:, None] * (pop[r1] - union[r2]))
 
-    def draw_index(limit, forbidden):
-        while True:
-            value = int(rng.integers(limit))
-            if value not in forbidden:
-                return value
-
-    for i, slot in enumerate(memory_slots):
-        value = -1.0
-        while value <= 0.0:
-            value = m_f[slot] + 0.1 * np.tan(np.pi * (rng.random() - 0.5))
-        f[i] = min(value, 1.0)
-        cr[i] = (0.0 if m_cr[slot] < 0.0 else
-                 np.clip(rng.normal(m_cr[slot], 0.1), 0.0, 1.0))
-        pbest_pool = order[:n_pbest]
-        pbest_pool = pbest_pool[pbest_pool != i]
-        pbest = int(rng.choice(pbest_pool))
-        r1 = draw_index(n, {i, pbest})
-        r2 = draw_index(len(union), {i, pbest, r1})
-        mutants[i] = (pop[i] + f[i] * (pop[pbest] - pop[i])
-                      + f[i] * (pop[r1] - union[r2]))
-
-    mutants = np.asarray(_reflect_bounds(jnp.asarray(mutants)))
+    # Triangle-wave fold of out-of-bounds values back into [0, 1], in the
+    # population dtype (matches candel.inference.optimise._reflect_bounds).
+    mutants = np.abs(mutants)
+    cycle = np.floor(mutants).astype(np.int32)
+    frac = mutants - np.floor(mutants)
+    mutants = np.where(cycle % 2 == 0, frac, 1.0 - frac)
     cross = rng.random((n, dimension)) < cr[:, None]
     cross[np.arange(n), rng.integers(dimension, size=n)] = True
     return np.where(cross, mutants, pop), f, cr
@@ -1050,9 +1208,9 @@ def _plan_de_batch(model, pop_size, mem_frac=0.7, k_live=8, gpu_mem_gb=None):
     unknown, so the caller keeps its configured defaults (e.g. CPU).
     ``gpu_mem_gb`` only selects the V100 16/32GB variant.
 
-    Production always evaluates one DE candidate per GPU wave.  VRAM can
-    enlarge only the exact spot batch; candidate vectorisation remains a
-    development-only benchmark facility.
+    Fixed-grid production evaluates one DE candidate per GPU wave. Peak
+    partition bypasses this planner and evaluates its smaller eight-candidate
+    block concurrently.
     """
     n_r = model._n_r_local + model._n_r_global
     n_phi = max(int(pc["sin_phi"].shape[0])
@@ -1089,6 +1247,34 @@ def _variant_suffix(model):
     if model.use_quadratic_warp:
         parts.append("qw")
     return "_" + "_".join(parts) if parts else ""
+
+
+def _phi_integration_suffix(model):
+    return ("_peakpartition"
+            if model.phi_integration == "peak-partition" else "")
+
+
+def _objective_policy(model):
+    radial = (
+        f"r{model._n_r_local}+{model._n_r_global}:"
+        f"K{model._K_sigma:g}:"
+        f"full{int(model._global_r_full_support)}:"
+        f"asym{int(model._asymmetric_r_local)}:"
+        f"width{model._scan_width_drop:g}")
+    if model.phi_integration == "peak-partition":
+        refine_scope = (
+            ":rrhv" if (model._peak_r_refine_steps
+                         and model._peak_r_refine_hv_only) else "")
+        return (
+            f"{_DE_PEAK_PARTITION_POLICY}:"
+            f"sys{model._n_phi_partition_sys}:"
+            f"hv{model._n_phi_partition_hv}:"
+            f"roots{model._phi_partition_root_capacity}:"
+            f"rr{model._peak_r_refine_steps}x"
+            f"{model._peak_r_refine_order}{refine_scope}:"
+            f"rw{model._peak_r_width_steps}:"
+            f"{radial}")
+    return f"{_DE_OBJECTIVE_POLICY}:{radial}"
 
 
 def _init_block(gal_cfg, model):
@@ -1134,11 +1320,23 @@ def _load_de_checkpoint(path, lo, hi, names, sizes):
         raise ValueError("Checkpoint bounds do not match current model.")
     if list(d["names"]) != list(names) or list(d["sizes"]) != list(sizes):
         raise ValueError("Checkpoint parameter layout does not match.")
+    expected_dtype = np.dtype(
+        np.float64 if jax.config.jax_enable_x64 else np.float32)
+    state_dtypes = {
+        key: np.dtype(d[key].dtype) for key in ("population", "fitness")}
+    if any(dtype != expected_dtype for dtype in state_dtypes.values()):
+        saved = ", ".join(
+            f"{key}={dtype.name}" for key, dtype in state_dtypes.items())
+        raise ValueError(
+            f"Checkpoint DE-state precision ({saved}) does not match the "
+            f"current {expected_dtype.name} run; resume with the matching "
+            "--f64 setting or start a fresh run.")
     return d
 
 
-def _validate_de_checkpoint_policy(checkpoint, path):
-    """Reject incompatible algorithm, seed, or population-schedule state."""
+def _validate_de_checkpoint_policy(
+        checkpoint, path, objective_policy=_DE_OBJECTIVE_POLICY):
+    """Reject incompatible algorithm, objective, seed, or schedule state."""
     saved_algorithm = (
         str(np.asarray(checkpoint["algorithm"]).item())
         if "algorithm" in checkpoint.files else "classic")
@@ -1168,6 +1366,34 @@ def _validate_de_checkpoint_policy(checkpoint, path):
             "Checkpoint population schedule is "
             f"{saved_schedule or 'legacy generation-linear'!r}, requested "
             f"{_DE_POPULATION_SCHEDULE!r}; start a fresh run.")
+    saved_objective = (
+        str(np.asarray(checkpoint["objective_policy"]).item())
+        if "objective_policy" in checkpoint.files else None)
+    if saved_objective != objective_policy:
+        raise ValueError(
+            f"Checkpoint objective policy is {saved_objective or 'legacy'!r}, "
+            f"requested {objective_policy!r}; start a fresh run.")
+
+
+def _screen_eval(batch_eval, x, desc, chunk=512):
+    """Evaluate ``x`` in slices with progress/ETA prints.
+
+    Slicing only changes call granularity: the same points reach the same
+    per-candidate executable, so values, archive contents and NFE counts
+    are identical to a single call.
+    """
+    n = x.shape[0]
+    if n <= chunk:
+        return np.asarray(batch_eval(x, desc=desc))
+    t0 = time.time()
+    parts = []
+    for i in range(0, n, chunk):
+        parts.append(np.asarray(batch_eval(x[i:i + chunk], desc=desc)))
+        done = min(i + chunk, n)
+        rate = done / (time.time() - t0)
+        fprint(f"{desc}: {done}/{n} ({rate:.2f} cand/s, "
+               f"ETA {(n - done) / rate / 60.0:.1f} min)")
+    return np.concatenate(parts)
 
 
 def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
@@ -1182,11 +1408,11 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
     sobol_normed = jnp.asarray((sobol_points - lo) / scale)
 
     t0 = time.time()
-    logp_all = -np.asarray(batch_eval(sobol_normed, desc="Sobol"))
+    logp_all = -_screen_eval(batch_eval, sobol_normed, "Sobol candidates")
     valid = np.isfinite(logp_all)
     logp_all = np.where(valid, logp_all, -np.inf)
     best_sobol = logp_all[valid].max() if np.any(valid) else -np.inf
-    fprint(f"Sobol done in {time.time() - t0:.1f}s "
+    fprint(f"Sobol candidates done in {time.time() - t0:.1f}s "
            f"({valid.sum()}/{N_sobol} valid, "
            f"best logP={best_sobol:.1f})")
 
@@ -1208,17 +1434,18 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
         population = np.empty((0, D))
     if seeds.shape[0]:
         population = np.vstack(((seeds - lo) / scale, population))
-    fitness = np.asarray(batch_eval(jnp.asarray(population)))
+    fitness = _screen_eval(
+        batch_eval, jnp.asarray(population), "Initial-population candidates")
     jax.block_until_ready(fitness)
     if population.shape[0] != pop_size:
         raise RuntimeError(
             f"DE initial population has {population.shape[0]} members, "
             f"expected {pop_size}.")
     if seeds.shape[0]:
-        fprint(f"Initial population: {population.shape[0]} members "
+        fprint(f"Initial DE population: {population.shape[0]} members "
                f"({seeds.shape[0]} seeded, {n_sobol} Sobol)")
     else:
-        fprint(f"Initial population: {population.shape[0]} Sobol members")
+        fprint(f"Initial DE population: {population.shape[0]} Sobol members")
     return jnp.asarray(population), jnp.asarray(fitness)
 
 
@@ -1233,7 +1460,8 @@ _FLOOR_UNIT = dict(_PESCE_FLOOR_UNITS)
 def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             resume_path=None, checkpoint_interval=900.0,
             seed_points=None, fixed_params=None, reference_params=None,
-            reference_status=()):
+            reference_status=(), objective_policy=_DE_OBJECTIVE_POLICY,
+            peak_candidates_per_wave=None):
     log2_N = int(opt_cfg.get("log2_N", 16))
     pop_size = int(opt_cfg.get("pop_size", 1000))
     max_generations = int(opt_cfg.get("max_generations", 5000))
@@ -1261,24 +1489,33 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     distance_name = "D_A" if "D_A" in names else "D_c"
     distance_idx = names.index(distance_name)
     N_sobol = 2 ** log2_N
+    ckpt = None
+    if resume_path is not None:
+        ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
+        _validate_de_checkpoint_policy(
+            ckpt, resume_path, objective_policy=objective_policy)
     # seed_points arrive in full target.names order; drop the fixed columns.
     if fixed and seed_points is not None:
         free_idx = [target.names.index(n) for n in names]
         seed_points = np.asarray(seed_points)[:, free_idx]
 
+    candidates_per_wave = _de_candidates_per_wave(
+        target.model, peak_candidates_per_wave)
     fsection("L-SHADE MAP optimizer")
-    fprint(f"{D}D, pop={pop_size}, max_gen={max_generations}, "
-           f"patience={patience}, one candidate per GPU wave")
+    fprint(f"{D}D, pop={pop_size}, max_generations={max_generations}, "
+           f"patience={patience}, "
+           f"{candidates_per_wave} candidate"
+           f"{'s' if candidates_per_wave != 1 else ''} per GPU wave")
     fprint(f"current-to-pbest/1, success-history F/CR, "
            f"linear pop {pop_size}->{min_pop_size} over "
-           f"the first {reduction_evaluations:,} DE evaluations")
-    fprint("population-reduction horizon only; NFE is not capped and does "
-           "not terminate the optimiser")
+           f"the first {reduction_evaluations:,} DE candidate evaluations")
+    fprint("population-reduction horizon only; candidate evaluations are not "
+           "capped and do not terminate the optimiser")
     fprint("seed policy: data-derived ridge + Sobol only; "
            "Pesce/Reid is scored as a reference and never inserted")
-    fprint("initial population: seed points + scrambled Sobol screen"
+    fprint("initial DE population: seed points + scrambled Sobol candidates"
            if seed_points is not None
-           else "initial population: scrambled Sobol screen only")
+           else "initial DE population: scrambled Sobol candidates only")
     for name, lower, upper in zip(names, lo, hi):
         fprint(f"  {name:20s}: [{lower:.4g}, {upper:.4g}]")
     if fixed:
@@ -1293,20 +1530,29 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         x = jnp.asarray(lo) + x_normed * jnp.asarray(scale)
         return -logp(x)
 
-    batch_eval = _make_batched_fitness(fitness_one, n_dev, devices)
+    batch_eval = _make_batched_fitness(
+        fitness_one, n_dev, devices,
+        candidates_per_wave=candidates_per_wave)
     archive_path = (checkpoint_path + ".sqlite"
                     if checkpoint_path is not None else ":memory:")
     exact_archive = _ExactArchive(
-        archive_path, D, resume=resume_path is not None)
+        archive_path, D, resume=resume_path is not None,
+        objective_policy=objective_policy)
+
+    # Reproduce the archive's historical device-transfer downcast: the SQLite
+    # cache holds float64, but x64-disabled runs consumed it as float32.
+    host_dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
 
     def exact_eval(points, desc=None):
-        return exact_archive(batch_eval, points, desc=desc)
+        return np.asarray(
+            exact_archive(batch_eval, points, desc=desc), dtype=host_dtype)
 
     t0 = time.time()
     reference_logp = None
     if reference_params is None:
         # A new process always needs to compile, independently of archive
-        # resume state.  The fixed block compiles on every selected device.
+        # resume state. Homogeneous GPUs share one pmap compilation; mixed
+        # devices retain one device-local compilation each.
         warmup = batch_eval(jnp.full((1, D), 0.5))
         jax.block_until_ready(warmup)
     else:
@@ -1321,9 +1567,12 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             warmup = batch_eval(jnp.asarray(reference_point))
             jax.block_until_ready(warmup)
         reference_logp = -float(np.asarray(reference_fitness)[0])
+    execution_mode = batch_eval.device_profile()["execution_mode"]
     fprint(f"JIT compiled in {time.time() - t0:.1f}s "
-           f"(n_dev={n_dev}, fixed {_DEVICE_LOCAL_BLOCK_SIZE}-candidate "
-           "device block; one candidate per wave)")
+           f"(n_dev={n_dev}, {execution_mode}, "
+           f"fixed {_DEVICE_LOCAL_BLOCK_SIZE}-candidate "
+           f"device block; {candidates_per_wave} candidate"
+           f"{'s' if candidates_per_wave != 1 else ''} per wave)")
     peak = _device_peak_gb()
     if peak is not None:
         fprint(f"device-0 peak after warmup: {peak:.1f} GB "
@@ -1343,16 +1592,14 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
                "was not inserted into the initial population.")
 
     if resume_path is not None:
-        ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
-        _validate_de_checkpoint_policy(ckpt, resume_path)
-        key = jnp.asarray(ckpt["key"])
+        key = np.asarray(ckpt["key"])
         gen_start = int(ckpt["generation_counter"])
         gens_without_improvement = int(ckpt["gens_without_improvement"])
         best_logp_so_far = float(ckpt["best_logp_so_far"])
-        population = jnp.asarray(ckpt["population"])
-        fitness = jnp.asarray(ckpt["fitness"])
-        best_solution = jnp.asarray(ckpt["best_solution"])
-        best_fitness = jnp.asarray(ckpt["best_fitness"])
+        population = np.asarray(ckpt["population"])
+        fitness = np.asarray(ckpt["fitness"])
+        best_solution = np.asarray(ckpt["best_solution"])
+        best_fitness = np.asarray(ckpt["best_fitness"])
         initial_pop_size = int(
             ckpt["initial_pop_size"] if "initial_pop_size" in ckpt.files
             else len(population))
@@ -1386,6 +1633,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         population, fitness = _make_de_initial_population(
             exact_eval, lo, hi, pop_size, seed, N_sobol,
             min_dist_frac, seed_points=seed_points)
+        population = np.asarray(population)
+        fitness = np.asarray(fitness)
         key = jax.random.PRNGKey(seed)
         initial_pop_size = pop_size
         best_idx = int(np.argmin(np.asarray(fitness)))
@@ -1423,6 +1672,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             "algorithm": np.asarray(_DE_ALGORITHM),
             "seed_policy": np.asarray(_DE_SEED_POLICY),
             "population_schedule": np.asarray(_DE_POPULATION_SCHEDULE),
+            "objective_policy": np.asarray(objective_policy),
             "initial_pop_size": np.asarray(initial_pop_size),
             "min_pop_size": np.asarray(min_pop_size),
             "de_evaluations": np.asarray(de_evaluations),
@@ -1455,7 +1705,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             + exact_archive.write_seconds)
         per_generation = host_seconds / max(1, timed_generations)
         fprint(
-            f"  {label}: {timed_generations} gen; "
+            f"  {label}: {timed_generations} generations; "
             f"exact-eval={exact_archive.evaluation_seconds:.2f}s, "
             f"host={host_seconds:.2f}s ({per_generation:.3f}s/gen): "
             f"trials={phase_timing['trials']:.2f}s, "
@@ -1488,12 +1738,13 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
                 f"{profile['rebalance_attempts']}, last predicted gain="
                 f"{profile['last_rebalance_gain']:.1%})")
 
-    fsection(f"DE (L-SHADE, pop={len(population)}, "
-             f"max_gen={max_generations}, "
-             f"start={gen_start})")
+    fsection(f"DE generations (L-SHADE, pop={len(population)}, "
+             f"max_generations={max_generations}, "
+             f"start_generation={gen_start})")
     last_ckpt = time.time()
     final_gen = gen_start
-    de_progress = trange(max_generations - gen_start, desc="DE")
+    de_progress = trange(
+        max_generations - gen_start, desc="DE generations", unit="gen")
     for step in de_progress:
         gen = gen_start + step
         final_gen = gen + 1
@@ -1501,38 +1752,36 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         phase_start = time.perf_counter()
         trials, trial_f, trial_cr = _lshade_trials(
             population, fitness, mutation_archive, m_f, m_cr, rng)
-        trials = jnp.asarray(trials)
         phase_timing["trials"] += time.perf_counter() - phase_start
 
         trial_fitness = exact_eval(trials)
-        jax.block_until_ready(trial_fitness)
         phase_start = time.perf_counter()
         de_evaluations += current_size
-        improved = np.asarray(trial_fitness) < np.asarray(fitness)
+        improved = trial_fitness < fitness
         if np.any(improved):
-            old_fitness = np.asarray(fitness)
+            old_fitness = fitness
             mutation_archive = _append_mutation_archive(
-                mutation_archive, np.asarray(population)[improved],
+                mutation_archive, population[improved],
                 current_size, rng)
             memory_index = _update_lshade_memory(
                 m_f, m_cr, memory_index, trial_f[improved],
                 trial_cr[improved],
-                old_fitness[improved] - np.asarray(trial_fitness)[improved])
-        population = jnp.where(improved[:, None], trials, population)
-        fitness = jnp.where(improved, trial_fitness, fitness)
+                old_fitness[improved] - trial_fitness[improved])
+        population = np.where(improved[:, None], trials, population)
+        fitness = np.where(improved, trial_fitness, fitness)
 
         target_size = _linear_population_size(
             initial_pop_size, min_pop_size, de_evaluations,
             reduction_evaluations)
         if target_size < len(population):
-            keep = np.argsort(np.asarray(fitness))[:target_size]
+            keep = np.argsort(fitness)[:target_size]
             population = population[keep]
             fitness = fitness[keep]
             if len(mutation_archive) > target_size:
                 mutation_archive = mutation_archive[rng.choice(
                     len(mutation_archive), target_size, replace=False)]
 
-        gen_best_idx = int(np.argmin(np.asarray(fitness)))
+        gen_best_idx = int(np.argmin(fitness))
         gen_best_fitness = fitness[gen_best_idx]
         if float(gen_best_fitness) < float(best_fitness):
             best_fitness = gen_best_fitness
@@ -1552,13 +1801,16 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             de_progress.set_postfix_str(
                 f"logP={current_best:.2f}, pop={len(population)}, "
                 f"{distance_name}={best_d:.2f}, "
-                f"nfe={de_evaluations}, "
+                f"candidate_evals={de_evaluations}, "
                 f"stale={gens_without_improvement}/{patience}")
         phase_timing["update"] += time.perf_counter() - phase_start
         timed_generations += 1
 
         if (checkpoint_path is not None
                 and time.time() - last_ckpt >= checkpoint_interval):
+            # Commit buffered exact values so the archive is never staler than
+            # the checkpoint it serves on resume.
+            exact_archive.flush()
             phase_start = time.perf_counter()
             _save_de_checkpoint(
                 checkpoint_path, population, fitness, best_solution,
@@ -1567,14 +1819,15 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
                 extra=checkpoint_extra())
             phase_timing["checkpoint"] += time.perf_counter() - phase_start
             last_ckpt = time.time()
-            fprint(f"  checkpoint: gen {gen + 1}")
+            fprint(f"  checkpoint: generation {gen + 1}")
             report_timing("cumulative timing")
 
         if gens_without_improvement >= patience:
-            fprint(f"  converged at gen {final_gen}")
+            fprint(f"  converged at generation {final_gen}")
             break
 
     if checkpoint_path is not None:
+        exact_archive.flush()
         phase_start = time.perf_counter()
         _save_de_checkpoint(
             checkpoint_path, population, fitness, best_solution,
@@ -1587,12 +1840,16 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
            f"{exact_archive.hits} cache hits")
     exact_archive.close()
 
-    x_best = np.asarray(lo + best_solution * scale)
+    x_best = np.asarray(lo + jnp.asarray(best_solution) * scale)
     params_best = _flat_to_theta(jnp.asarray(x_best), names)
     params_best.update(fixed)
     theta = target.complete_params(params_best)
     phys_args, phys_kw = target.model.phys_from_params_jax(theta, target.h)
-    r_ang = target.model.conditional_r_ang_map(phys_args, phys_kw)
+    # This final diagnostic repeats the complete conditional-radius search.
+    # Keeping it eager can dispatch thousands of tiny GPU operations after an
+    # otherwise finished DE run (especially for NGC4258).  Stage it as one
+    # executable, just like the likelihood used above.
+    r_ang = jax.jit(target.model.conditional_r_ang_map)(phys_args, phys_kw)
     best_logp = -float(best_fitness)
     output = _theta_to_output(
         {k: np.asarray(jax.device_get(v)) for k, v in theta.items()},
@@ -1621,7 +1878,7 @@ def _run_fixed_globals(target, init_params, data_only=False):
     logp = jax.block_until_ready(logp)
     theta = target.complete_params(params)
     phys_args, phys_kw = target.model.phys_from_params_jax(theta, target.h)
-    r_ang = target.model.conditional_r_ang_map(phys_args, phys_kw)
+    r_ang = jax.jit(target.model.conditional_r_ang_map)(phys_args, phys_kw)
     return _theta_to_output(
         {k: np.asarray(jax.device_get(v)) for k, v in theta.items()},
         np.asarray(jax.device_get(r_ang))), float(jax.device_get(logp)), 0
@@ -1687,6 +1944,19 @@ def main(argv=None):
                              "--fix-globals-pesce scores that reference "
                              "without running DE.")
     parser.add_argument("--spot-batch", type=int, default=None)
+    parser.add_argument(
+        "--phi-integration", choices=("fixed-grid", "peak-partition"),
+        default=None,
+        help="Phi integration used by the DE 2D marginal. Default: config "
+             "value (fixed-grid in config_maser.toml). peak-partition uses "
+             "fixed-size numerical peak searches in both systemic "
+             "half-planes and one half-plane per HV group.")
+    parser.add_argument(
+        "--peak-candidates-per-wave", type=int, choices=(1, 2, 4, 8),
+        default=None,
+        help="Concurrent candidates per GPU in peak-partition mode. "
+             "Default: 8. Use 2 or 4 for hardware calibration if 8 lowers "
+             "throughput; this does not change the objective.")
     parser.add_argument("--gpu-mem", type=float, default=None,
                         help="GPU VRAM hint in GB for the auto batch planner. "
                              "Only disambiguates the V100 16/32GB variant "
@@ -1743,8 +2013,13 @@ def main(argv=None):
 
     n_dev, gpu_devices = _resolve_n_devices(args.n_devices)
     if n_dev > 1:
-        fprint(f"DE population assigned by adaptive weighted round-robin "
-               f"over {n_dev} same-node GPU(s).")
+        if _use_shared_pmap(n_dev, gpu_devices):
+            fprint(f"DE population assigned by round-robin over {n_dev} "
+                   "homogeneous same-node GPU(s) with one shared pmap "
+                   "executable.")
+        else:
+            fprint(f"DE population assigned by adaptive weighted round-robin "
+                   f"over {n_dev} same-node GPU(s).")
 
     fsection(f"Loading {args.galaxy} data")
     data = load_megamaser_spots(
@@ -1778,6 +2053,22 @@ def main(argv=None):
     config["model"]["galaxies"] = {
         g: dict(blk) for g, blk in master_cfg["model"]["galaxies"].items()}
     gal_blk = config["model"]["galaxies"][args.galaxy]
+    if args.phi_integration is not None:
+        gal_blk["phi_integration"] = args.phi_integration
+    selected_phi_integration = gal_blk.get(
+        "phi_integration", config["model"].get(
+            "phi_integration", "fixed-grid"))
+    if (args.peak_candidates_per_wave is not None
+            and selected_phi_integration != "peak-partition"):
+        raise SystemExit(
+            "--peak-candidates-per-wave requires "
+            "--phi-integration peak-partition.")
+    if (selected_phi_integration == "peak-partition"
+            and jax.default_backend() != "gpu"):
+        # CPU PjRt reproducibly exited while deserialising the former
+        # partition executable. Keep the conservative CPU guard; GPU jobs
+        # retain the persistent cache so restarts can reuse their executable.
+        jax.config.update("jax_enable_compilation_cache", False)
 
     def _grid_val(key):
         return gal_blk.get(key, config["model"].get(key))
@@ -1827,8 +2118,13 @@ def main(argv=None):
     # smallest production GPU and therefore default to true all-spot exact
     # evaluation.  Explicit CLI/per-galaxy controls still win, and other/f64
     # targets retain the conservative VRAM planner (notably NGC4258).
-    plan_sb, plan_available, plan_info = _plan_de_batch(
-        model, int(opt_cfg.get("pop_size", 1000)), gpu_mem_gb=args.gpu_mem)
+    if model.phi_integration == "peak-partition":
+        plan_sb, plan_available = None, False
+        plan_info = "peak-partition memory planner is not GPU-calibrated"
+    else:
+        plan_sb, plan_available, plan_info = _plan_de_batch(
+            model, int(opt_cfg.get("pop_size", 1000)),
+            gpu_mem_gb=args.gpu_mem)
     target_spot_batch, spot_batch_source = _de_spot_batch_policy(
         args.galaxy, bool(jax.config.jax_enable_x64), args.spot_batch,
         cfg_spot_batch, plan_sb)
@@ -1861,9 +2157,18 @@ def main(argv=None):
             if args.fix_floors_pesce:
                 raise SystemExit(
                     f"--fix-floors-pesce needs Pesce floors: {exc}") from exc
+    r_refinement = (
+        "three-point global-scan interpolation"
+        if model.phi_integration == "peak-partition"
+        else f"Brent steps={model._n_refine_steps}")
     fprint("inner solve: joint 2D (r_ang, phi) marginal per spot, "
            f"n_r_global={model._n_r_global}, "
-           f"n_refine_steps={model._n_refine_steps}")
+           f"r-centre={r_refinement}")
+    fprint(f"phi integration: {model.phi_integration}")
+    if model.phi_integration == "peak-partition":
+        cache_state = ("enabled on GPU" if jax.default_backend() == "gpu"
+                       else "disabled on CPU")
+        fprint("persistent JAX compilation cache: " + cache_state)
 
     fsection(
         f"{'Fixed-global latent MAP' if fixed_globals else 'DE MAP'} "
@@ -1885,7 +2190,8 @@ def main(argv=None):
         floor_suffix = "_pescefloors" if args.fix_floors_pesce else ""
         ckpt_path = os.path.join(
             ckpt_dir,
-            f"de_ckpt_rmap{_variant_suffix(model)}{floor_suffix}"
+            f"de_ckpt_rmap{_variant_suffix(model)}"
+            f"{_phi_integration_suffix(model)}{floor_suffix}"
             "_lshade_nopesce.npz")
         resume_path = (
             ckpt_path if args.resume and os.path.isfile(ckpt_path)
@@ -1910,12 +2216,25 @@ def main(argv=None):
         fprint("Pesce/Reid reference is not part of the DE initial "
                "population.")
         sb_flag = " [--spot-batch]" if args.spot_batch is not None else ""
-        fprint("DE batching: one candidate per GPU wave, "
+        candidates_per_wave = _de_candidates_per_wave(
+            model, args.peak_candidates_per_wave)
+        fprint(f"DE batching: {candidates_per_wave} candidate"
+               f"{'s' if candidates_per_wave != 1 else ''} per GPU wave, "
                f"spot_batch={target.spot_batch}{sb_flag} "
                f"({spot_batch_source}; None = all spots at once)")
+        if model.phi_integration == "peak-partition":
+            fprint("DE memory plan: peak-partition uses the selected "
+                   "candidate wave and explicit/per-galaxy spot batching")
+        n_waves = _DEVICE_LOCAL_BLOCK_SIZE // candidates_per_wave
         fprint(f"DE device executable: fixed {_DEVICE_LOCAL_BLOCK_SIZE}-"
-               "candidate block of sequential one-candidate waves "
+               f"candidate block in {n_waves} "
+               f"wave{'s' if n_waves != 1 else ''} "
                "(padding is excluded from NFE/archive)")
+        if _use_shared_pmap(n_dev, gpu_devices):
+            fprint("DE multi-GPU compilation: one shared pmap executable "
+                   "for homogeneous devices")
+        fprint("DE reduction compilation: phi integrands materialised before "
+               "log-sum reductions")
         # Echo the conservative planner for diagnostics even when the measured
         # float32 all-spots policy intentionally supersedes it.
         if plan_available:
@@ -1946,7 +2265,9 @@ def main(argv=None):
             checkpoint_interval=args.checkpoint_interval_minutes * 60.0,
             seed_points=seed_points, fixed_params=fixed_floors,
             reference_params=pesce_params,
-            reference_status=pesce_status)
+            reference_status=pesce_status,
+            objective_policy=_objective_policy(model),
+            peak_candidates_per_wave=args.peak_candidates_per_wave)
         pesce_logp = run_info["reference_logp"]
         run_summary = f"generations = {run_info['generations']}"
     dt = time.time() - t0

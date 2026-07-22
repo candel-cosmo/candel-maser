@@ -29,11 +29,22 @@ from candel.model.maser_physics import (  # noqa: E402
     keplerian_speed, lorentz_factor, predict_acceleration_los,
     predict_position, predict_velocity_los)
 from candel.model.model_H0_maser import (  # noqa: E402
-    _neg_half_chi2_quadform, neg_half_chi2_acceleration,
+    _combine_cached_phi_marginal, _compile_friendly_logsumexp,
+    _neg_half_chi2_quadform,
+    neg_half_chi2_acceleration,
     neg_half_chi2_position, neg_half_chi2_velocity)
 
 V_SYS_OBS = 7000.0   # known observation constant (km/s)
 DV_SYS = 3.0         # small fitted systemic offset; v_sys = V_SYS_OBS + DV_SYS
+
+
+def test_phi_logsumexp_blocks_input_fusion():
+    x = jnp.arange(12.0).reshape(3, 4)
+    compiled = jax.jit(_compile_friendly_logsumexp)
+    assert "optimization_barrier" in compiled.lower(x).as_text()
+    np.testing.assert_array_equal(
+        compiled(x),
+        jax.jit(lambda y: jax.scipy.special.logsumexp(y, axis=-1))(x))
 
 
 def make_inputs(seed=0):
@@ -173,13 +184,15 @@ def per_channel_nhc(d, dt):
     return nhc
 
 
-def quadform_nhc(d, dt):
+def quadform_nhc(d, dt, shared_r=False):
     """−½χ² via the quadratic-form kernel (item 3, velocity relative)."""
     f = lambda a: jnp.asarray(a, dtype=dt)  # noqa: E731
     s, c = f(d["sin_phi"]), f(d["cos_phi"])
+    row = 0 if shared_r else slice(None)
     r_pre = dict(
-        r_ang=f(d["r_ang"]), sin_i=f(d["sin_i"]), cos_i=f(d["cos_i"]),
-        sin_O=f(d["sin_O"]), cos_O=f(d["cos_O"]),
+        r_ang=f(d["r_ang"])[row], sin_i=f(d["sin_i"])[row],
+        cos_i=f(d["cos_i"])[row], sin_O=f(d["sin_O"])[row],
+        cos_O=f(d["cos_O"])[row],
         x0=f(d["x0"]), y0=f(d["y0"]), D=f(d["D"]), M_BH=f(d["M_BH"]),
         v_sys=f(d["v_sys"]), dv_sys=f(d["dv_sys"]),
         all_x=f(d["all_x"]), all_y=f(d["all_y"]),
@@ -187,7 +200,8 @@ def quadform_nhc(d, dt):
         var_x=f(d["var_x"]), var_y=f(d["var_y"]),
         var_v=f(d["var_v"]), var_a=f(d["var_a"]), has_a=f(d["has_a"]),
         has_any_accel=True)
-    return _neg_half_chi2_quadform(r_pre, s, c, s * s, c * c, s * c)
+    return _neg_half_chi2_quadform(
+        r_pre, s, c, s * s, c * c, s * c, shared_r=shared_r)
 
 
 def run(dt):
@@ -199,9 +213,12 @@ def run(dt):
     e_old = float(np.max(np.abs(a(old_absolute_nhc(d, dt)) - ref)))
     e_pc = float(np.max(np.abs(a(per_channel_nhc(d, dt)) - ref)))
     e_qf = float(np.max(np.abs(a(quadform_nhc(d, dt)) - ref)))
+    e_qfs = float(np.max(np.abs(a(quadform_nhc(d, dt, True)) - ref)))
     print(f"  max|Δ(-½χ²)| vs true  old-absolute={e_old:.3e}  "
-          f"per-channel={e_pc:.3e}  quad-form={e_qf:.3e}")
-    return dict(name=name, e_old=e_old, e_pc=e_pc, e_qf=e_qf)
+          f"per-channel={e_pc:.3e}  quad-form={e_qf:.3e}  "
+          f"shared-quad-form={e_qfs:.3e}")
+    return dict(name=name, e_old=e_old, e_pc=e_pc, e_qf=e_qf,
+                e_qfs=e_qfs)
 
 
 def main():
@@ -214,7 +231,8 @@ def main():
     ok = True
     if "f64" in res:
         r = res["f64"]
-        c1 = r["e_pc"] < 1e-6 and r["e_qf"] < 1e-6
+        c1 = (r["e_pc"] < 1e-6 and r["e_qf"] < 1e-6
+              and r["e_qfs"] < 1e-6)
         ok &= c1
         print(f"f64 per-channel & quad-form vs true < 1e-6: {c1} "
               f"({r['e_pc']:.2e}, {r['e_qf']:.2e})")
@@ -236,6 +254,33 @@ def main():
 
 def test_phi_kernels_precision():
     main()
+
+
+def test_cached_phi_marginal_matches_flat_reduction():
+    rng = np.random.default_rng(42)
+    n_spot, n_local, n_global, n_phi = 4, 7, 5, 11
+    nhc_local = rng.normal(size=(n_spot, n_local, n_phi))
+    nhc_global = rng.normal(size=(n_spot, n_global, n_phi))
+    order = np.argsort(
+        rng.uniform(size=(n_spot, n_local + n_global)), axis=-1)
+    log_w_r = rng.normal(size=(n_spot, n_local + n_global))
+    log_w_phi = rng.normal(size=n_phi)
+
+    for dtype in (jnp.float64, jnp.float32):
+        local = jnp.asarray(nhc_local, dtype=dtype)
+        global_ = jnp.asarray(nhc_global, dtype=dtype)
+        wr = jnp.asarray(log_w_r, dtype=dtype)
+        wp = jnp.asarray(log_w_phi, dtype=dtype)
+        ll_global = jax.scipy.special.logsumexp(global_ + wp, axis=-1)
+        got = _combine_cached_phi_marginal(
+            local, ll_global, jnp.asarray(order), wr, wp)
+
+        nhc = jnp.concatenate([local, global_], axis=-2)
+        nhc = jnp.take_along_axis(
+            nhc, jnp.asarray(order)[..., None], axis=-2)
+        expected = jax.scipy.special.logsumexp(
+            nhc + wr[..., None] + wp, axis=(-2, -1))
+        np.testing.assert_array_max_ulp(got, expected, maxulp=2)
 
 
 if __name__ == "__main__":
