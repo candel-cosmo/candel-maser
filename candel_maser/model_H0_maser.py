@@ -237,6 +237,26 @@ def _quadratic_log_grid_peak(r_grid, values, best):
     return jnp.where(valid, refined, r_grid[best])
 
 
+def _scan_log_radius_scale(r_grid, values, centre, drop, K):
+    """Infer a conservative local log-radius scale from a coarse scan.
+
+    The returned scale makes a ``K``-span local grid reach one coarse bin
+    beyond every finite scan node within ``drop`` log-likelihood units of
+    the per-spot maximum.  It uses values only, so it applies unchanged to
+    eccentric and warped disks.
+    """
+    log_r = jnp.log(r_grid)
+    log_step = log_r[1] - log_r[0]
+    peak = jnp.max(values, axis=-1, keepdims=True)
+    active = jnp.isfinite(values) & (values >= peak - drop)
+    left = jnp.min(jnp.where(active, log_r, jnp.inf), axis=-1)
+    right = jnp.max(jnp.where(active, log_r, -jnp.inf), axis=-1)
+    log_centre = jnp.log(centre)
+    half_span = jnp.maximum(log_centre - left, right - log_centre)
+    half_span = jnp.where(jnp.isfinite(half_span), half_span, 0.0)
+    return (half_span + log_step) / K
+
+
 class MaserDiskModel(ModelBase):
     """Megamaser disk model with explicit and marginalised latent helpers."""
 
@@ -468,11 +488,20 @@ class MaserDiskModel(ModelBase):
             raise ValueError(
                 "phi_integration must be 'fixed-grid' or "
                 f"'peak-partition'; got {phi_integration!r}.")
-        n_partition_sys = int(_get("n_phi_partition_sys", 513))
-        n_partition_hv = int(_get("n_phi_partition_hv", 257))
+        n_partition_sys = int(_get("n_phi_partition_sys", 129))
+        n_partition_hv = int(_get("n_phi_partition_hv", 65))
         if min(n_partition_sys, n_partition_hv) < 3:
             raise ValueError(
                 "n_phi_partition_sys and n_phi_partition_hv must be >= 3.")
+        configured_capacity = _get("phi_partition_root_capacity", None)
+        root_capacity = ((8 if self.use_ecc else 4)
+                         if configured_capacity is None
+                         else int(configured_capacity))
+        if root_capacity < 1 or root_capacity > min(
+                n_partition_sys, n_partition_hv) - 2:
+            raise ValueError(
+                "phi_partition_root_capacity must be in [1, "
+                "min(n_phi_partition_sys, n_phi_partition_hv) - 2].")
 
         hv_inner_deg = float(_get("phi_hv_inner_deg", 45.0))
         hv_outer_deg = float(_get("phi_hv_outer_deg", 90.0))
@@ -556,6 +585,7 @@ class MaserDiskModel(ModelBase):
         self.phi_integration = phi_integration
         self._n_phi_partition_sys = n_partition_sys
         self._n_phi_partition_hv = n_partition_hv
+        self._phi_partition_root_capacity = root_capacity
 
     # ---- r_ang support + conditional r-MAP support ----
 
@@ -574,9 +604,30 @@ class MaserDiskModel(ModelBase):
         self._n_r_local = int(_get("n_r_local", 151))
         self._n_r_global = int(_get("n_r_global", 301))
         self._K_sigma = float(_get("K_sigma", 5.0))
+        self._global_r_full_support = bool(_get(
+            "global_r_full_support", False))
+        self._scan_width_drop = float(_get("scan_width_drop", 0.0))
+        self._asymmetric_r_local = bool(_get(
+            "asymmetric_r_local", False))
+        self._peak_r_refine_steps = int(_get(
+            "peak_r_refine_steps", 0))
+        self._peak_r_refine_order = int(_get(
+            "peak_r_refine_order", 7))
+        self._peak_r_refine_hv_only = bool(_get(
+            "peak_r_refine_hv_only", False))
+        self._peak_r_width_steps = int(_get(
+            "peak_r_width_steps", 0))
         if min(self._n_r_local, self._n_r_global) < 3:
             raise ValueError(
                 "n_r_local and n_r_global must be >= 3.")
+        if self._scan_width_drop < 0.0:
+            raise ValueError("scan_width_drop must be >= 0.")
+        if self._peak_r_refine_steps < 0:
+            raise ValueError("peak_r_refine_steps must be >= 0.")
+        if self._peak_r_refine_order < 3:
+            raise ValueError("peak_r_refine_order must be >= 3.")
+        if self._peak_r_width_steps < 0:
+            raise ValueError("peak_r_width_steps must be >= 0.")
 
         self.use_selection = get_nested(
             self.config, "model/use_selection", False)
@@ -600,7 +651,8 @@ class MaserDiskModel(ModelBase):
                 "phi integration: peak-partition "
                 f"(systemic: two {self._n_phi_partition_sys}-node "
                 "half-plane scans; "
-                f"HV: {self._n_phi_partition_hv}-node half-plane scan)")
+                f"HV: {self._n_phi_partition_hv}-node half-plane scan; "
+                f"root capacity: {self._phi_partition_root_capacity})")
             fprint(
                 "phi local extrema: full half-plane scans")
             fprint(
@@ -625,12 +677,31 @@ class MaserDiskModel(ModelBase):
             refine_str = "off"
         elif self.phi_integration == "peak-partition":
             refine_str = "three-point global-scan interpolation"
+            if self._peak_r_refine_steps:
+                refine_str += (
+                    " + "
+                    f"{self._peak_r_refine_steps}x"
+                    f"{self._peak_r_refine_order}-point local stencil")
+                if self._peak_r_refine_hv_only:
+                    refine_str += " (high-velocity groups only)"
+                if self._peak_r_width_steps:
+                    refine_str += (
+                        f" + {self._peak_r_width_steps}-step "
+                        "Delta-logL width solve")
         else:
             refine_str = f"Brent ({self._n_refine_steps} steps)"
         fprint(
             f"conditional r-MAP grid: n_r_local={self._n_r_local}, "
             f"n_r_global={self._n_r_global}, refinement={refine_str}, "
             f"K={self._K_sigma}")
+        if self._global_r_full_support:
+            fprint("global-radius scan: full physical support")
+        if self._scan_width_drop > 0.0:
+            fprint(
+                "local-radius width: max(propagated, scan envelope at "
+                f"Delta logL={self._scan_width_drop:g})")
+        if self._asymmetric_r_local:
+            fprint("local-radius grid: independent left/right support")
 
     def r_ang_range(self, D_A):
         """r_ang range in mas corresponding to physical R_phys bounds at D_A.
@@ -704,7 +775,7 @@ class MaserDiskModel(ModelBase):
         """Per-spot argmax on the phi-marginalised global radius grid."""
         n = int(idx.shape[0])
         if n == 0:
-            return None, None, None
+            return None, None, None, None
         n_r = int(r_global.shape[0])
         if self.phi_integration == "peak-partition":
             r_chunk = n_r
@@ -715,6 +786,7 @@ class MaserDiskModel(ModelBase):
         spot_chunk = max(1, int(spot_chunk))
 
         r_parts = []
+        s_parts = []
         ll_parts = []
         ll_grid_parts = []
         overflow_grid_parts = []
@@ -737,7 +809,6 @@ class MaserDiskModel(ModelBase):
                         self._phi_partition_group_log_integral(
                             type_key, r_pre,
                             self._phi_partition_scan_size(type_key)))
-                    ll_chunk = jnp.where(overflow, -jnp.inf, ll_chunk)
                     overflow_parts.append(overflow)
                 else:
                     nhc = self._phi_eval_shared_r(
@@ -757,6 +828,12 @@ class MaserDiskModel(ModelBase):
                 if self.phi_integration == "peak-partition"
                 else r_global[best])
             r_parts.append(r_best)
+            if self._scan_width_drop > 0.0:
+                s_parts.append(_scan_log_radius_scale(
+                    r_global, ll_scan, r_best,
+                    self._scan_width_drop, self._K_sigma))
+            else:
+                s_parts.append(jnp.zeros_like(r_best))
             ll_parts.append(jnp.take_along_axis(
                 ll_scan, best[:, None], axis=-1).squeeze(-1))
             if cache_scan:
@@ -770,7 +847,8 @@ class MaserDiskModel(ModelBase):
                        jnp.concatenate(overflow_grid_parts))
         else:
             ll_grid = jnp.concatenate(ll_grid_parts)
-        return (jnp.concatenate(r_parts), jnp.concatenate(ll_parts), ll_grid)
+        return (jnp.concatenate(r_parts), jnp.concatenate(ll_parts),
+                ll_grid, jnp.concatenate(s_parts))
 
     def _compute_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2,
                        i0, var_v_hv, phys_args, phys_kw, r_global,
@@ -782,10 +860,11 @@ class MaserDiskModel(ModelBase):
         for type_key, idx in [("sys", self._idx_sys),
                               ("red", self._idx_red),
                               ("blue", self._idx_blue)]:
-            r_scan, ll_scan_best, ll_scan = self._scan_on_global_grid(
-                type_key, idx, r_global, phys_args, phys_kw,
-                spot_chunk=self._conditional_spot_batch,
-                cache_scan=cache_scan)
+            r_scan, ll_scan_best, ll_scan, s_scan = (
+                self._scan_on_global_grid(
+                    type_key, idx, r_global, phys_args, phys_kw,
+                    spot_chunk=self._conditional_spot_batch,
+                    cache_scan=cache_scan))
             if r_scan is None:
                 continue
             if cache_scan:
@@ -796,10 +875,9 @@ class MaserDiskModel(ModelBase):
                 r_cf, idx, *phys_args, **phys_kw,
                 has_any_accel=has_any_accel)
             if self.phi_integration == "peak-partition":
-                ll_cf, _, overflow = self._phi_partition_group_log_integral(
+                ll_cf, _, _ = self._phi_partition_group_log_integral(
                     type_key, r_pre_cf,
                     self._phi_partition_scan_size(type_key))
-                ll_cf = jnp.where(overflow, -jnp.inf, ll_cf)
             else:
                 pc = self._phi_concat[type_key]
                 nhc_cf = self._phi_eval(
@@ -809,6 +887,7 @@ class MaserDiskModel(ModelBase):
             scan_wins = ll_scan_best >= ll_cf
             r_best = jnp.where(scan_wins, r_scan, r_cf)
             r_est = r_est.at[idx].set(r_best)
+            s_prop = s_prop.at[idx].set(jnp.maximum(s_prop[idx], s_scan))
         if self._n_sys_uncons > 0:
             log_bin = ((jnp.log(r_global[-1]) - jnp.log(r_global[0]))
                        / (r_global.shape[0] - 1))
@@ -837,8 +916,11 @@ class MaserDiskModel(ModelBase):
         r_cf, _, r_min, r_max = self._closed_form_seeds(
             D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
         valid = self.is_highvel | self._all_has_accel.astype(bool)
-        r_lo_data, r_hi_data = _conditional_global_r_window(
-            valid, r_cf, r_min, r_max)
+        if self._global_r_full_support:
+            r_lo_data, r_hi_data = r_min, r_max
+        else:
+            r_lo_data, r_hi_data = _conditional_global_r_window(
+                valid, r_cf, r_min, r_max)
         r_global, _ = self._build_global_r_grid(r_lo_data, r_hi_data)
 
         r_est, s_fallback, r_min, r_max, scan_values = self._compute_seeds(
@@ -899,6 +981,19 @@ class MaserDiskModel(ModelBase):
         log_r_min = jnp.log(r_min)
         log_r_max = jnp.log(r_max)
         log_r_c = jnp.log(r_c)
+        if self._asymmetric_r_local:
+            unit = self._sinh_t_frozen / self._K_sigma
+            nominal_half_span = self._K_sigma * s
+            left_span = jnp.minimum(
+                nominal_half_span, log_r_c - log_r_min)
+            right_span = jnp.minimum(
+                nominal_half_span, log_r_max - log_r_c)
+            offset = jnp.where(
+                unit[None, :] < 0.0,
+                unit[None, :] * left_span[:, None],
+                unit[None, :] * right_span[:, None])
+            r = jnp.exp(log_r_c[:, None] + offset)
+            return r, _trapz_log_w_per_spot(r)
         s_cap = (jnp.minimum(log_r_c - log_r_min,
                              log_r_max - log_r_c) / self._K_sigma)
         s = jnp.minimum(s, s_cap)
@@ -943,8 +1038,11 @@ class MaserDiskModel(ModelBase):
         r_cf, _, r_min, r_max = self._closed_form_seeds(
             D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
         valid = self.is_highvel | self._all_has_accel.astype(bool)
-        r_lo_data, r_hi_data = _conditional_global_r_window(
-            valid, r_cf, r_min, r_max)
+        if self._global_r_full_support:
+            r_lo_data, r_hi_data = r_min, r_max
+        else:
+            r_lo_data, r_hi_data = _conditional_global_r_window(
+                valid, r_cf, r_min, r_max)
         r_global, _ = self._build_global_r_grid(r_lo_data, r_hi_data)
 
         r_est, s_fallback, r_min, r_max, _ = self._compute_seeds(
@@ -989,10 +1087,126 @@ class MaserDiskModel(ModelBase):
                                phys_args, phys_kw, with_width=True):
         """Refine the fixed-grid centre via Brent's method in log(r)."""
         if self.phi_integration == "peak-partition":
-            # The global scan already applies a three-point interpolation in
-            # log(r). Avoid repeating the full phi peak search in Brent's
-            # 32-step objective and use the scan-derived fallback width.
-            return r_est_group, s_fallback
+            # The shared global scan is intentionally coarse. Narrow a small
+            # bracket around its interpolated/closed-form winner with fixed
+            # value-only stencils. This remains branch-free under JIT, uses
+            # the exact circular/eccentric phi marginal, and is far cheaper
+            # than applying the fixed-grid Brent objective spot by spot.
+            if (self._peak_r_refine_steps == 0
+                    or (self._peak_r_refine_hv_only
+                        and type_key == "sys")):
+                return r_est_group, s_fallback
+            dtype = r_est_group.dtype
+            ell_lo = jnp.log(r_min * 1.01)
+            ell_hi = jnp.log(r_max * 0.99)
+            ell_est = jnp.log(r_est_group)
+            log_bin = ((jnp.log(r_max) - jnp.log(r_min))
+                       / (self._n_r_global - 1))
+            bracket_half = 3.0 * log_bin
+            a0 = jnp.maximum(ell_est - bracket_half, ell_lo)
+            b0 = jnp.minimum(ell_est + bracket_half, ell_hi)
+            fractions = jnp.linspace(
+                0.0, 1.0, self._peak_r_refine_order, dtype=dtype)
+            has_any_accel = self._group_has_any_accel(type_key)
+
+            def narrow(_, state):
+                a, b = state
+                ell = a[:, None] + (b - a)[:, None] * fractions
+                r_pre = self._r_precompute(
+                    jnp.exp(ell), idx, *phys_args, **phys_kw,
+                    has_any_accel=has_any_accel)
+                values, _, _ = self._phi_partition_group_log_integral(
+                    type_key, r_pre,
+                    self._phi_partition_scan_size(type_key))
+                centre = jnp.argmax(values, axis=-1)
+                left = jnp.clip(
+                    centre - 1, 0, self._peak_r_refine_order - 3)
+                new_a = jnp.take_along_axis(
+                    ell, left[:, None], axis=-1).squeeze(-1)
+                new_b = jnp.take_along_axis(
+                    ell, (left + 2)[:, None], axis=-1).squeeze(-1)
+                return new_a, new_b
+
+            a, b = jax.lax.fori_loop(
+                0, self._peak_r_refine_steps, narrow, (a0, b0))
+
+            # The propagated velocity/acceleration width can be orders of
+            # magnitude broader than an astrometrically constrained radial
+            # needle (notably NGC4258). Estimate the log-radius curvature
+            # and vertex from the final numerical bracket using the same
+            # marginalized likelihood.  The vertex removes the residual
+            # bracket-midpoint bias without another physics evaluation. For
+            # a local Gaussian the curvature gives its exact sigma and makes
+            # the local sinh grid resolve, rather than step over, the peak.
+            # Fall back whenever the local mode is not concave/finite or its
+            # fitted vertex lies outside the final bracket.
+            ell_mid = 0.5 * (a + b)
+            h = 0.5 * (b - a)
+            offsets = jnp.asarray((-1.0, 0.0, 1.0), dtype=dtype)
+            ell_probe = ell_mid[:, None] + h[:, None] * offsets
+            r_pre = self._r_precompute(
+                jnp.exp(ell_probe), idx, *phys_args, **phys_kw,
+                has_any_accel=has_any_accel)
+            probe, _, _ = self._phi_partition_group_log_integral(
+                type_key, r_pre, self._phi_partition_scan_size(type_key))
+            second = probe[:, 0] - 2.0 * probe[:, 1] + probe[:, 2]
+            vertex_offset = 0.5 * h * (probe[:, 0] - probe[:, 2]) / second
+            good_vertex = ((second < 0.0) & jnp.isfinite(second)
+                           & jnp.isfinite(vertex_offset)
+                           & (jnp.abs(vertex_offset) <= h))
+            ell_opt = ell_mid + jnp.where(good_vertex, vertex_offset, 0.0)
+            r_opt = jnp.exp(ell_opt)
+            r_c = jnp.where(jnp.isfinite(r_opt), r_opt, r_est_group)
+
+            curvature = -second / (h * h)
+            s_curvature = jax.lax.rsqrt(jnp.maximum(curvature, 1e-30))
+            good_width = ((curvature > 0.0) & jnp.isfinite(curvature)
+                          & jnp.isfinite(s_curvature))
+            s = jnp.where(good_width, s_curvature, s_fallback)
+
+            if self._peak_r_width_steps:
+                # A three-point curvature is extremely cheap, but once the
+                # radial likelihood becomes needle-like it can be dominated
+                # by tiny numerical differences and make the sinh grid much
+                # too broad.  Solve the same Delta-logL = K^2/2 half-width
+                # used by the fixed-grid path instead.  Both sides and all
+                # spots remain in one static, value-only batch, so this is
+                # compatible with eccentric orbits and XLA control flow.
+                safe_h = jnp.maximum(h, jnp.finfo(dtype).tiny)
+                vertex_ratio = jnp.where(
+                    good_vertex, vertex_offset / safe_h, 0.0)
+                value_opt = (probe[:, 1]
+                             - 0.5 * second * vertex_ratio * vertex_ratio)
+                directions = jnp.asarray((-1.0, 1.0), dtype=dtype)
+                width_lo = jnp.zeros((idx.shape[0], 2), dtype=dtype)
+                width_hi = jnp.stack(
+                    (ell_opt - ell_lo, ell_hi - ell_opt), axis=-1)
+                target_drop = jnp.asarray(
+                    0.5 * self._K_sigma * self._K_sigma, dtype=dtype)
+
+                def narrow_width(_, state):
+                    lo, hi = state
+                    mid = 0.5 * (lo + hi)
+                    ell = ell_opt[:, None] + directions[None, :] * mid
+                    r_pre = self._r_precompute(
+                        jnp.exp(ell), idx, *phys_args, **phys_kw,
+                        has_any_accel=has_any_accel)
+                    values, _, _ = self._phi_partition_group_log_integral(
+                        type_key, r_pre,
+                        self._phi_partition_scan_size(type_key))
+                    inside = ((value_opt[:, None] - values) < target_drop)
+                    return (jnp.where(inside, mid, lo),
+                            jnp.where(inside, hi, mid))
+
+                width_lo, width_hi = jax.lax.fori_loop(
+                    0, self._peak_r_width_steps, narrow_width,
+                    (width_lo, width_hi))
+                half_width = 0.5 * (width_lo + width_hi)
+                s_drop = jnp.max(half_width, axis=-1) / self._K_sigma
+                good_drop = ((s_drop > 0.0) & jnp.isfinite(s_drop)
+                             & jnp.isfinite(value_opt))
+                s = jnp.where(good_drop, s_drop, s)
+            return r_c, s
         pc = self._phi_concat[type_key]
         sin_phi = pc["sin_phi"]
         cos_phi = pc["cos_phi"]
@@ -1442,8 +1656,8 @@ class MaserDiskModel(ModelBase):
 
     def _phi_partition_log_integral(
             self, r_pre, phi_lo, phi_hi, n_scan,
-            root_capacity=8, root_steps=6, root_order=9, drop=24.0,
-            drop_steps=16, core_order=24, tail_order=8):
+            root_capacity=8, root_steps=4, root_order=7, drop=24.0,
+            drop_steps=12, core_order=24, tail_order=8):
         """Log-integrate phi after partitioning at numerical extrema.
 
         ``r_pre`` must use per-spot radii, with shape ``(N,)`` or
@@ -1466,6 +1680,8 @@ class MaserDiskModel(ModelBase):
         dtype = r_pre["r_ang"].dtype
         phi_scan = jnp.linspace(phi_lo, phi_hi, n_scan, dtype=dtype)
         ell_scan = self._phi_value(r_pre, phi_scan)
+        scan_fallback = logsumexp(
+            ell_scan + trapz_log_weights(phi_scan), axis=-1)
         delta = ell_scan[..., 1:] - ell_scan[..., :-1]
         finite = jnp.isfinite(delta)
         rising = delta > 0.0
@@ -1490,7 +1706,13 @@ class MaserDiskModel(ModelBase):
         value = self._integrate_phi_roots(
             r_pre, roots, root_count, phi_lo, phi_hi, root_capacity,
             drop, drop_steps, core_order, tail_order)
-        return value, root_count, root_count > root_capacity
+        overflow = root_count > root_capacity
+        # A capacity overflow must not turn a merely poor DE proposal into
+        # -inf.  The fixed scan has already been evaluated, so its trapezoid
+        # integral is a finite, branch-free fallback with no extra physics
+        # calls.  Diagnostics still expose the overflow to validation.
+        value = jnp.where(overflow, scan_fallback, value)
+        return value, root_count, overflow
 
     def _phi_partition_group_log_integral(
             self, type_key, r_pre, n_scan, **partition_kw):
@@ -1501,6 +1723,10 @@ class MaserDiskModel(ModelBase):
         count is the maximum in any contributing half-plane, so capacity and
         overflow remain per-half-plane diagnostics.
         """
+        partition_kw.setdefault(
+            "root_capacity",
+            getattr(self, "_phi_partition_root_capacity", 8))
+
         if type_key == "sys":
             ranges = ((-jnp.pi, 0.0), (0.0, jnp.pi))
         elif type_key in ("red", "blue"):
@@ -1616,27 +1842,21 @@ class MaserDiskModel(ModelBase):
                 has_any_accel=has_any_accel)
             lnorm_b = r_pre["lnorm"] + r_pre["lnorm_a"]
             if self.phi_integration == "peak-partition":
-                ll_phi, _, overflow = (
+                ll_phi, _, _ = (
                     self._phi_partition_group_log_integral(
                         type_key, r_pre,
                         self._phi_partition_scan_size(type_key)))
                 if lwr_b is None:
-                    return lnorm_b + jnp.where(
-                        overflow, -jnp.inf, ll_phi)
+                    return lnorm_b + ll_phi
                 if cache_b is not None:
-                    ll_local = jnp.where(overflow, -jnp.inf, ll_phi)
                     ll_nodes = jnp.concatenate(
-                        [ll_local, cache_b[1]], axis=-1)
+                        [ll_phi, cache_b[1]], axis=-1)
                     ll_sorted = jnp.take_along_axis(
                         ll_nodes, cache_b[2], axis=-1)
                     ll = logsumexp(ll_sorted + lwr_b, axis=-1)
-                    any_overflow = jnp.any(jnp.concatenate(
-                        [overflow, cache_b[3]], axis=-1), axis=-1)
-                    return lnorm_b + jnp.where(
-                        any_overflow, -jnp.inf, ll)
+                    return lnorm_b + ll
                 ll = logsumexp(ll_phi + lwr_b, axis=-1)
-                return lnorm_b + jnp.where(
-                    jnp.any(overflow, axis=-1), -jnp.inf, ll)
+                return lnorm_b + ll
             # _phi_eval returns −½χ² only; lnorm is added after
             # logsumexp so the max-subtraction acts on bounded χ²
             # differences (protects float32 precision).

@@ -3,7 +3,7 @@
 Supported megamaser workflow:
 
 - `run_maser.py`: unified megamaser runner. It defaults to `--sampler mcmc` (the explicit-latent `(r_ang, phi)` NUTS chain); use `--sampler de` for the 2D-marginal differential-evolution MAP (delegates to `run_de_map.py`), the global search used to seed the MCMC.
-- `run_de_map.py`: 2D-marginal MAP optimiser. Per spot it marginalises `(r_ang, phi)` jointly on a conditional per-spot r-grid (`_build_conditional_r_grids` + `_sum_phi_marginal`; not phi at a profiled `r_ang`, which overfits `D_A`) and optimises the globals with differential evolution. Phi integration defaults to the fixed grids in `config_maser.toml`; DE can opt into the fixed-shape peak-partition routine with `--phi-integration peak-partition`. Reached via `run_maser.py --sampler de`.
+- `run_de_map.py`: 2D-marginal MAP optimiser. Per spot it marginalises `(r_ang, phi)` jointly on a conditional per-spot r-grid (`_build_conditional_r_grids` + `_sum_phi_marginal`; not phi at a profiled `r_ang`, which overfits `D_A`) and optimises the globals with differential evolution. Phi integration defaults to the GPU-shaped peak-partition routine in `config_maser.toml`; the legacy fixed grids remain selectable with `--phi-integration fixed-grid`. Reached via `run_maser.py --sampler de`.
 - `benchmark_de_batching.py`: fixed-candidate exact-likelihood benchmark for
   spot batching. Suite mode uses fresh child processes, bypasses SQLite, and
   reads candidates from the current compatible DE checkpoint, or uses a
@@ -129,19 +129,35 @@ use for example:
 
 ```bash
 python scripts/megamaser/benchmark_de_batching.py UGC3789 --suite \
+    --phi-integration peak-partition --candidate-wave 8 \
     --spot-batches 8,16,34,68,all,68 \
     --candidates 128 --warmups 3 --repeats 1 --n-devices 2 \
     --trace-memory --include-fixed-score
 ```
 
 The JSON records both JAX live/peak bytes and sampled `nvidia-smi` resident
-memory. It also reports the raw grid geometry by spot class. For scan-based
-spot batching, the first-order live-array scale is
-`spot_batch * n_r * n_phi * dtype_bytes`. The truly unbatched path selected by
+memory. It also reports method-aware first-order scan geometry by spot class:
+the fixed method uses its local/global radial union and dense phi grid, while
+peak partition reports the larger separate radial pass and its small
+partition scan. Root refinement and quadrature create shorter-lived arrays,
+so JAX `peak_bytes_in_use` remains the authoritative whole-executable number.
+For scan-based spot batching, the first-order live-array scale is
+`spot_batch * n_r * n_phi * half_planes * dtype_bytes` (two independent
+half-planes for systemic peak partition, one otherwise). The truly unbatched path selected by
 `--spot-batch all` can have a different, more strongly fused XLA memory plan,
 so benchmark it directly rather than extrapolating a scan-batch fit. Resident
 memory can also jump in allocator buckets; use the sampled peak when
 establishing a card-specific limit.
+
+`--phi-integration peak-partition` permits a head-to-head benchmark before a
+galaxy is switched in the TOML configuration. `--candidate-wave 1|2|4|8`
+overrides only the peak-partition GPU wave width; omitting it uses the same
+production policy as `run_de_map.py` (currently eight for peak partition and
+one for fixed grid). Every suite child reports the resolved integrator and
+wave width alongside the output digest. Because different exact spot tilings
+can change float32 reduction order, the suite also reports cross-tiling maximum
+and RMS differences plus finite-mask mismatches; repeated copies of the same
+tiling retain the stricter bitwise digest check.
 
 For GPU jobs, `--gpu-count N` requests N GPUs and `--cpus C` means C CPU cores
 per GPU. Use `--cpus 2` for multi-GPU Glamdring jobs with the default 7 GB per
@@ -188,34 +204,64 @@ Pesce/Reid-reported/config/MCMC-median comparison table scored with the same
 
 The main config is `config_maser.toml`.
 
-The DE objective uses `phi_integration = "fixed-grid"` by default. To use the
-GPU-shaped peak-partition quadrature, pass:
+The all-galaxy validated DE default is `phi_integration = "peak-partition"`.
+The legacy dense fixed grid remains available for controlled comparisons:
 
 ```bash
 ./scripts/megamaser/submit.sh -q short --sampler de --galaxy NGC4258 \
     --gpu-mem 32 --gpu-count 2 --spot-batch 47 \
-    --phi-integration peak-partition
+    --phi-integration fixed-grid
 ```
 
-This mode always searches the two systemic half-planes independently using
-513 nodes per half-plane, and uses 257 nodes for each red/blue half-plane. It
+Peak partition searches the two systemic half-planes independently using
+129 nodes per half-plane, and uses 65 nodes for each red/blue half-plane;
+validated per-galaxy overrides can raise either scan independently. It
 then locates extrema from neighbouring likelihood values, refines all fixed-size
 brackets in parallel, and integrates peak/tail partitions. All 128 global
-radii are scanned concurrently, and radius-only position, velocity, and
-acceleration terms are precomputed once. The global-radius scan uses a
-three-point log-radius interpolation for the local-grid centre, avoiding the
-former nested 32-step radial Brent solve. Its phi marginals are reused in the
-final local/global union, including for eccentric models. At every precision,
-each of the 256 local-radius nodes performs the original full 513/257-node
-half-plane scan. Local phi-extrema reuse was removed after NGC4258 tests found
-that it could shift very sharp eccentric likelihoods. Peak-partition v4
-therefore rejects older peak checkpoints rather than mixing objective values.
+radii span the full physical support and are scanned concurrently; radius-only
+position, velocity, and acceleration terms are precomputed once. A three-point
+log-radius interpolation supplies the local-grid centre, avoiding the former
+nested 32-step radial Brent solve and its width searches. Optional fixed-shape
+value-only radial stencils are off by default. The
+`peak_r_refine_hv_only` selector can restrict an enabled stencil to red/blue
+spots when population diagnostics show that systemic radii do not need it;
+the numerical objective policy records that scope.
+The global phi marginals are reused in the final local/global union, including
+for eccentric models. Independent left and right local-radius spans retain
+useful quadrature support when a seed is close to a physical boundary. At every
+precision, every local-radius node performs a fresh per-galaxy half-plane
+scan; local phi-extrema are not reused.  The standard local grid has 256
+nodes, with validated radial overrides listed below.
+Circular disks use the structural four-root capacity, while eccentric disks
+retain eight because their rational velocity factor breaks the circular
+trigonometric-polynomial bound. A capacity overflow falls back to the already
+computed scan trapezoid, producing a finite poor-fit objective while retaining
+an explicit overflow diagnostic. Peak-partition v6 and fixed-grid radial-policy
+v2 therefore reject older checkpoints rather than mixing objective values.
+For a galaxy whose radial likelihood is exceptionally narrow, the optional
+peak-radius path first narrows a log-radius bracket with fixed value-only
+stencils, takes a guarded three-point quadratic vertex, and can solve the two
+`Delta logL = K_sigma^2 / 2` half-widths by fixed-count bisection. The width
+solve is batched over spots and both directions, uses no derivatives or
+circular-orbit formula, and is therefore also valid for eccentric models.
 GPU jobs retain the persistent JAX compilation cache; CPU runs keep the
 conservative cache-disable guard after an earlier PjRt deserialisation failure.
-Its GPU memory planner is not yet calibrated, so explicit `--spot-batch` and
-the per-galaxy config remain authoritative. To compare candidate concurrency
+Explicit `--spot-batch` and the per-galaxy config remain authoritative. To
+compare candidate concurrency
 on a particular GPU, rerun with `--peak-candidates-per-wave 2`, `4`, and `8`
 and compare the steady Sobol `cand/s`; 8 remains the default.
+
+The checked-in profiles use 97/49 scans for CGCG074-064, NGC5765b, and
+UGC3789; NGC6264 and NGC6323 retain 129/65.  NGC5765b uses a centred
+321-node local-radius grid.  UGC3789 uses 384 local nodes and a
+`scan_width_drop = 50` support envelope.  NGC4258 uses 513/65 scans, three
+all-class radial refinements, an eight-step value-only width solve, and a
+32-spot tile.  NGC6264 also uses a 32-spot tile; the other float32 DE targets
+use all spots.  The complete circular/eccentric validation, pathological-point
+audit, sustained GPU speedups, memory measurements, and caveats are in
+`docs/notes/megamaser_phi_integration_all_galaxies.md`; the preceding
+algorithm-development study is
+`docs/notes/megamaser_phi_integration_research.md`.
 
 ### Fixed-grid versus peak-partition validation
 
@@ -271,7 +317,30 @@ per-candidate `eval s` column timing the pure production objective (one warm
 evaluation, median of `timing_repeats`) for each method; method-dependent
 values are printed as `fixed-grid | peak-partition`. Reference-convergence
 failures and root-capacity overflows are listed below the table.
-The current config default is `fixed-grid`; the validator does not change it.
+The global config default is `peak-partition`; the validator still constructs
+and compares both production methods without mutating the checked-in config.
+
+To validate the actual best point from a completed DE run, add its checkpoint
+as a candidate. The loader requires identical parameter names, sizes, bounds,
+and peak-objective policy before converting the saved unit-box point. The
+archived NGC4258 reconnaissance below predates v6, so its coordinate is an
+explicit cross-policy experiment:
+
+```bash
+bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu \
+    --galaxies NGC4258 --sobol-candidates 0 --no-config-point \
+    --no-pesce-point \
+    --checkpoint-candidate \
+    results/Megamaser/de_checkpoints/NGC4258/de_ckpt_rmap_peakpartition_lshade_nopesce.npz \
+    --allow-checkpoint-policy-mismatch
+```
+
+For a deliberate cross-policy numerical experiment, add
+`--allow-checkpoint-policy-mismatch`. This only permits the saved coordinate
+to be rescored under the tested objective; layout, bounds, unit-box finiteness,
+and saved-fitness finiteness remain hard checks, and both policy strings plus
+the mismatch are written to the report. Normal checkpoint loading remains
+strict.
 
 Every candidate is judged against the full dense float64 reference ladder.
 On a cache miss every level is computed; an exact cache hit loads the complete
@@ -372,7 +441,8 @@ bash scripts/megamaser/convergence/validate_phi_partition.sh --local \
 ```
 
 The whitelist is shown below. Fixed-grid exposes its three phi node counts;
-peak-partition exposes its two scan counts; both expose the
+peak-partition exposes its two scan counts plus root refinement, radial
+stencil/width, and quadrature controls; both expose the
 config-backed conditional-radius controls. Overrides are recorded separately
 for each method in the terminal, JSON, and Markdown reports. Keep the galaxy,
 variant, seed, candidate options, and reference options fixed across trials.
@@ -380,8 +450,9 @@ An agent can treat a zero exit code and `passed: true` as the feasibility gate,
 then rank feasible trials by the selected method's warmed throughput in
 `cases[].timing`. Local CPU trials are suitable for accuracy and workflow
 checks; final performance choices must be repeated on the production GPU.
-The NGC6264 pilot protocol, pass/fail boundary, and follow-up plan are recorded
-in `docs/notes/megamaser_phi_agentic_tuning.md`.
+The completed all-galaxy multi-loop benchmark, physical analysis, pass/fail
+boundaries, and production recommendation are recorded in
+`docs/notes/megamaser_phi_integration_all_galaxies.md`.
 
 The production objective timing separates the cold compile/evaluation from
 warmed throughput and records backend peak memory when JAX exposes it.

@@ -23,12 +23,13 @@ mass_parameterization = "eta"  # choices: "eta", "log_mbh"
 R_phys_lo = 0.01
 R_phys_hi = 1.5
 
-# DE phi marginalisation. "fixed-grid" is the production default.
-# "peak-partition" locates stationary points on fixed-size half-plane scans,
-# refines them numerically, and integrates the resulting peak/tail partitions.
-phi_integration = "fixed-grid"
-n_phi_partition_sys = 513  # nodes in each systemic half-plane
-n_phi_partition_hv = 257   # nodes in the red/blue half-plane
+# DE phi marginalisation.  The value-only, fixed-shape peak partition is the
+# all-galaxy GPU-validated production default.  "fixed-grid" remains available
+# as the legacy comparison/debug path.  See the all-galaxy report in
+# docs/notes/megamaser_phi_integration_all_galaxies.md.
+phi_integration = "peak-partition"
+n_phi_partition_sys = 129  # nodes in each systemic half-plane
+n_phi_partition_hv = 65    # nodes in the red/blue half-plane
 
 # HV (red/blue): 3 uniform sub-ranges centred on the peak:
 #   [peak-outer, peak-inner]  (n_phi_hv_low points)
@@ -51,6 +52,23 @@ n_phi_sys = 10001
 n_r_local = 256
 n_r_global = 128
 K_sigma = 10.0
+# Scan the same number of global-radius nodes across the complete physical
+# support.  This catches disconnected modes at bad DE proposals without
+# adding nodes.  Independent local spans prevent a mode at one support edge
+# from collapsing the useful half of the sinh grid.
+global_r_full_support = true
+asymmetric_r_local = true
+# Peak-partition diagnostic: optionally narrow each coarse radial winner with
+# a batched value-only stencil before building the local quadrature grid.
+# The group selector can restrict this cost to high-velocity spots.  Both
+# controls are off by default; NGC4258 opts into all-class refinement below.
+peak_r_refine_steps = 0
+peak_r_refine_order = 7
+peak_r_refine_hv_only = false
+# Optional value-only solve for the local radial half-width at
+# Delta logL = K_sigma^2 / 2.  Zero keeps the inexpensive curvature width;
+# NGC4258 opts into the robust solve below.
+peak_r_width_steps = 0
 refine_r_center = true
 n_refine_steps = 32
 conditional_spot_batch = 16
@@ -185,6 +203,10 @@ D_de_hi = 125.0
 r_ang_ref_i = 0.416615
 r_ang_ref_Omega = 0.416615
 r_ang_ref_periapsis = 0.208308
+# The 97/49 scan preserves the circular/eccentric anchor and local-cloud
+# accuracy frontier while reducing the static GPU scan shape.
+n_phi_partition_sys = 97
+n_phi_partition_hv = 49
 
 [model.galaxies.CGCG074-064.init]
 # Updated on June 22
@@ -244,7 +266,18 @@ n_phi_sys = 60001
 r_ang_ref_i = 6.1
 r_ang_ref_Omega = 6.1
 r_ang_ref_periapsis = 3.0
-conditional_spot_batch = 16
+conditional_spot_batch = 32
+# Dense-reference validation at both the Pesce/Reid point and an independent
+# unseeded DE checkpoint supports the value-only peak path for NGC4258.  Its
+# eccentric Pesce stress point requires a 513-node systemic scan and the
+# three-pass value-only radial refinement for every spot class.  The width
+# solve remains eight fixed bisections.  See the all-galaxy report.
+phi_integration = "peak-partition"
+n_phi_partition_sys = 513
+n_phi_partition_hv = 65
+peak_r_refine_steps = 3
+peak_r_refine_hv_only = false
+peak_r_width_steps = 8
 
 [model.galaxies.NGC4258.init]
 D_c = 7.6368
@@ -274,6 +307,12 @@ D_de_hi = 145.0
 r_ang_ref_i = 0.969575
 r_ang_ref_Omega = 0.969575
 r_ang_ref_periapsis = 0.484787
+# The narrow-mode radial frontier is non-monotonic: 289/320/384/385/416 fail
+# at least one stress case, while centred 321 and dense 448/512 pass.  Use the
+# cheapest profile that passes both orbit classes.
+n_phi_partition_sys = 97
+n_phi_partition_hv = 49
+n_r_local = 321
 
 [model.galaxies.NGC5765b.init]
 # Updated on June 22
@@ -326,6 +365,8 @@ D_de_hi = 170.0
 r_ang_ref_i = 0.572839
 r_ang_ref_Omega = 0.572839
 r_ang_ref_periapsis = 0.286420
+# Sustained RTX 3090 timing favours a 32-spot tile for this compact data set.
+conditional_spot_batch = 32
 
 [model.galaxies.NGC6264.init]
 # Updated on June 22
@@ -433,6 +474,12 @@ r_ang_ref_periapsis = 0.289775
 # Denser HV-inner phi grid than the other MCP galaxies.
 n_phi_hv_high = 10001
 n_phi_hv_low = 2501
+# A 97/49 angular scan plus wider, denser local-radius quadrature resolves the
+# converged eccentric local-config stress point missed by the legacy grid.
+n_phi_partition_sys = 97
+n_phi_partition_hv = 49
+n_r_local = 384
+scan_width_drop = 50.0
 
 [model.galaxies.UGC3789.init]
 # Updated on June 22

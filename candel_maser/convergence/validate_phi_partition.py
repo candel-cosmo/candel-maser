@@ -19,6 +19,7 @@ import tempfile
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -70,6 +71,18 @@ COMMON_SCHEME_SETTINGS = {
     "K_sigma": (float, 0.0),
     "n_refine_steps": (int, 1),
     "refine_r_center": (bool, None),
+    "global_r_full_support": (bool, None),
+    "scan_width_drop": (float, 0.0),
+    "asymmetric_r_local": (bool, None),
+}
+PARTITION_FUNCTION_SETTINGS = {
+    "root_capacity": (int, 1),
+    "root_steps": (int, 1),
+    "root_order": (int, 5),
+    "drop": (float, 0.0),
+    "drop_steps": (int, 1),
+    "core_order": (int, 1),
+    "tail_order": (int, 1),
 }
 SCHEME_SETTINGS = {
     "fixed-grid": {
@@ -80,8 +93,13 @@ SCHEME_SETTINGS = {
     },
     "peak-partition": {
         **COMMON_SCHEME_SETTINGS,
+        **PARTITION_FUNCTION_SETTINGS,
         "n_phi_partition_sys": (int, 3),
         "n_phi_partition_hv": (int, 3),
+        "peak_r_refine_steps": (int, 0),
+        "peak_r_refine_order": (int, 3),
+        "peak_r_refine_hv_only": (bool, None),
+        "peak_r_width_steps": (int, 0),
     },
 }
 VARIANTS = {
@@ -145,6 +163,8 @@ def _numerical_settings(model):
         for name, parameter in signature.parameters.items()
         if parameter.default is not inspect.Parameter.empty
     }
+    partition["root_capacity"] = int(
+        model._phi_partition_root_capacity)
     return {
         "n_phi_sys": int(model._n_phi_sys),
         "n_phi_hv_high": int(model._n_phi_hv_high),
@@ -154,6 +174,13 @@ def _numerical_settings(model):
         "n_r_local": int(model._n_r_local),
         "n_r_global": int(model._n_r_global),
         "K_sigma": float(model._K_sigma),
+        "global_r_full_support": bool(model._global_r_full_support),
+        "scan_width_drop": float(model._scan_width_drop),
+        "asymmetric_r_local": bool(model._asymmetric_r_local),
+        "peak_r_refine_steps": int(model._peak_r_refine_steps),
+        "peak_r_refine_order": int(model._peak_r_refine_order),
+        "peak_r_refine_hv_only": bool(model._peak_r_refine_hv_only),
+        "peak_r_width_steps": int(model._peak_r_width_steps),
         "conditional_spot_batch": model._conditional_spot_batch,
         **partition,
     }
@@ -293,6 +320,16 @@ def _parser():
     parser.add_argument("--no-config-point", action="store_true")
     parser.add_argument("--no-pesce-point", action="store_true")
     parser.add_argument(
+        "--checkpoint-candidate", action="append", type=Path, default=[],
+        help="Add the best solution from a compatible DE checkpoint NPZ as "
+             "a fully validated candidate; may be repeated.")
+    parser.add_argument(
+        "--allow-checkpoint-policy-mismatch", action="store_true",
+        help="Permit a checkpoint coordinate saved under a different "
+             "numerical objective to be rescored for an explicit method "
+             "comparison. Layout, bounds, and finite-value checks remain "
+             "strict; the mismatch is recorded in the report.")
+    parser.add_argument(
         "--reference-r-levels", type=_parse_levels,
         default=DEFAULT_REFERENCE_R_LEVELS)
     parser.add_argument(
@@ -320,6 +357,12 @@ def _parser():
     parser.add_argument("--candidate-wave", type=int,
                         choices=(1, 2, 4, 8), default=None,
                         help="Peak-partition candidate-wave override.")
+    parser.add_argument(
+        "--force-production-f64", action="store_true",
+        help="Evaluate both production schemes in float64 even when the "
+             "galaxy is normally configured for float32. This is a "
+             "diagnostic override; the independent reference is always "
+             "float64.")
     parser.add_argument(
         "--scheme-setting", action="append", type=_parse_scheme_setting,
         default=[], metavar="METHOD.KEY=VALUE",
@@ -355,6 +398,12 @@ def _validate_args(args):
         raise ValueError("--spot-batch must be positive.")
     if args.timing_repeats < 1 or args.n_devices < 1:
         raise ValueError("timing repeats and device count must be positive.")
+    missing_checkpoints = [
+        str(path) for path in args.checkpoint_candidate if not path.is_file()]
+    if missing_checkpoints:
+        raise ValueError(
+            "checkpoint candidates do not exist: "
+            + ", ".join(missing_checkpoints))
     if args.reference_tail_levels < 2:
         raise ValueError("--reference-tail-levels must be at least 2.")
     for galaxy in args.galaxies:
@@ -461,14 +510,20 @@ def reference_cache_key(metadata):
 
 def _git_metadata():
     def run(*args):
-        result = subprocess.run(
-            args, cwd=MASER_DIR.parent.parent, capture_output=True,
-            text=True, check=False)
+        try:
+            result = subprocess.run(
+                args, cwd=MASER_DIR.parent.parent, capture_output=True,
+                text=True, check=False)
+        except OSError:
+            return None
         return result.stdout.strip() if result.returncode == 0 else None
 
     revision = run("git", "rev-parse", "HEAD")
     dirty = run("git", "status", "--porcelain")
-    return {"revision": revision, "dirty": bool(dirty)}
+    return {
+        "revision": revision,
+        "dirty": None if dirty is None else bool(dirty),
+    }
 
 
 def _write_model_config(config, data, dtype):
@@ -483,6 +538,19 @@ def _write_model_config(config, data, dtype):
             tmp.close()
         os.unlink(tmp.name)
     return cast_model_floats(model, dtype)
+
+
+def _apply_partition_overrides(model, overrides):
+    settings = {
+        key: value for key, value in overrides.items()
+        if key in PARTITION_FUNCTION_SETTINGS
+    }
+    root_capacity = settings.pop("root_capacity", None)
+    if root_capacity is not None:
+        model._phi_partition_root_capacity = int(root_capacity)
+    if settings:
+        model._phi_partition_log_integral = partial(
+            model._phi_partition_log_integral, **settings)
 
 
 def _build_case(galaxy, variant, args, seed):
@@ -502,10 +570,17 @@ def _build_case(galaxy, variant, args, seed):
     case_gcfg = config["model"]["galaxies"][galaxy]
     case_gcfg["use_ecc"], case_gcfg["use_quadratic_warp"] = (
         VARIANTS[variant])
+    # ``--spot-batch`` changes only the exact execution tiling of a
+    # production objective.  Capture the reference identity before applying
+    # that override so GPU batching frontiers reuse the same independently
+    # computed dense arrays.  Variant flags stay in the hash because they
+    # change the physical predictions.
+    reference_config_hash = _sha256_json(config["model"])
     if args.spot_batch is not None:
         case_gcfg["conditional_spot_batch"] = int(args.spot_batch)
 
-    production_f64 = bool(gcfg.get("force_f64", False))
+    production_f64 = bool(
+        gcfg.get("force_f64", False) or args.force_production_f64)
     production_dtype = jnp.float64 if production_f64 else jnp.float32
     method_configs = {}
     models = {}
@@ -518,6 +593,7 @@ def _build_case(galaxy, variant, args, seed):
         method_configs[method] = method_config
         models[method] = _write_model_config(
             method_config, data, production_dtype)
+        _apply_partition_overrides(models[method], scheme_overrides[method])
     model = models["peak-partition"]
     reference_model = _write_model_config(
         method_configs["fixed-grid"], data, jnp.float64)
@@ -587,7 +663,7 @@ def _build_case(galaxy, variant, args, seed):
         "galaxy": galaxy,
         "variant": variant,
         "config": config,
-        "config_hash": _sha256_json(config["model"]),
+        "config_hash": reference_config_hash,
         "model": model,
         "models": models,
         "reference_model": reference_model,
@@ -632,6 +708,57 @@ def _reflect_unit_box(values):
     return np.where(cycle % 2 == 0, fraction, 1.0 - fraction)
 
 
+def _load_checkpoint_candidate(path, case, allow_policy_mismatch=False):
+    """Load one physical DE point after strict layout/policy validation."""
+    required = {
+        "best_solution", "best_fitness", "lo", "hi", "names", "sizes",
+        "objective_policy",
+    }
+    with np.load(path, allow_pickle=False) as checkpoint:
+        missing = sorted(required.difference(checkpoint.files))
+        if missing:
+            raise ValueError(
+                f"checkpoint candidate {path} is missing {missing}.")
+        names = [str(value) for value in checkpoint["names"]]
+        if names != list(case["names"]):
+            raise ValueError(
+                f"checkpoint candidate {path} parameter names do not match "
+                f"{case['galaxy']}/{case['variant']}.")
+        if not np.array_equal(checkpoint["sizes"], case["sizes"]):
+            raise ValueError(
+                f"checkpoint candidate {path} parameter sizes do not match.")
+        lo = np.asarray(checkpoint["lo"], dtype=np.float64)
+        hi = np.asarray(checkpoint["hi"], dtype=np.float64)
+        if (not np.allclose(lo, case["lo"], rtol=0.0, atol=0.0)
+                or not np.allclose(hi, case["hi"], rtol=0.0, atol=0.0)):
+            raise ValueError(
+                f"checkpoint candidate {path} DE bounds do not match.")
+        saved_policy = str(
+            np.asarray(checkpoint["objective_policy"]).item())
+        expected_policy = de._objective_policy(
+            case["models"]["peak-partition"])
+        policy_matches = saved_policy == expected_policy
+        if not policy_matches and not allow_policy_mismatch:
+            raise ValueError(
+                f"checkpoint candidate {path} objective policy "
+                f"{saved_policy!r} does not match {expected_policy!r}.")
+        unit = np.asarray(checkpoint["best_solution"], dtype=np.float64)
+        if (unit.shape != lo.shape or not np.all(np.isfinite(unit))
+                or np.any(unit < 0.0) or np.any(unit > 1.0)):
+            raise ValueError(
+                f"checkpoint candidate {path} best_solution is not a finite "
+                "point in the DE unit box.")
+        fitness = float(np.asarray(checkpoint["best_fitness"]).item())
+        if not np.isfinite(fitness):
+            raise ValueError(
+                f"checkpoint candidate {path} best_fitness is not finite.")
+    return lo + unit * (hi - lo), fitness, {
+        "saved": saved_policy,
+        "evaluated": expected_policy,
+        "matched": policy_matches,
+    }
+
+
 def _candidate_rows(case, args, seed):
     names, lo, hi = case["names"], case["lo"], case["hi"]
     scale = hi - lo
@@ -642,9 +769,10 @@ def _candidate_rows(case, args, seed):
 
     def add(source, source_kind, values):
         values = np.asarray(values, dtype=np.float64)
+        source_index = sum(
+            row["source_kind"] == source_kind for row in rows)
         rows.append({
-            "id": f"{source_kind}-{sum(
-                row['source_kind'] == source_kind for row in rows):04d}",
+            "id": f"{source_kind}-{source_index:04d}",
             "source": source,
             "source_kind": source_kind,
             "values": values,
@@ -679,10 +807,21 @@ def _candidate_rows(case, args, seed):
         except (KeyError, ValueError) as exc:
             status.append(f"Pesce/Reid point unavailable: {exc}")
 
-    for anchor_index, (kind, values) in enumerate(anchors):
+    for path in args.checkpoint_candidate:
+        values, fitness, policy = _load_checkpoint_candidate(
+            path, case, args.allow_checkpoint_policy_mismatch)
+        mismatch = ("; coordinate rescored under an explicitly different "
+                    "objective policy" if not policy["matched"] else "")
+        add(f"DE checkpoint {path} (saved logP={-fitness:.6g}{mismatch})",
+            "de-checkpoint", values)
+        rows[-1]["checkpoint_policy"] = policy
+
+    local_seed_offset = {"config": 0, "pesce-reid": 1}
+    for kind, values in anchors:
         centre = (np.asarray(values) - lo) / scale
         cloud = _sobol(
-            args.local_sobol, len(names), seed + 1000 + anchor_index)
+            args.local_sobol, len(names),
+            seed + 1000 + local_seed_offset[kind])
         for index, unit in enumerate(cloud):
             local = centre + (2.0 * unit - 1.0) * args.local_radius
             local = _reflect_unit_box(local)
@@ -2045,6 +2184,10 @@ def main(argv=None):
         "sobol_candidate_count": args.sobol_candidates,
         "local_sobol_per_anchor": args.local_sobol,
         "local_radius_de_unit_box": args.local_radius,
+        "checkpoint_candidates": [
+            str(path) for path in args.checkpoint_candidate],
+        "allow_checkpoint_policy_mismatch": bool(
+            args.allow_checkpoint_policy_mismatch),
         "radius_treatment": "conditional-r",
         "methods": list(METHODS),
         "scheme_setting_overrides": _scheme_overrides(

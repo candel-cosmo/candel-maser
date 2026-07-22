@@ -3,7 +3,7 @@
 # under the terms of the GNU General Public License as published by the
 # Free Software Foundation; either version 3 of the License, or
 # (at your option) any later version.
-"""Benchmark exact megamaser DE batching on fixed checkpoint candidates.
+"""Benchmark exact megamaser DE GPU tiling on fixed checkpoint candidates.
 
 The suite runs every configuration in a fresh child process so compiled JAX
 executables and allocator state cannot leak between measurements.  It bypasses
@@ -15,6 +15,7 @@ import atexit
 import copy
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -58,6 +59,14 @@ def _parser():
     parser.add_argument("--child", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--spot-batch", type=_spot_batch_arg, default=34)
+    parser.add_argument(
+        "--phi-integration", choices=("fixed-grid", "peak-partition"),
+        default=None,
+        help="Production integrator override (default: configured method).")
+    parser.add_argument(
+        "--candidate-wave", type=int, choices=(1, 2, 4, 8), default=None,
+        help="Peak-partition candidates evaluated concurrently per GPU "
+             "(default: production policy; fixed grid requires one).")
     parser.add_argument("--candidates", type=int, default=512)
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=3)
@@ -89,6 +98,7 @@ def _run_suite(args):
         if not spot_batches:
             raise ValueError("--spot-batches must not be empty.")
     results = []
+    reference_values = None
     for run_index, spot_batch in enumerate(spot_batches, 1):
         spot_label = _spot_batch_label(spot_batch)
         print("\n" + "=" * 72, flush=True)
@@ -104,6 +114,10 @@ def _run_suite(args):
             "--n-devices", str(args.n_devices),
             "--seed", str(args.seed),
         ]
+        if args.phi_integration is not None:
+            cmd.extend(["--phi-integration", args.phi_integration])
+        if args.candidate_wave is not None:
+            cmd.extend(["--candidate-wave", str(args.candidate_wave)])
         if args.trace_memory:
             cmd.append("--trace-memory")
         if args.include_fixed_score:
@@ -139,6 +153,31 @@ def _run_suite(args):
                 "status": f"exit-{completed.returncode}",
             }
         result["suite_wall_seconds"] = time.perf_counter() - start
+        values = result.pop("values", None)
+        if result.get("status") == "ok" and values is not None:
+            if reference_values is None:
+                reference_values = values
+            if len(values) != len(reference_values):
+                result["cross_tiling_shape_match"] = False
+                result["cross_tiling_finite_mask_mismatches"] = None
+                result["cross_tiling_max_abs_difference"] = None
+                result["cross_tiling_rms_difference"] = None
+            else:
+                finite_pairs = [
+                    (math.isfinite(a), math.isfinite(b), a, b)
+                    for a, b in zip(reference_values, values)]
+                differences = [
+                    float(b - a) for fa, fb, a, b in finite_pairs
+                    if fa and fb]
+                result["cross_tiling_shape_match"] = True
+                result["cross_tiling_finite_mask_mismatches"] = sum(
+                    fa != fb for fa, fb, _, _ in finite_pairs)
+                result["cross_tiling_max_abs_difference"] = (
+                    max(map(abs, differences)) if differences else None)
+                result["cross_tiling_rms_difference"] = (
+                    math.sqrt(sum(value * value for value in differences)
+                              / len(differences))
+                    if differences else None)
         results.append(result)
 
     print("\n" + "=" * 72, flush=True)
@@ -154,7 +193,7 @@ def _run_suite(args):
               + str(len(digests) == 1).lower(), flush=True)
 
 
-def _build_target(de, galaxy, spot_batch, seed):
+def _build_target(de, galaxy, spot_batch, seed, phi_integration=None):
     import jax
     import tomli_w
 
@@ -177,6 +216,8 @@ def _build_target(de, galaxy, spot_batch, seed):
         "optimise": copy.deepcopy(master.get("optimise", {})),
     }
     galaxy_config = config["model"]["galaxies"][galaxy]
+    if phi_integration is not None:
+        galaxy_config["phi_integration"] = phi_integration
     if spot_batch is None:
         galaxy_config.pop("conditional_spot_batch", None)
     else:
@@ -212,20 +253,34 @@ def _checkpoint_points(
         "de_checkpoints", galaxy)
     ckpt_path = os.path.join(
         ckpt_dir,
-        f"de_ckpt_rmap{de._variant_suffix(model)}_lshade_nopesce.npz")
-    if not os.path.isfile(ckpt_path):
+        f"de_ckpt_rmap{de._variant_suffix(model)}"
+        f"{de._phi_integration_suffix(model)}_lshade_nopesce.npz")
+
+    def sobol_fallback(reason):
         exponent = max(0, (int(candidates) - 1).bit_length())
         points = de.Sobol(
             d=len(names), scramble=True, seed=seed).random_base2(exponent)
         points = np.ascontiguousarray(points[:candidates], dtype=np.float32)
-        source = (f"scrambled Sobol seed={seed}; compatible checkpoint "
-                  f"absent at {ckpt_path}")
+        source = f"scrambled Sobol seed={seed}; {reason} at {ckpt_path}"
         return points, names, lo, hi, source
 
-    checkpoint = de._load_de_checkpoint(ckpt_path, lo, hi, names, sizes)
-    de._validate_de_checkpoint_policy(checkpoint, ckpt_path)
+    if not os.path.isfile(ckpt_path):
+        return sobol_fallback("compatible checkpoint absent")
+
+    checkpoint = None
+    try:
+        checkpoint = de._load_de_checkpoint(
+            ckpt_path, lo, hi, names, sizes)
+        de._validate_de_checkpoint_policy(
+            checkpoint, ckpt_path, de._objective_policy(model))
+    except (KeyError, ValueError) as exc:
+        if checkpoint is not None:
+            checkpoint.close()
+        return sobol_fallback(
+            "checkpoint incompatible (" + " ".join(str(exc).split()) + ")")
     population = np.asarray(checkpoint["population"], dtype=np.float32)
     if candidates > len(population):
+        checkpoint.close()
         raise ValueError(
             f"Requested {candidates} candidates from a checkpoint population "
             f"of {len(population)}.")
@@ -248,20 +303,39 @@ def _device_memory(devices):
 
 
 def _memory_geometry(model, dtype_bytes):
-    """Raw quadrature-grid bytes for one candidate and each spot class."""
-    n_r = int(model._n_r_local + model._n_r_global)
+    """First-order live scan geometry for one candidate.
+
+    Peak partition never materialises the legacy fixed-phi tensor described
+    by ``_phi_concat``.  Its local and cached-global radial passes are also
+    separate, so report the larger pass and the configured partition scan.
+    JAX ``peak_bytes_in_use`` remains the authoritative whole-executable
+    measurement because root refinement and quadrature use additional,
+    shorter-lived arrays.
+    """
+    peak_partition = model.phi_integration == "peak-partition"
+    n_r = int(max(model._n_r_local, model._n_r_global)
+              if peak_partition
+              else model._n_r_local + model._n_r_global)
     groups = {}
     for name in ("sys", "red", "blue"):
         n_spots = int(getattr(model, f"_n_{name}"))
-        n_phi = int(model._phi_concat[name]["sin_phi"].shape[0])
-        bytes_per_spot = n_r * n_phi * int(dtype_bytes)
+        n_half_planes = 2 if peak_partition and name == "sys" else 1
+        n_phi = int(
+            model._phi_partition_scan_size(name)
+            if peak_partition
+            else model._phi_concat[name]["sin_phi"].shape[0])
+        bytes_per_spot = (
+            n_half_planes * n_r * n_phi * int(dtype_bytes))
         groups[name] = {
             "n_spots": n_spots,
-            "n_phi": n_phi,
+            ("n_phi_scan" if peak_partition else "n_phi"): n_phi,
+            "n_half_planes": n_half_planes,
             "bytes_per_spot_candidate": bytes_per_spot,
             "all_spots_one_candidate_bytes": n_spots * bytes_per_spot,
         }
     return {
+        "policy": ("peak-partition largest radial scan pass"
+                   if peak_partition else "fixed-grid radial union"),
         "n_r": n_r,
         "dtype_bytes": int(dtype_bytes),
         "groups": groups,
@@ -369,7 +443,8 @@ def _run_child(args):
     import run_de_map as de
 
     model, target, master, init_params = _build_target(
-        de, args.galaxy, args.spot_batch, args.seed)
+        de, args.galaxy, args.spot_batch, args.seed,
+        phi_integration=args.phi_integration)
     points, names, lo, hi, candidate_source = _checkpoint_points(
         de, model, target, master, args.galaxy, args.candidates, args.seed)
     n_dev, devices = de._resolve_n_devices(args.n_devices)
@@ -392,7 +467,17 @@ def _run_child(args):
     def fitness_one(x_normed):
         return -logp(lo_jax + x_normed * scale_jax)
 
-    evaluate = de._make_batched_fitness(fitness_one, n_dev, devices)
+    if model.phi_integration == "fixed-grid":
+        if args.candidate_wave not in (None, 1):
+            raise ValueError(
+                "fixed-grid benchmarking requires candidate-wave 1")
+        candidate_wave = de._de_candidates_per_wave(model)
+    else:
+        candidate_wave = de._de_candidates_per_wave(
+            model, args.candidate_wave)
+    evaluate = de._make_batched_fitness(
+        fitness_one, n_dev, devices,
+        candidates_per_wave=candidate_wave)
     if args.include_fixed_score:
         if sampler is not None:
             sampler.reset()
@@ -417,8 +502,9 @@ def _run_child(args):
     max_abs_difference = 0.0
 
     print(f"BENCHMARK_CONFIG galaxy={args.galaxy} "
+          f"phi_integration={model.phi_integration} "
           f"spot_batch={_spot_batch_label(args.spot_batch)} "
-          "candidates_per_gpu_wave=1 "
+          f"candidates_per_gpu_wave={candidate_wave} "
           f"device_block_size={de._DEVICE_LOCAL_BLOCK_SIZE} "
           f"candidates={args.candidates} warmups={args.warmups} "
           f"repeats={args.repeats} devices={devices}", flush=True)
@@ -430,6 +516,12 @@ def _run_child(args):
           f"n_r_local={model._n_r_local} "
           f"n_r_global={model._n_r_global} "
           f"n_refine_steps={model._n_refine_steps}", flush=True)
+    if model.phi_integration == "peak-partition":
+        print("BENCHMARK_PARTITION "
+              f"n_phi_partition_sys={model._n_phi_partition_sys} "
+              f"n_phi_partition_hv={model._n_phi_partition_hv} "
+              f"root_capacity={model._phi_partition_root_capacity}",
+              flush=True)
     geometry = _memory_geometry(
         model, 8 if jax.config.jax_enable_x64 else 4)
     print("BENCHMARK_MEMORY_GEOMETRY="
@@ -494,9 +586,10 @@ def _run_child(args):
     result = {
         "status": "ok",
         "galaxy": args.galaxy,
+        "phi_integration": model.phi_integration,
         "candidate_source": candidate_source,
         "spot_batch": args.spot_batch,
-        "candidates_per_gpu_wave": 1,
+        "candidates_per_gpu_wave": candidate_wave,
         "candidates": args.candidates,
         "warmup_seconds": warmup_seconds,
         "timed_seconds": timed_seconds,
@@ -512,6 +605,7 @@ def _run_child(args):
         "last_rebalance_gain": float(profile["last_rebalance_gain"]),
         "max_abs_difference": max_abs_difference,
         "values_sha256": values_sha256,
+        "values": np.asarray(reference).tolist(),
         "fixed_score_seconds": fixed_score_seconds,
         "fixed_score_logp": fixed_score_logp,
         "fixed_score_trace": fixed_score_trace,

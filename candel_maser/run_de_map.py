@@ -342,8 +342,8 @@ def _normalise_theta_point(theta, names, lo, hi):
 _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
 _DE_POPULATION_SCHEDULE = "nfe_linear"
-_DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v1"
-_DE_PEAK_PARTITION_POLICY = "peak_partition_v4"
+_DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v2"
+_DE_PEAK_PARTITION_POLICY = "peak_partition_v6"
 _CANDIDATES_PER_GPU_WAVE = 1
 _PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE = 8
 _F32_ALL_SPOT_GALAXIES = frozenset((
@@ -1255,12 +1255,26 @@ def _phi_integration_suffix(model):
 
 
 def _objective_policy(model):
+    radial = (
+        f"r{model._n_r_local}+{model._n_r_global}:"
+        f"K{model._K_sigma:g}:"
+        f"full{int(model._global_r_full_support)}:"
+        f"asym{int(model._asymmetric_r_local)}:"
+        f"width{model._scan_width_drop:g}")
     if model.phi_integration == "peak-partition":
+        refine_scope = (
+            ":rrhv" if (model._peak_r_refine_steps
+                         and model._peak_r_refine_hv_only) else "")
         return (
             f"{_DE_PEAK_PARTITION_POLICY}:"
             f"sys{model._n_phi_partition_sys}:"
-            f"hv{model._n_phi_partition_hv}")
-    return _DE_OBJECTIVE_POLICY
+            f"hv{model._n_phi_partition_hv}:"
+            f"roots{model._phi_partition_root_capacity}:"
+            f"rr{model._peak_r_refine_steps}x"
+            f"{model._peak_r_refine_order}{refine_scope}:"
+            f"rw{model._peak_r_width_steps}:"
+            f"{radial}")
+    return f"{_DE_OBJECTIVE_POLICY}:{radial}"
 
 
 def _init_block(gal_cfg, model):
@@ -1831,7 +1845,11 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     params_best.update(fixed)
     theta = target.complete_params(params_best)
     phys_args, phys_kw = target.model.phys_from_params_jax(theta, target.h)
-    r_ang = target.model.conditional_r_ang_map(phys_args, phys_kw)
+    # This final diagnostic repeats the complete conditional-radius search.
+    # Keeping it eager can dispatch thousands of tiny GPU operations after an
+    # otherwise finished DE run (especially for NGC4258).  Stage it as one
+    # executable, just like the likelihood used above.
+    r_ang = jax.jit(target.model.conditional_r_ang_map)(phys_args, phys_kw)
     best_logp = -float(best_fitness)
     output = _theta_to_output(
         {k: np.asarray(jax.device_get(v)) for k, v in theta.items()},
@@ -1860,7 +1878,7 @@ def _run_fixed_globals(target, init_params, data_only=False):
     logp = jax.block_until_ready(logp)
     theta = target.complete_params(params)
     phys_args, phys_kw = target.model.phys_from_params_jax(theta, target.h)
-    r_ang = target.model.conditional_r_ang_map(phys_args, phys_kw)
+    r_ang = jax.jit(target.model.conditional_r_ang_map)(phys_args, phys_kw)
     return _theta_to_output(
         {k: np.asarray(jax.device_get(v)) for k, v in theta.items()},
         np.asarray(jax.device_get(r_ang))), float(jax.device_get(logp)), 0

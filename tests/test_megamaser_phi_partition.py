@@ -7,7 +7,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from candel.model.model_H0_maser import (  # noqa: E402
-    MaserDiskModel, _quadratic_log_grid_peak)
+    MaserDiskModel, _quadratic_log_grid_peak, _scan_log_radius_scale)
 
 
 class _ToyModel:
@@ -93,7 +93,7 @@ def test_partition_integrates_sharp_peaks_in_both_phi_halfplanes():
            + jnp.log(jax.scipy.special.i0e(r_pre["kappa"]))
            + r_pre["kappa"])
 
-    np.testing.assert_allclose(got, ref, rtol=0.0, atol=1e-9)
+    np.testing.assert_allclose(got, ref, rtol=3e-16, atol=1e-9)
     assert np.all(np.asarray(roots) <= 2)
     assert not np.any(np.asarray(overflow))
 
@@ -111,6 +111,26 @@ def test_eccentric_value_only_partition_converges():
     assert np.all(np.asarray(roots) <= 8)
     assert not np.any(np.asarray(overflow))
     assert not np.any(np.asarray(ref_overflow))
+
+
+def test_root_capacity_overflow_uses_finite_scan_fallback():
+    class OscillatoryModel(_ToyModel):
+        _phi_partition_root_capacity = 4
+
+        def _phi_eval(self, r_pre, sin_phi, cos_phi):
+            del r_pre
+            phi = jnp.arctan2(sin_phi, cos_phi)
+            return 10.0 * jnp.cos(10.0 * phi)
+
+    model = OscillatoryModel()
+    got, roots, overflow = model._phi_partition_group_log_integral(
+        "sys", {"r_ang": jnp.asarray(1.0)}, 257)
+    expected = np.log(2.0 * np.pi * np.i0(10.0))
+
+    assert int(np.asarray(roots)) > model._phi_partition_root_capacity
+    assert bool(np.asarray(overflow))
+    assert np.isfinite(np.asarray(got))
+    np.testing.assert_allclose(got, expected, rtol=0.0, atol=1e-10)
 
 
 def test_radius_only_precompute_preserves_circular_and_eccentric_integrands():
@@ -144,10 +164,122 @@ def test_quadratic_log_grid_peak_interpolates_and_guards_boundaries():
     np.testing.assert_array_equal(boundary, r[boundary_best])
 
 
+def test_scan_radius_scale_covers_disconnected_active_envelope():
+    r = jnp.exp(jnp.linspace(jnp.log(0.1), jnp.log(1.0), 11))
+    values = jnp.array([
+        [-100.0, -1.0, 0.0, -2.0, -100.0, -100.0,
+         -3.0, -1.0, -100.0, -100.0, -100.0],
+    ])
+    centre = r[jnp.array([2])]
+    scale = _scan_log_radius_scale(r, values, centre, 4.0, 10.0)
+    expected_half_span = jnp.log(r[8]) - jnp.log(r[2])
+    np.testing.assert_allclose(10.0 * scale, expected_half_span)
+
+
+def test_asymmetric_local_grid_does_not_collapse_at_support_edge():
+    model = object.__new__(MaserDiskModel)
+    model._K_sigma = 10.0
+    model._asymmetric_r_local = True
+    t = jnp.linspace(-jnp.arcsinh(10.0), jnp.arcsinh(10.0), 9)
+    model._sinh_t_frozen = jnp.sinh(t)
+    r, _ = model._build_local_sinh(
+        jnp.array([0.1]), jnp.array([0.1]), 0.1, 1.0)
+    np.testing.assert_allclose(r[0, 0], 0.1, rtol=0.0, atol=1e-15)
+    assert r[0, -1] > 0.1
+    assert np.all(np.diff(np.asarray(r[0])) >= 0.0)
+
+
+def test_peak_radius_stencil_refines_coarse_group_centres():
+    class Model:
+        phi_integration = "peak-partition"
+        _peak_r_refine_steps = 1
+        _peak_r_refine_order = 7
+        _peak_r_refine_hv_only = False
+        _peak_r_width_steps = 0
+        _n_r_global = 128
+        _K_sigma = 10.0
+        _refine_r_center_group = MaserDiskModel._refine_r_center_group
+
+        @staticmethod
+        def _group_has_any_accel(type_key):
+            del type_key
+            return False
+
+        @staticmethod
+        def _r_precompute(r_ang, idx, *args, **kwargs):
+            del args, kwargs
+            target = jnp.array([0.23, 0.61])[idx]
+            return {"r_ang": r_ang, "target": target}
+
+        @staticmethod
+        def _phi_partition_scan_size(type_key):
+            del type_key
+            return 17
+
+        @staticmethod
+        def _phi_partition_group_log_integral(
+                type_key, r_pre, n_scan):
+            del type_key, n_scan
+            value = -(jnp.log(r_pre["r_ang"])
+                      - jnp.log(r_pre["target"][:, None])) ** 2
+            return value, jnp.zeros_like(value, dtype=int), jnp.zeros_like(
+                value, dtype=bool)
+
+    model = Model()
+    target = jnp.array([0.23, 0.61])
+    got, scale = model._refine_r_center_group(
+        "sys", jnp.arange(2), target * jnp.array([1.04, 0.96]),
+        jnp.array([0.02, 0.03]), 0.1, 1.0, (), {})
+    # The final three-point quadratic vertex is exact for this log-Gaussian;
+    # a plain bracket midpoint is not.
+    np.testing.assert_allclose(got, target, rtol=1e-5, atol=0.0)
+    np.testing.assert_allclose(
+        scale, jnp.full(2, 1.0 / np.sqrt(2.0)), rtol=2e-3, atol=0.0)
+
+    # The optional value-only drop solve must recover a much narrower width
+    # without relying on the three-point curvature.
+    model._peak_r_width_steps = 18
+
+    def narrow_log_gaussian(type_key, r_pre, n_scan):
+        del type_key, n_scan
+        value = -20000.0 * (
+            jnp.log(r_pre["r_ang"])
+            - jnp.log(r_pre["target"][:, None])) ** 2
+        return (value, jnp.zeros_like(value, dtype=int),
+                jnp.zeros_like(value, dtype=bool))
+
+    model._phi_partition_group_log_integral = narrow_log_gaussian
+    got, scale = model._refine_r_center_group(
+        "sys", jnp.arange(2), target * jnp.array([1.04, 0.96]),
+        jnp.array([0.02, 0.03]), 0.1, 1.0, (), {})
+    np.testing.assert_allclose(got, target, rtol=1e-5, atol=0.0)
+    np.testing.assert_allclose(
+        scale, jnp.full(2, 1.0 / 200.0), rtol=2e-3, atol=0.0)
+
+
+def test_peak_radius_stencil_can_skip_systemic_group():
+    model = object.__new__(MaserDiskModel)
+    model.phi_integration = "peak-partition"
+    model._peak_r_refine_steps = 4
+    model._peak_r_refine_order = 7
+    model._peak_r_refine_hv_only = True
+    model._peak_r_width_steps = 0
+    centre = jnp.array([0.2, 0.4])
+    width = jnp.array([0.05, 0.06])
+
+    got_centre, got_width = model._refine_r_center_group(
+        "sys", jnp.array([0, 1]), centre, width, 0.1, 1.0,
+        (), {})
+
+    np.testing.assert_array_equal(got_centre, centre)
+    np.testing.assert_array_equal(got_width, width)
+
+
 def test_peak_partition_global_scan_evaluates_all_radii_together():
     class Model:
         phi_integration = "peak-partition"
         _phi_concat = {"sys": {}}
+        _scan_width_drop = 0.0
         _scan_on_global_grid = MaserDiskModel._scan_on_global_grid
 
         def __init__(self):
@@ -183,7 +315,7 @@ def test_peak_partition_global_scan_evaluates_all_radii_together():
     assert model.radial_shapes == [17]
 
     model_cached = Model()
-    _, _, cache = model_cached._scan_on_global_grid(
+    _, _, cache, _ = model_cached._scan_on_global_grid(
         "sys", jnp.arange(2), r_global.astype(jnp.float64), (), {},
         r_chunk=4, cache_scan=True)
     assert len(cache) == 2
@@ -239,8 +371,7 @@ def test_peak_partition_cached_global_r_columns_are_exact():
     np.testing.assert_array_equal(got, expected)
 
     overflow = no_overflow.at[0, 0].set(True)
-    rejected = model._marginal_per_spot_r(
+    recovered = model._marginal_per_spot_r(
         "sys", idx, r_union, log_w_r, False, (), {}, None,
         (r_local, ll_global, order, overflow))
-    assert np.isneginf(np.asarray(rejected[0]))
-    assert np.isfinite(np.asarray(rejected[1]))
+    np.testing.assert_array_equal(recovered, expected)
