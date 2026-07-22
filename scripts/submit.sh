@@ -171,8 +171,8 @@ Cluster options:
   Joint H0 follows the selected node/queue: GPU queues request GPU; CPU queues
   force JAX_PLATFORMS=cpu.
   --cpus N              CPU cores. CPU jobs: total cores. GPU jobs: cores per
-                        GPU (default 4 per GPU, so --cpus 2 --gpu-count 8
-                        requests 16 cores). glamdring submits as -s -n TOTAL
+                        GPU (default 2 per GPU; --cpus 3 --gpu-count 8
+                        requests 24 cores). glamdring submits as -s -n TOTAL
                         (shared slice), not the whole-node 1xN form.
   --gputype TYPE
   --gpu-mem GB           GPU VRAM request; also passed to DE/evidence

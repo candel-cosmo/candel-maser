@@ -160,12 +160,9 @@ and RMS differences plus finite-mask mismatches; repeated copies of the same
 tiling retain the stricter bitwise digest check.
 
 For GPU jobs, `--gpu-count N` requests N GPUs and `--cpus C` means C CPU cores
-per GPU. Use `--cpus 2` for multi-GPU Glamdring jobs with the default 7 GB per
-CPU: two RTX 2080 Ti GPUs then request 28 GB total and four RTX 3090 GPUs 56
-GB, fitting one node. The generic omitted default is 4 CPU cores per GPU; with
-7 GB per CPU that can force the scheduler to spread a nominal multi-GPU job
-across nodes, where one JAX process cannot use the remote GPUs. `--mem` remains
-GB per CPU.
+per GPU. Omitting `--cpus` defaults to two cores per GPU. With the default 7 GB
+per CPU, two RTX 2080 Ti GPUs request 28 GB total and four RTX 3090 GPUs 56 GB,
+fitting one node. `--mem` remains GB per CPU.
 
 Submit one joint H0 chain over several galaxies:
 
