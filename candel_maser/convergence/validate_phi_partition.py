@@ -291,7 +291,7 @@ def _scheme_overrides(settings):
 
 def _reference_grids(galaxy, args):
     r_levels = args.reference_r_levels
-    if r_levels is None:
+    if not r_levels:
         r_levels = (NGC4258_REFERENCE_R_LEVELS
                     if galaxy == "NGC4258"
                     else DEFAULT_REFERENCE_R_LEVELS)
@@ -337,7 +337,7 @@ def _parser():
              "strict; the mismatch is recorded in the report.")
     parser.add_argument(
         "--reference-r-levels", type=_parse_levels,
-        default=None,
+        default=(),
         help="Radial reference levels (default: 5001,10001,20001; "
              "NGC4258: 20001,40001,80001,160001).")
     parser.add_argument(
