@@ -185,11 +185,11 @@ dist = "normal"
 loc = 0.0
 scale = 0.025
 
-# Periapsis warp pegged to 0: with e~0 it multiplies an already-tiny effect
-# and is unidentifiable. Delta => excluded from the NUTS sites.
+# Sample the periapsis warp whenever eccentricity is enabled.
 [model.priors.dperiapsis_dr]
-dist = "delta"
-value = 0.0
+dist = "uniform"
+low = -360.0
+high = 360.0
 
 [model.galaxies.CGCG074-064]
 ra = 210.768491

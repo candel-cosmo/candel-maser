@@ -117,7 +117,8 @@ VARIANT_ALIASES = {
 POPULATIONS = ("systemic", "red", "blue")
 DEFAULT_REFERENCE_R_LEVELS = (5001, 10001, 20001)
 DEFAULT_REFERENCE_PHI_LEVELS = (2501, 5001, 10001)
-NGC4258_REFERENCE_PHI_LEVELS = (50001, 100001, 200001)
+NGC4258_REFERENCE_R_LEVELS = (20001, 40001, 80001, 160001)
+NGC4258_REFERENCE_PHI_LEVELS = (50001,) * 4
 
 # Irrelevance classifier.  Every candidate is judged against the full dense
 # reference ladder (computed or loaded exactly from cache); this only labels
@@ -289,16 +290,21 @@ def _scheme_overrides(settings):
 
 
 def _reference_grids(galaxy, args):
+    r_levels = args.reference_r_levels
+    if r_levels is None:
+        r_levels = (NGC4258_REFERENCE_R_LEVELS
+                    if galaxy == "NGC4258"
+                    else DEFAULT_REFERENCE_R_LEVELS)
     phi_levels = args.reference_phi_levels
     if phi_levels is None:
         phi_levels = (NGC4258_REFERENCE_PHI_LEVELS
                       if galaxy == "NGC4258"
                       else DEFAULT_REFERENCE_PHI_LEVELS)
-    if len(args.reference_r_levels) != len(phi_levels):
+    if len(r_levels) != len(phi_levels):
         raise ValueError(
             "--reference-r-levels and --reference-phi-levels must have "
             "the same number of entries.")
-    return tuple(zip(args.reference_r_levels, phi_levels))
+    return tuple(zip(r_levels, phi_levels))
 
 
 def _parser():
@@ -331,12 +337,14 @@ def _parser():
              "strict; the mismatch is recorded in the report.")
     parser.add_argument(
         "--reference-r-levels", type=_parse_levels,
-        default=DEFAULT_REFERENCE_R_LEVELS)
+        default=None,
+        help="Radial reference levels (default: 5001,10001,20001; "
+             "NGC4258: 20001,40001,80001,160001).")
     parser.add_argument(
         "--reference-phi-levels", type=_parse_levels,
         default=None,
         help="Phi reference levels (default: 2501,5001,10001; "
-             "NGC4258: 50001,100001,200001).")
+             "NGC4258: 50001 at every radial level).")
     parser.add_argument("--reference-tail-levels", type=int, default=3,
                         help="Number of final levels whose consecutive "
                              "comparisons must pass (default: 3).")

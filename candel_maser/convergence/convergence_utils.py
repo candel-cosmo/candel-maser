@@ -112,7 +112,7 @@ def _padded_group_chunks(idx, values, batch):
 
 def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
                                  n_phi, spot_batch, log_w_r=None,
-                                 partition_support=False):
+                                 partition_support=False, spot_indices=None):
     """Per-spot dense phi reference on fixed radial nodes.
 
     ``r_ang`` is either ``(n_spots,)`` for the fixed-radius profile or
@@ -122,6 +122,8 @@ def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
     The default retains the older full-2pi leakage diagnostic;
     ``partition_support=True`` instead uses the exact half-plane support of
     peak-partition for an apples-to-apples integrator comparison.
+    ``spot_indices`` limits diagnostic work while retaining the full-size
+    output; unselected entries are ``-inf``.
     """
     r_ang = np.asarray(r_ang)
     if r_ang.shape[0] != model.n_spots:
@@ -135,11 +137,20 @@ def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
         raise ValueError("fixed-r r_ang must be one-dimensional.")
 
     dtype = jnp.asarray(phys_args[2]).dtype
-    out = np.empty(model.n_spots, dtype=np.float64)
+    selected = None
+    if spot_indices is not None:
+        selected = np.asarray(spot_indices, dtype=np.int32)
+        if (selected.ndim != 1 or not len(selected)
+                or len(np.unique(selected)) != len(selected)
+                or np.any((selected < 0) | (selected >= model.n_spots))):
+            raise ValueError("spot_indices must be unique valid spot indices.")
+    out = np.full(model.n_spots, -np.inf, dtype=np.float64)
 
     for type_key, idx in (("sys", model._idx_sys),
                           ("red", model._idx_red),
                           ("blue", model._idx_blue)):
+        if selected is not None:
+            idx = np.asarray(idx)[np.isin(np.asarray(idx), selected)]
         if not int(idx.shape[0]):
             continue
         values = [r_ang]
@@ -184,7 +195,7 @@ def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
 
 def dense_r_phi_reference_per_spot(model, phys_args, phys_kw, n_r, n_phi,
                                    r_chunk, spot_batch,
-                                   partition_support=True):
+                                   partition_support=True, spot_indices=None):
     """Per-spot float64 reference on a full-support log-r x phi grid."""
     n_r, n_phi = int(n_r), int(n_phi)
     r_chunk = int(r_chunk)
@@ -209,7 +220,8 @@ def dense_r_phi_reference_per_spot(model, phys_args, phys_kw, n_r, n_phi,
             np.asarray(log_w_r[start:stop]), shape)
         partial = dense_phi_reference_per_spot(
             model, phys_args, phys_kw, r_values, n_phi, spot_batch,
-            log_w_r=log_weights, partition_support=partition_support)
+            log_w_r=log_weights, partition_support=partition_support,
+            spot_indices=spot_indices)
         total = np.logaddexp(total, partial)
     return total
 

@@ -60,9 +60,9 @@ adaptation of the mutation and crossover rates, a displaced-parent archive,
 and linear population reduction.  Population reduction follows the number of
 DE-population fitness evaluations, not the generation counter.  Consequently,
 raising `max_generations` as a safety ceiling does not slow the reduction
-schedule.  The production population is 2000 -> 128 over 3,400,000 such
-evaluations; after that it remains at 128 until patience or the generation
-ceiling stops the run.  The 3,400,000 value is only the population-reduction
+schedule.  The production population is 2000 -> 1024 over 5,000,000 such
+evaluations; after that it remains at 1024 until patience or the generation
+ceiling stops the run.  The 5,000,000 value is only the population-reduction
 horizon, not an NFE limit: evaluations continue beyond it.  There is no
 classic/hybrid selector and no Adam polishing path.
 
@@ -109,7 +109,7 @@ device balance, update, and checkpoint timings.  Pass budget overrides after
 ```bash
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC6264 \
     --sampler de --gpu-count 4 --cpus 2 -- \
-    --population-reduction-evaluations 3400000 \
+    --population-reduction-evaluations 5000000 \
     --max-generations 5000 --patience 500
 ```
 
@@ -275,12 +275,15 @@ float64 reference. That reference integrates a log-uniform radial grid over
 the full physical support and a uniform phi grid over the matching physical
 half-plane support. Its default paired convergence sequence is
 `5001 x 2501`, `10001 x 5001`, and `20001 x 10001` radial-by-phi nodes;
-NGC4258 instead uses `5001 x 50001`, `10001 x 100001`, and
-`20001 x 200001`, matching the 200001-node dense phi reference used in the
-earlier NGC4258 benchmark. Explicit reference-level flags override these
-defaults. The radial axis is chunked to control memory. The finest reference
-is accepted only when the requested consecutive-level gates pass. Production
-uses the configured galaxy precision; NGC4258 remains forced to float64.
+NGC4258 instead uses `20001 x 50001`, `40001 x 50001`,
+`80001 x 50001`, and `160001 x 50001`. Individual-spot refinement shows that
+NGC4258's former failure was radial: 50001 phi nodes are converged, while the
+uniform radial grid enters its asymptotic regime only beyond 40001 nodes.
+The default tail-three gate therefore requires the final two radial
+transitions to pass without weakening any tolerance. Explicit reference-level
+flags override these defaults. The radial axis is chunked to control memory.
+Production uses the configured galaxy precision; NGC4258 remains forced to
+float64.
 
 Submit the default circular validation for every configured galaxy:
 

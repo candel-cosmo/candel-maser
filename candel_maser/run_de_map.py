@@ -1255,6 +1255,7 @@ def _phi_integration_suffix(model):
 
 
 def _objective_policy(model):
+    kernel = ":ecc_hybrid_qf1" if getattr(model, "use_ecc", False) else ""
     radial = (
         f"r{model._n_r_local}+{model._n_r_global}:"
         f"K{model._K_sigma:g}:"
@@ -1266,7 +1267,7 @@ def _objective_policy(model):
             ":rrhv" if (model._peak_r_refine_steps
                          and model._peak_r_refine_hv_only) else "")
         return (
-            f"{_DE_PEAK_PARTITION_POLICY}:"
+            f"{_DE_PEAK_PARTITION_POLICY}{kernel}:"
             f"sys{model._n_phi_partition_sys}:"
             f"hv{model._n_phi_partition_hv}:"
             f"roots{model._phi_partition_root_capacity}:"
@@ -1274,7 +1275,7 @@ def _objective_policy(model):
             f"{model._peak_r_refine_order}{refine_scope}:"
             f"rw{model._peak_r_width_steps}:"
             f"{radial}")
-    return f"{_DE_OBJECTIVE_POLICY}:{radial}"
+    return f"{_DE_OBJECTIVE_POLICY}{kernel}:{radial}"
 
 
 def _init_block(gal_cfg, model):
