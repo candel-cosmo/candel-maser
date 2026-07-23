@@ -39,6 +39,7 @@ except ModuleNotFoundError as exc:  # private f2py module is gitignored
     raise
 
 import candel.model.maser_physics as phys  # noqa: E402
+from run_reid_mcmc import reid_H0  # noqa: E402
 
 
 CLIGHT_REID = 2.997925e5
@@ -164,6 +165,20 @@ def main():
 
 def test_reid_jax_precision():
     main()
+
+
+def test_scalar_reid_h0_replays_fortran_distance():
+    rp.setup_numbers()
+    v = 667.0 - 259.7458
+    D_A = 8.1421
+    H0 = reid_H0(v, D_A)
+    rp.fill_ez(H0, v, 0.0)
+    n_v = int(v + 0.5)
+    replay = (
+        CLIGHT_REID * rp.reidlik.ez_integral.ez_int[n_v - 1]
+        / (H0 * (1.0 + v / CLIGHT_REID))
+    )
+    assert replay == pytest.approx(D_A, abs=2e-14)
 
 
 if __name__ == "__main__":

@@ -1303,7 +1303,7 @@ def _save_de_progress_plot(checkpoint_path, generation, logp, D_A):
     figure = Figure(figsize=(9, 7))
     FigureCanvasAgg(figure)
     axes = figure.subplots(2, 2)
-    recent = slice(-500, None)
+    recent = slice(-100, None)
     for axis, x, y, ylabel in (
             (axes[0, 0], generation, logp, "Best logP"),
             (axes[0, 1], generation, D_A, r"Best $D_A$ [Mpc]"),

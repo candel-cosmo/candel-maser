@@ -1022,7 +1022,7 @@ def _add_logZ_2x(rows, model, init, galaxy, data_root, spot_batch):
 
 
 _REID_GLOBAL_INIT_KEYS = (
-    "D_c", "log_MBH", "dv_sys", "x0", "y0",
+    "D_A", "D_c", "eta", "log_MBH", "dv_sys", "x0", "y0",
     "i0", "di_dr", "d2i_dr2", "Omega0", "dOmega_dr", "d2Omega_dr2",
     "e_x", "e_y", "dperiapsis_dr",
     "sigma_x_floor", "sigma_y_floor", "sigma_v_sys", "sigma_v_hv",
@@ -1098,8 +1098,6 @@ def _reid_neg_half_chi2(ctx, galaxy, point, r_ang, phi, D_A=None):
     r_ang = np.asarray(r_ang, dtype=float)
     init_block = {k: float(point[k]) for k in _REID_GLOBAL_INIT_KEYS
                   if k in point and np.asarray(point[k]).ndim == 0}
-    if "D_c" not in init_block and "D_A" in point:
-        init_block["D_c"] = float(point["D_A"])
     tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False)
     tomli_w.dump({"model": {"galaxies": {galaxy: {"init": init_block}}}}, tmp)
     tmp.close()

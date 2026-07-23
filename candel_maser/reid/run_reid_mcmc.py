@@ -259,12 +259,33 @@ def load_toml_init(path: Path, galaxy: str, vcor: float,
 
 def load_config_init(config_path: Path, galaxy: str, vcor: float,
                      variant: str = "init") -> ReidInit:
+    cfg = load_toml(config_path)
     gcfg = load_galaxy_config(config_path, galaxy)
     init = dict(gcfg[variant])
     v_sys = float(gcfg["v_sys_obs"]) + float(init.get("dv_sys", 0.0))
-    distance = float(init["D_c"])
-    m_bh = 10.0 ** (float(init["log_MBH"]) - 7.0)
-    h0 = (v_sys + vcor) / distance
+    if "D_A" in init:
+        distance = float(init["D_A"])
+        h0 = float(reid_H0(v_sys + vcor, distance))
+    elif "D_c" in init:
+        distance = float(init["D_c"])
+        h0 = (v_sys + vcor) / distance
+    else:
+        raise KeyError(f"{variant} must contain D_A or D_c")
+
+    mass_parameterization = gcfg.get(
+        "mass_parameterization",
+        cfg.get("model", {}).get("mass_parameterization", "eta"))
+    if mass_parameterization == "eta":
+        log_mbh = (float(init["eta"]) + math.log10(distance)
+                   if "eta" in init else float(init["log_MBH"]))
+    elif mass_parameterization == "log_mbh":
+        log_mbh = (float(init["log_MBH"]) if "log_MBH" in init
+                   else float(init["eta"]) + math.log10(distance))
+    else:
+        raise ValueError(
+            "mass_parameterization must be 'eta' or 'log_mbh'; "
+            f"got {mass_parameterization!r}")
+    m_bh = 10.0 ** (log_mbh - 7.0)
 
     ecc = float(init.get("ecc", 0.0))
     peri = float(init.get("periapsis", 0.0))
@@ -298,7 +319,8 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float,
             "sigma_vsys_km_s": float(init.get("sigma_v_sys", 0.5)),
             "sigma_vhv_km_s": float(init.get("sigma_v_hv", 1.0)),
             "sigma_acc_km_s_yr": float(init.get("sigma_a_floor", 0.4)),
-            "_D_c": distance,
+            "_D_A": distance,
+            "_D_c": float(init.get("D_c", distance)),
             "_r_ref_i": float(gcfg.get("r_ang_ref_i", init.get("r_ang_ref", 0.0))),  # noqa: E501
             "_r_ref_PA": float(
                 gcfg.get("r_ang_ref_Omega", init.get("r_ang_ref", 0.0))
@@ -342,12 +364,20 @@ def shift_warp_pivots(init: dict[str, float],
             + init["di_dr_deg_mas"] * dr
             + init["d2i_dr2_deg_mas2"] * dr * dr
         )
+        out["di_dr_deg_mas"] = (
+            init["di_dr_deg_mas"]
+            + 2.0 * init["d2i_dr2_deg_mas2"] * dr
+        )
     if rpa:
         dr = reid_r_ref - rpa
         out["PA_deg"] = (
             init["PA_deg"]
             + init["dPA_dr_deg_mas"] * dr
             + init["d2PA_dr2_deg_mas2"] * dr * dr
+        )
+        out["dPA_dr_deg_mas"] = (
+            init["dPA_dr_deg_mas"]
+            + 2.0 * init["d2PA_dr2_deg_mas2"] * dr
         )
     if rperi:
         out["peri_az_deg"] = init["peri_az_deg"] - \
@@ -669,12 +699,28 @@ def reid_D_A(v, H0):
     return _reid_dnum(v) / np.asarray(H0, dtype=np.float64)
 
 
+def _reid_dnum_scalar(v):
+    """Literal scalar distance numerator used by ``calc_warped_model``."""
+    c_dampc = 299792.458
+    c_model = 299792.5
+    z = int(float(v) + 0.5) / c_dampc
+    dz = z / 1000.0
+    eq14 = 0.0
+    for i in range(1001):
+        zp = i * dz
+        inv_e = 1.0 / math.sqrt(0.27 * (1.0 + zp) ** 3 + 0.73)
+        eq14 += 0.5 * inv_e if i in (0, 1000) else inv_e
+    return c_model * eq14 * dz / (1.0 + float(v) / c_model)
+
+
 def reid_H0(v, D_A):
     """Inverse of reid_D_A: the cosmological H0 that makes ``dampc`` map
     (v=Vsys+Vcor, H0) onto the given D_A. Applied to CANDEL's sampled D_A it
     puts CANDEL's H0 on the same cosmological footing as Reid's sampled H0,
     instead of the naive v/D_A -- which overshoots the true H0 by the same
     ~3% factor."""
+    if np.ndim(v) == 0 and np.ndim(D_A) == 0:
+        return _reid_dnum_scalar(v) / float(D_A)
     return _reid_dnum(v) / np.asarray(D_A, dtype=np.float64)
 
 

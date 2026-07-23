@@ -473,6 +473,7 @@ The default mass coordinate is `mass_parameterization = "eta"`, i.e. `eta = log_
 ## Reid Likelihood Queries
 
 `check_reid/reid_profile.py` evaluates Mark Reid's unmodified `fit_disk` likelihood through the local f2py wrapper.  The data file and init TOML are the inputs; per-spot `(r, phi)` latents are MAP-profiled for each query.
+CANDEL config inputs are converted automatically using their `D_A` and active `eta`/`log_mbh` mass coordinate.  Moving a quadratic warp to Reid's data-derived reference radius preserves the complete polynomial by shifting both its intercept and linear coefficient.
 
 ```bash
 python scripts/megamaser/check_reid/reid_profile.py \
