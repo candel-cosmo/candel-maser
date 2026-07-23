@@ -10,7 +10,10 @@ Run:  venv_candel/bin/python -m pytest tests/test_megamaser_ecc_smoothness.py
 """
 import jax
 import jax.numpy as jnp
+import pytest
+from numpyro.distributions import Delta
 
+from candel.model.model_H0_maser import MaserDiskModel
 from candel.model.maser_physics import predict_velocity_los
 
 
@@ -46,6 +49,14 @@ def test_circular_limit_matches_zero_ecc():
     circ = jnp.sum(predict_velocity_los(
         r, jnp.sin(phi), jnp.cos(phi), 50.0, 3.0, 1500.0, 0.0, jnp.sin(1.2)))
     assert jnp.allclose(ecc, circ, atol=1e-4), (ecc, circ)
+
+
+def test_eccentric_model_rejects_fixed_periapsis_warp():
+    model = object.__new__(MaserDiskModel)
+    model.config = {"model": {"use_ecc": True}}
+    model.priors = {"dperiapsis_dr": Delta(0.0)}
+    with pytest.raises(ValueError, match="must sample dperiapsis_dr"):
+        model._configure_features({})
 
 
 if __name__ == "__main__":

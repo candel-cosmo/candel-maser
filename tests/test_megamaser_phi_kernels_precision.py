@@ -199,6 +199,10 @@ def quadform_nhc(d, dt, shared_r=False):
         all_v_rel=f(d["all_v_rel"]), all_a=f(d["all_a"]),
         var_x=f(d["var_x"]), var_y=f(d["var_y"]),
         var_v=f(d["var_v"]), var_a=f(d["var_a"]), has_a=f(d["has_a"]),
+        weight_x=-0.5 / f(d["var_x"]),
+        weight_y=-0.5 / f(d["var_y"]),
+        weight_v=-0.5 / f(d["var_v"]),
+        weight_a=-0.5 * f(d["has_a"]) / f(d["var_a"]),
         has_any_accel=True)
     return _neg_half_chi2_quadform(
         r_pre, s, c, s * s, c * c, s * c, shared_r=shared_r)
