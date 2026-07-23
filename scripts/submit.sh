@@ -188,9 +188,12 @@ Cluster options:
   -h, --help
 
 Advanced runner options:
-  Put options after -- to pass them directly to the selected Python runner.
+  Put runner-only options at the end of the command. The first unrecognised
+  option and everything after it are passed directly to the selected Python
+  runner; an explicit -- separator remains supported but is optional.
   Example:
-    $0 -q cmbgpu --galaxy all --infer-H0 -- --field-indices 0 1 2
+    $0 -q cmbgpu --galaxy NGC6264 --sampler de \
+       --checkpoint-interval-minutes 1
 
 Retries:
   --max-retries N       Launch this submit command through the detached
@@ -377,7 +380,7 @@ while [[ $# -gt 0 ]]; do
             PASSTHRU_ARGS+=("$@")
             break ;;
         -h|--help) usage; exit 0 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        *) PASSTHRU_ARGS+=("$@"); break ;;
     esac
 done
 
