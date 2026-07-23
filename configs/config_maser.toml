@@ -263,9 +263,9 @@ use_quadratic_warp = false
 n_phi_hv_high = 20001
 n_phi_hv_low = 5001
 n_phi_sys = 60001
-r_ang_ref_i = 6.1
-r_ang_ref_Omega = 6.1
-r_ang_ref_periapsis = 3.0
+r_ang_ref_i = 5.1
+r_ang_ref_Omega = 5.1
+r_ang_ref_periapsis = 5.1
 conditional_spot_batch = 32
 # Dense-reference validation at both the Pesce/Reid point and an independent
 # unseeded DE checkpoint supports the value-only peak path for NGC4258.  Its
@@ -562,7 +562,7 @@ min_pop_size = 1024
 # continue with the minimum population until patience or max_generations stops
 # the run.
 population_reduction_evaluations = 5000000
-max_generations = 5000
+max_generations = 50000
 patience = 500
 # The evaluator always scores one DE candidate per GPU wave. This is an
 # implementation invariant, not a configurable optimiser parameter.

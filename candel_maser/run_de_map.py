@@ -1291,6 +1291,50 @@ def _init_block(gal_cfg, model):
     return gal_cfg.get("init", {})
 
 
+_DE_HISTORY_KEYS = ("history_generation", "history_logp", "history_D_A")
+
+
+def _save_de_progress_plot(checkpoint_path, generation, logp, D_A):
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    plot_path = os.path.splitext(checkpoint_path)[0] + "_progress.png"
+    tmp = plot_path + ".tmp.png"
+    figure = Figure(figsize=(9, 7))
+    FigureCanvasAgg(figure)
+    axes = figure.subplots(2, 2)
+    recent = slice(-500, None)
+    for axis, x, y, ylabel in (
+            (axes[0, 0], generation, logp, "Best logP"),
+            (axes[0, 1], generation, D_A, r"Best $D_A$ [Mpc]"),
+            (axes[1, 0], generation[recent], logp[recent], "Best logP"),
+            (axes[1, 1], generation[recent], D_A[recent],
+             r"Best $D_A$ [Mpc]")):
+        axis.plot(x, y)
+        axis.set(xlabel="Generation", ylabel=ylabel)
+    figure.tight_layout()
+    figure.savefig(tmp, dpi=300)
+    os.replace(tmp, plot_path)
+    return plot_path
+
+
+def _load_de_history(checkpoint, generation, logp, D_A):
+    if checkpoint is None:
+        return [generation], [logp], [D_A]
+    present = [key in checkpoint.files for key in _DE_HISTORY_KEYS]
+    if not any(present):
+        return [generation], [logp], [D_A]
+    if not all(present):
+        raise ValueError("Checkpoint DE progress history is incomplete.")
+    history = [np.asarray(checkpoint[key]) for key in _DE_HISTORY_KEYS]
+    if not history[0].size or len({values.size for values in history}) != 1:
+        raise ValueError("Checkpoint DE progress history has invalid lengths.")
+    if int(history[0][-1]) != int(generation):
+        raise ValueError(
+            "Checkpoint DE progress history does not end at its generation.")
+    return tuple(values.tolist() for values in history)
+
+
 def _save_de_checkpoint(path, population, fitness, best_solution,
                         best_fitness, generation, key,
                         gens_without_improvement, best_logp_so_far,
@@ -1313,6 +1357,15 @@ def _save_de_checkpoint(path, population, fitness, best_solution,
         data.update(extra)
     np.savez(tmp, **data)
     os.replace(tmp, path)
+    if extra and all(key in extra for key in _DE_HISTORY_KEYS):
+        try:
+            plot_path = _save_de_progress_plot(
+                path, *(extra[key] for key in _DE_HISTORY_KEYS))
+        except Exception as error:
+            fprint(f"WARNING: checkpoint saved but progress plot failed: "
+                   f"{error}")
+        else:
+            fprint(f"  progress plot: {plot_path}")
 
 
 def _load_de_checkpoint(path, lo, hi, names, sizes):
@@ -1668,6 +1721,17 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         m_cr = np.asarray(ckpt["m_cr"])
         memory_index = int(ckpt["memory_index"])
 
+    def best_D_A():
+        distance = float(
+            lo[distance_idx]
+            + float(best_solution[distance_idx]) * scale[distance_idx])
+        if distance_name == "D_c":
+            distance = float(_D_A_from_D_c(target.model, distance))
+        return distance
+
+    history_generation, history_logp, history_D_A = _load_de_history(
+        ckpt, gen_start, -float(best_fitness), best_D_A())
+
     def checkpoint_extra():
         return {
             "algorithm": np.asarray(_DE_ALGORITHM),
@@ -1684,6 +1748,9 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             "m_f": np.asarray(m_f),
             "m_cr": np.asarray(m_cr),
             "memory_index": np.asarray(memory_index),
+            "history_generation": np.asarray(history_generation),
+            "history_logp": np.asarray(history_logp),
+            "history_D_A": np.asarray(history_D_A),
         }
 
     if resume_path is not None:
@@ -1789,6 +1856,9 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             best_solution = population[gen_best_idx]
 
         current_best = -float(best_fitness)
+        history_generation.append(gen + 1)
+        history_logp.append(current_best)
+        history_D_A.append(best_D_A())
         if current_best > best_logp_so_far + 0.1:
             best_logp_so_far = current_best
             gens_without_improvement = 0
