@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import pytest
 from numpyro.distributions import Delta
 
+from candel.model import maser_physics
 from candel.model.model_H0_maser import MaserDiskModel
 from candel.model.maser_physics import predict_velocity_los
 
@@ -57,6 +58,32 @@ def test_eccentric_model_rejects_fixed_periapsis_warp():
     model.priors = {"dperiapsis_dr": Delta(0.0)}
     with pytest.raises(ValueError, match="must sample dperiapsis_dr"):
         model._configure_features({})
+
+
+def test_reid_speed_constant_reaches_optimised_eccentric_velocity():
+    model = object.__new__(MaserDiskModel)
+    r_pre = {
+        "ecc2": jnp.asarray(0.04),
+        "r_ang": jnp.asarray([0.7]),
+        "sin_i": jnp.asarray([0.99]),
+        "velocity_kep": jnp.asarray([910.0]),
+        "velocity_los_scale": jnp.asarray([900.0]),
+        "velocity_beta_c2": jnp.asarray([1e-5]),
+        "velocity_zg": jnp.asarray([2e-6]),
+        "velocity_scale": jnp.asarray(3e5),
+        "dv_sys": jnp.asarray(0.0),
+        "ecc_cos_om": jnp.asarray([0.15]),
+        "ecc_sin_om": jnp.asarray([0.1]),
+    }
+    args = (r_pre, jnp.asarray(0.6), jnp.asarray(0.8), jnp.asarray(0))
+    baseline = model._predict_velocity_on_grid(*args)
+    saved = maser_physics.SPEED_OF_LIGHT
+    try:
+        maser_physics.SPEED_OF_LIGHT *= 0.99
+        changed = model._predict_velocity_on_grid(*args)
+    finally:
+        maser_physics.SPEED_OF_LIGHT = saved
+    assert not jnp.allclose(changed, baseline)
 
 
 if __name__ == "__main__":

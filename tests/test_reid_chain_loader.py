@@ -11,8 +11,9 @@ REID_DIR = os.path.join(REPO_ROOT, "scripts", "megamaser", "check_reid")
 if REID_DIR not in sys.path:
     sys.path.insert(0, REID_DIR)
 
-from run_reid_mcmc import (FORT7_WIDTHS, load_chain, load_config_init,  # noqa: E402
-                           reid_H0, shift_warp_pivots)
+from run_reid_mcmc import (  # noqa: E402
+    FORT7_WIDTHS, config_D_A_from_D_c, load_chain, load_config_init, reid_H0,
+    shift_warp_pivots)
 
 
 VALUES = [
@@ -97,6 +98,37 @@ d2Omega_dr2 = -0.3628
         )
         assert i_reid == pytest.approx(180.0 - i_candel, abs=2e-14)
         assert pa_reid == pytest.approx(pa_candel, abs=2e-14)
+
+
+def test_config_init_converts_comoving_distance_before_reid_mapping(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[model]
+Om = 0.315
+H0_ref = 73.0
+mass_parameterization = "eta"
+
+[model.galaxies.NGC6264]
+v_sys_obs = 10189.26
+
+[model.galaxies.NGC6264.init]
+D_c = 154.1456
+eta = 5.4261
+dv_sys = 22.037
+"""
+    )
+
+    init = load_config_init(config, "NGC6264", 0.0).values
+    expected_D_A = config_D_A_from_D_c(
+        {"model": {"Om": 0.315, "H0_ref": 73.0}}, 154.1456)
+    assert expected_D_A == pytest.approx(148.520244706049, rel=1e-13)
+    assert init["_D_c"] == 154.1456
+    assert init["_D_A"] == pytest.approx(expected_D_A, rel=1e-14)
+    assert init["H0"] == pytest.approx(
+        reid_H0(init["Vsys_km_s"], expected_D_A), rel=1e-14)
+    assert init["Mbh_1e7Msun"] == pytest.approx(
+        10.0 ** (5.4261 + math.log10(expected_D_A) - 7.0), rel=1e-14)
 
 
 def _make_row(iter_=100, walker=1, values=VALUES, lnp=-1234.56789):

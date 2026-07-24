@@ -76,12 +76,13 @@ PESCE2020 = load_pesce_disk_params()
 
 
 def reid_ngc4258_point(master, path=REID_NGC4258_BEST):
+    from run_reid_mcmc import reid_D_A
+
     with path.open("rb") as f:
         row = tomllib.load(f)["globals"]
     gcfg = master["model"]["galaxies"]["NGC4258"]
-    ri = float(gcfg["r_ang_ref_i"])
-    rO = float(gcfg["r_ang_ref_Omega"])
     rperi = float(gcfg["r_ang_ref_periapsis"])
+    reid_r_ref = float(row["r_ref_mas"])
 
     i_ref = 180.0 - float(row["i0_deg"])
     di_ref = -float(row["di_dr_deg_mas"])
@@ -89,8 +90,8 @@ def reid_ngc4258_point(master, path=REID_NGC4258_BEST):
     Omega_ref = float(row["PA_deg"])
     dOmega_ref = float(row["dPA_dr_deg_mas"])
     d2Omega = float(row.get("d2PA_dr2_deg_mas2", 0.0))
-    di_r0 = di_ref - 2.0 * d2i * ri
-    dOmega_r0 = dOmega_ref - 2.0 * d2Omega * rO
+    di_r0 = di_ref - 2.0 * d2i * reid_r_ref
+    dOmega_r0 = dOmega_ref - 2.0 * d2Omega * reid_r_ref
     peri_ref = (
         float(row["peri_az_deg"])
         + float(row.get("dperi_dr_deg_mas", 0.0)) * rperi
@@ -98,21 +99,23 @@ def reid_ngc4258_point(master, path=REID_NGC4258_BEST):
     peri_rad = math.radians(peri_ref)
     ecc = float(row.get("ecc", 0.0))
 
-    # Reid's NGC4258 file is already at the Reid/CANDEL pivot radius; this
-    # Back it out to the zero-radius convention used by
-    # candel_theta_from_point.
+    # Reid's inclination and PA are quoted at fit_disk's fixed r_ref. Back
+    # them out to the zero-radius convention used by candel_theta_from_point.
+    velocity = float(row["Vsys_km_s"]) + float(row["Vcor_km_s"])
     return {
-        "D_A": (float(row["Vsys_km_s"]) + float(row["Vcor_km_s"]))
-        / float(row["H0"]),
+        "D_A": float(reid_D_A(velocity, float(row["H0"]))),
         "M_BH_1e7": float(row["Mbh_1e7Msun"]),
         "v_native": float(row["Vsys_km_s"]),
         "x0_mas": float(row["x0_mas"]),
         "y0_mas": float(row["y0_mas"]),
-        "i0_r0_deg": i_ref - di_r0 * ri - d2i * ri * ri,
+        "i0_r0_deg": (
+            i_ref - di_r0 * reid_r_ref
+            - d2i * reid_r_ref * reid_r_ref),
         "di_dr_r0": di_r0,
         "d2i_dr2": d2i,
         "Omega0_r0_deg": (
-            Omega_ref - dOmega_r0 * rO - d2Omega * rO * rO),
+            Omega_ref - dOmega_r0 * reid_r_ref
+            - d2Omega * reid_r_ref * reid_r_ref),
         "dOmega_dr_r0": dOmega_r0,
         "d2Omega_dr2": d2Omega,
         "sigma_x_mas": float(row["sigma_x_mas"]),

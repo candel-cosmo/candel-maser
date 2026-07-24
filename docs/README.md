@@ -181,7 +181,7 @@ bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --infer-H0 
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --infer-H0 --selection redshift --distance-prior volume
 ```
 
-Common forwarded options are `--seed`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. DE accepts `--init-strategy median|config`; MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit single-galaxy evidence separately with `submit.sh --evidence` after the chain exists. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses the matching saved per-galaxy `samples/D_A` chains (legacy `samples/D_c` chains are converted to D_A) as KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
+Common forwarded options are `--seed`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. DE accepts `--init-strategy median|config`; MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit the single-galaxy finite-support marginal-objective diagnostic with `submit.sh --evidence` after the chain exists; it is not a rigorous absolute evidence because the saved explicit-latent chain and finite-radius marginal objective do not define exactly the same posterior measure. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) requires matching saved per-galaxy `samples/D_A` chains with a recorded `uniform_D_A` stage-1 prior, uses them as KDE distance likelihoods, and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
 
 Automatic retries use the watcher wrapper. The `--max-retries` shortcut
 launches the watcher in a detached `screen`/`tmux` session and prints the
@@ -204,7 +204,8 @@ Pass `--compare-reid` to additionally print the slow compact
 Pesce/Reid-reported/config/MCMC-median comparison table scored with the same
 2D marginal disk likelihood used by the DE objective; per-spot
 `(r_ang, phi)` latents are integrated out. Add `--compare-reid-2x` for the
-2x-denser-grid logZ check. Submit harmonic evidence separately with
+2x-denser-grid logZ check. Submit the harmonic marginal-objective diagnostic
+separately with
 `submit.sh -q short --galaxy NGC6323 --evidence --init-strategy config`.
 
 ## Configuration
@@ -243,8 +244,8 @@ Circular disks use the structural four-root capacity, while eccentric disks
 retain eight because their rational velocity factor breaks the circular
 trigonometric-polynomial bound. A capacity overflow falls back to the already
 computed scan trapezoid, producing a finite poor-fit objective while retaining
-an explicit overflow diagnostic. Peak-partition v6 and fixed-grid radial-policy
-v2 therefore reject older checkpoints rather than mixing objective values.
+an explicit overflow diagnostic. Peak-partition v7 and fixed-grid radial-policy
+v3 therefore reject older checkpoints rather than mixing objective values.
 For a galaxy whose radial likelihood is exceptionally narrow, the optional
 peak-radius path first narrows a log-radius bracket with fixed value-only
 stencils, takes a guarded three-point quadratic vertex, and can solve the two

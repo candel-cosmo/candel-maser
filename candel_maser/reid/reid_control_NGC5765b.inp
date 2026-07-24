@@ -3,8 +3,8 @@
       500000            4           15          210 ! Total # trials (stored or not); # of M-H strands (1-20); Initial Ho strand range (min max)
            0          0.5            T            T            T            T ! Gaussian (0) or "outlier tolerant" (1) data unc; fraction Ho-M trials correlated; x,y,v,a fitted?
        0.015    -47351937 ! Initial McMC parameter step size in burnin phase; random number seed 
-   67.827018           -5          0.7 ! Ho (Mpc); prior_unc (<0 for flat prior), expected posteriori_unc
-   4.4616962         -0.1         0.05 ! BH mass (10^7 Msuns)
+   67.597474           -5          0.7 ! Ho (Mpc); prior_unc (<0 for flat prior), expected posteriori_unc
+   4.4611411         -0.1         0.05 ! BH mass (10^7 Msuns)
    8333.7904         -0.5         0.25 ! Vlsr_optical of BH (km/s) 
   -0.0448484        -0.01        0.002 ! Xo of BH (mas)
   -0.0992575        -0.01        0.004 ! Yo of BH (mas)

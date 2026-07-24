@@ -46,7 +46,7 @@ import numpy as _np
 from jax.scipy.special import logsumexp
 from numpyro.distributions import Delta, Uniform
 
-from ..util import SPEED_OF_LIGHT, fprint, fsection, get_nested
+from ..util import fprint, fsection, get_nested
 from . import maser_physics as _maser_physics
 from .base_model import ModelBase
 from .integration import trapz_log_weights
@@ -310,8 +310,8 @@ class MaserDiskModel(ModelBase):
 
         if "v_sys_obs" not in data:
             raise ValueError(
-                "data must contain 'v_sys_obs' (CMB-frame recession "
-                "velocity in km/s).")
+                "data must contain 'v_sys_obs' (the fixed velocity reference "
+                "used to centre residual arithmetic, km/s).")
         self.v_sys_obs = float(data["v_sys_obs"])
 
         accel_meas = self._build_spot_indices(data)
@@ -1445,7 +1445,8 @@ class MaserDiskModel(ModelBase):
             velocity_s = None
             velocity_kep = keplerian_speed(r_ang, D_A, M_BH)
             velocity_los_scale = sin_i_r * velocity_kep
-            velocity_beta_c2 = (velocity_kep / SPEED_OF_LIGHT) ** 2
+            velocity_beta_c2 = (
+                velocity_kep / _maser_physics.SPEED_OF_LIGHT) ** 2
             velocity_zg = gravitational_redshift_minus1(
                 r_ang, D_A, M_BH)
 
@@ -1484,7 +1485,9 @@ class MaserDiskModel(ModelBase):
             velocity_los_scale=velocity_los_scale,
             velocity_beta_c2=velocity_beta_c2,
             velocity_zg=velocity_zg,
-            velocity_scale=SPEED_OF_LIGHT * (1.0 + v_sys / SPEED_OF_LIGHT),
+            velocity_scale=(
+                _maser_physics.SPEED_OF_LIGHT
+                * (1.0 + v_sys / _maser_physics.SPEED_OF_LIGHT)),
             ecc_cos_om=ecc_cos_om_r, ecc_sin_om=ecc_sin_om_r, ecc2=ecc2,
             x0=x0, y0=y0, D=D_A, M_BH=M_BH, v_sys=v_sys, dv_sys=dv_sys,
             all_x=all_x, all_y=all_y, all_v_rel=all_v_rel, all_a=all_a,
@@ -1529,7 +1532,9 @@ class MaserDiskModel(ModelBase):
                    r_pre["velocity_beta_c2"][rpad]
                    * (1.0 + ecc2 + 2.0 * ecc_cos_d) * inv_denom)
         gm1 = gamma_minus_one(beta_g2)
-        z_D = gm1 + (1.0 + gm1) * (v_z / SPEED_OF_LIGHT)
+        z_D = (
+            gm1 + (1.0 + gm1)
+            * (v_z / _maser_physics.SPEED_OF_LIGHT))
         zg = r_pre["velocity_zg"][rpad]
         z_og = z_D + zg + z_D * zg
         return r_pre["velocity_scale"] * z_og + r_pre["dv_sys"]

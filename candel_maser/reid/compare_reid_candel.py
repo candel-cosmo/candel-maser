@@ -32,8 +32,9 @@ from numpyro.diagnostics import split_gelman_rubin
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from run_reid_mcmc import (DEFAULT_CONFIG, PARAM_LABELS, ROOT,  # noqa: E402
-                           compute_reid_r_ref, load_config_init,
-                           load_galaxy_config, parse_data_rows, reid_H0)
+                           compute_reid_r_ref, config_D_A_from_D_c,
+                           load_config_init, load_galaxy_config, load_toml,
+                           parse_data_rows, reid_H0)
 
 # Reid-convention name -> LaTeX label, for the params both samplers constrain.
 SHARED = [
@@ -108,12 +109,8 @@ def candel_to_reid(h5_path, galaxy, config, variant, data):
     if "D_A" in s:
         D = s["D_A"]
     elif "D_c" in s:
-        # Legacy comoving-only chain: convert to angular-diameter distance,
-        # D_A = D_c/(1+z). z ~ vsys/c is the low-z form (<0.1% at MCP
-        # redshifts) of CANDEL's own D_A = D_c/(1+z_cosmo), and matches the
-        # z=vsys/c convention of the reid_H0 map applied below -- unlike the
-        # old code, which used D_c directly as D_A (~(1+z) too large).
-        D = s["D_c"] / (1.0 + (v_sys_obs + s["dv_sys"]) / 299792.458)
+        # Legacy comoving-only chain: replay the CANDEL config cosmology.
+        D = config_D_A_from_D_c(load_toml(config), s["D_c"])
     else:
         raise KeyError(
             f"{h5_path} has no D_A or D_c distance samples; candel_to_reid "

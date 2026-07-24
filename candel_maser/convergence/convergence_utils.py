@@ -342,11 +342,10 @@ def resolve_grid_for_galaxy(master_cfg, galaxy, profile):
 # AD-friendly kernels for the summed-gradient convergence tests.
 # -----------------------------------------------------------------------
 
-# Parameters differentiated by the gradient convergence checks. Galaxies
-# with use_quadratic_warp or use_ecc extend this list via
-# ``extend_grad_params``.
+# Geometry/nuisance parameters differentiated by the gradient checks. The
+# active distance and mass coordinates are prepended by ``extend_grad_params``.
 GRAD_PARAMS_BASE = (
-    "H0", "D_c", "log_MBH", "x0", "y0", "dv_sys",
+    "x0", "y0", "dv_sys",
     "i0", "di_dr", "Omega0", "dOmega_dr",
     "sigma_x_floor", "sigma_y_floor",
     "sigma_v_sys", "sigma_v_hv", "sigma_a_floor",
@@ -354,9 +353,18 @@ GRAD_PARAMS_BASE = (
 
 
 def extend_grad_params(model, sample):
-    """Return GRAD_PARAMS_BASE extended with the optional-feature
-    parameters present in ``sample`` (quadratic warp, eccentricity)."""
-    keys = list(GRAD_PARAMS_BASE)
+    """Return the active sampled coordinates for gradient checks."""
+    keys = []
+    if "D_A" in sample:
+        keys.append("D_A")
+    else:
+        if "H0" in sample:
+            keys.append("H0")
+        keys.append("D_c")
+    keys.append(
+        "eta" if getattr(model, "mass_parameterization", "eta") == "eta"
+        else "log_MBH")
+    keys.extend(GRAD_PARAMS_BASE)
     if model.use_quadratic_warp:
         for k in ("d2i_dr2", "d2Omega_dr2"):
             if k in sample:
@@ -377,23 +385,50 @@ def _sample_dtype(sample):
 
 
 def ensure_grad_sample(model, init_block, dtype=None):
-    """Populate a jnp-typed sample dict with every parameter used by
-    the grad check, filling absent entries with sensible defaults so
-    ``jax.grad`` produces a meaningful partial for every key.
-
-    ``H0`` defaults to ``model/H0_ref`` (matches ``jax_phys_from_sample``
-    and ``phys_from_sample``); other missing entries default to 0.0,
-    which is a valid neighbourhood for the remaining parameters
-    (Cartesian offsets, warp rates, noise floors — all small).
-    """
+    """Build the current scalar D_A/eta sample used by gradient checks."""
     dtype = dtype or (jnp.float64 if jax.config.jax_enable_x64
                       else jnp.float32)
-    sample = {k: jnp.asarray(float(v), dtype=dtype)
-              for k, v in init_block.items()}
+    sample = {
+        k: jnp.asarray(float(value), dtype=dtype)
+        for k, value in init_block.items()
+        if np.asarray(value).ndim == 0
+    }
     H0_ref = float(get_nested(model.config, "model/H0_ref", 73.0))
-    defaults = {"H0": H0_ref}
+    h = H0_ref / 100.0
+    if getattr(model, "_D_A_uniform", True):
+        if "D_A" not in sample:
+            D_c = sample.pop("D_c")
+            z = model.distance2redshift(jnp.atleast_1d(D_c), h=h).squeeze()
+            sample["D_A"] = D_c / (1.0 + z)
+        sample.pop("D_c", None)
+        sample.pop("H0", None)
+
+    mass_param = getattr(model, "mass_parameterization", "eta")
+    if mass_param == "eta":
+        if "eta" not in sample:
+            if "D_A" in sample:
+                D_A = sample["D_A"]
+            else:
+                D_c = sample["D_c"]
+                z = model.distance2redshift(
+                    jnp.atleast_1d(D_c), h=h).squeeze()
+                D_A = D_c / (1.0 + z)
+            sample["eta"] = sample["log_MBH"] - jnp.log10(D_A)
+        sample.pop("log_MBH", None)
+    else:
+        if "log_MBH" not in sample:
+            if "D_A" in sample:
+                D_A = sample["D_A"]
+            else:
+                D_c = sample["D_c"]
+                z = model.distance2redshift(
+                    jnp.atleast_1d(D_c), h=h).squeeze()
+                D_A = D_c / (1.0 + z)
+            sample["log_MBH"] = sample["eta"] + jnp.log10(D_A)
+        sample.pop("eta", None)
+
     for k in GRAD_PARAMS_BASE:
-        sample.setdefault(k, jnp.asarray(defaults.get(k, 0.0), dtype=dtype))
+        sample.setdefault(k, jnp.asarray(0.0, dtype=dtype))
     if model.use_quadratic_warp:
         for k in ("d2i_dr2", "d2Omega_dr2"):
             sample.setdefault(k, jnp.asarray(0.0, dtype=dtype))
@@ -423,13 +458,20 @@ def jax_phys_from_sample(model, sample):
             return jnp.asarray(default, dtype=dtype)
         raise KeyError(f"missing '{key}' in sample")
 
-    H0_ref = float(get_nested(model.config, "model/H0_ref", 73.0))
-    h = g("H0", H0_ref) / 100.0
-    D_c = g("D_c")
-    z_cosmo = model.distance2redshift(
-        jnp.atleast_1d(D_c), h=h).squeeze()
-    D_A = D_c / (1.0 + z_cosmo)
-    M_BH = 10.0 ** (g("log_MBH") - 7.0)
+    if "D_A" in sample:
+        D_A = g("D_A")
+    else:
+        H0_ref = float(get_nested(model.config, "model/H0_ref", 73.0))
+        h = g("H0", H0_ref) / 100.0
+        D_c = g("D_c")
+        z_cosmo = model.distance2redshift(
+            jnp.atleast_1d(D_c), h=h).squeeze()
+        D_A = D_c / (1.0 + z_cosmo)
+    log_MBH = (
+        g("eta") + jnp.log10(D_A)
+        if getattr(model, "mass_parameterization", "eta") == "eta"
+        else g("log_MBH"))
+    M_BH = 10.0 ** (log_MBH - 7.0)
     v_sys = model.v_sys_obs + g("dv_sys", 0.0)
 
     phys_args = (
@@ -448,7 +490,7 @@ def jax_phys_from_sample(model, sample):
         g("sigma_v_hv") ** 2,
         g("sigma_a_floor") ** 2,
     )
-    phys_kw = {}
+    phys_kw = {"dv_sys": g("dv_sys", 0.0)}
     if model.use_quadratic_warp:
         phys_kw["d2i_dr2"] = jnp.deg2rad(g("d2i_dr2", 0.0))
         phys_kw["d2Omega_dr2"] = jnp.deg2rad(g("d2Omega_dr2", 0.0))

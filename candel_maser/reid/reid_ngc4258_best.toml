@@ -1,9 +1,11 @@
 # NGC4258 Reid best-fit globals, read from the "Fitted global parameter values"
 # block of background_info/fit_disk_Reid/fit_disk.prt (best ln(Prob)=3449.895,
-# chisq_pdf=1.313 for 491 d.o.f.). These are already at Reid's internal r_ref
-# pivot, so no warp-pivot shift is applied. Used for the validation gate:
+# chisq_pdf=1.313 for 491 d.o.f.). Inclination and PA are at fit_disk's fixed
+# reference radius, computed once from the starting centre and HV spots.
+# Used for the validation gate:
 # freeze all globals here, MAP the per-spot latents, and recover lnP ~ 3449.895.
 [globals]
+r_ref_mas = 6.101031843100007
 H0 = 62.733
 Mbh_1e7Msun = 3.960
 Vsys_km_s = 472.911

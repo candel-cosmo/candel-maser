@@ -92,7 +92,7 @@ from candel.inference.optimise import _prior_bounds  # noqa: E402
 from candel.inference.optimise import _select_distinct  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
-from candel.model.maser_physics import C_v  # noqa: E402
+from candel.model import maser_physics  # noqa: E402
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
 from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
 from candel.util import (data_path, fprint, fsection, get_nested,  # noqa: E402
@@ -182,24 +182,23 @@ def _principal_angle_deg(x, y):
     return float(np.rad2deg(np.arctan2(vx, vy)) % 360.0)
 
 
-def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
+def _data_driven_seed(model, target, base_init, n_seed, seed,
                       sobol_n_sigma=5, eta_anchor=None):
     """Random DE seed points sliding along the distance-mass degeneracy.
 
-    The masers fix ``eta = log10(M_BH/D_A)`` (distance-free, from the angular
-    Keplerian envelope) but barely constrain distance; the maser likelihood is
-    near-flat along the ``M_BH ∝ D_A`` ridge.  So instead of one seed, draw
-    ``n_seed`` points with random distance spanning the prior box at *fixed*
-    ``eta`` — in the eta parameterisation that is literally sliding along the
-    ridge, with ``log M_BH`` tracking ``D_A`` automatically.  ``eta_anchor``
-    can supply that fixed coordinate from a fitted linear model; otherwise it
-    is estimated from the high-velocity envelope with a small scatter. Geometry
-    (centre/PA/inclination/``dv_sys``) is jittered around its data seeds, with
-    the ±180° PA ambiguity flipped on a random half.  Every other dimension
-    (error floors, ecc/warp) is drawn Sobol-random within the DE box
-    (``sobol_n_sigma``) so the ridge seeds are not identical there.  Returns
-    ``(seed_points (n_seed, D) in target.names order, info)`` or
-    ``(None, reason)``.
+    The high-velocity envelope tightly constrains
+    ``eta = log10(M_BH/D_A)``.  Systemic accelerations and disk geometry then
+    break that degeneracy and constrain distance, but the
+    ``M_BH ∝ D_A`` direction remains a useful broad initialisation path. Draw
+    ``n_seed`` points across the distance prior at fixed ``eta``; in the eta
+    parameterisation ``log M_BH`` then tracks ``D_A`` automatically.
+    ``eta_anchor`` can supply the coordinate from a fitted linear model;
+    otherwise it is estimated from the high-velocity envelope with a small
+    scatter. Geometry (centre/PA/inclination/``dv_sys``) is jittered around
+    data-derived seeds, with the ±180° PA ambiguity flipped on a random half.
+    Every other dimension (error floors, eccentricity/warp) is drawn
+    Sobol-random within the DE box, so the ridge seeds are not identical
+    there. Returns ``(seed_points, info)`` or ``(None, reason)``.
     """
     x = np.asarray(model._all_x)
     y = np.asarray(model._all_y)
@@ -234,7 +233,8 @@ def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
         g = (theta > 0) & np.isfinite(dv)
         s = float(np.median(theta[g] * dv[g] ** 2))
         eta_seed = (
-            np.log10(s) - 2.0 * np.log10(C_v) + 7.0)  # M_BH in Msun, +log1e7
+            np.log10(s) - 2.0 * np.log10(maser_physics.C_v)
+            + 7.0)  # M_BH in Msun, +log1e7
         eta_source = "high-velocity envelope"
     else:
         eta_seed = float(eta_anchor)
@@ -252,8 +252,8 @@ def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
     Omega = (Omega0 + flip + rng.normal(0.0, 5.0, n_seed)) % 360.0
     x0s = np.clip(x0 + rng.normal(0.0, 20.0, n_seed), -750.0, 750.0)
     y0s = np.clip(y0 + rng.normal(0.0, 20.0, n_seed), -750.0, 750.0)
-    # dv_sys seed is the CMB↔LSR/bary frame offset; kept wide so the DE still
-    # explores it rather than trusting the systemic centroid.
+    # dv_sys is the native systemic velocity minus the fixed residual
+    # reference v_sys_obs; keep it wide rather than trusting the centroid.
     dvs = dv_sys_seed + rng.normal(0.0, 100.0, n_seed)
 
     names = target.names
@@ -296,7 +296,8 @@ def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
             f"ridge: {distance_name}~U({D_lo:.0f},{D_hi:.0f}) Mpc, other "
             f"globals fixed at eta_seed={eta_seed:.3f} from {eta_source} "
             "(BH-mass coordinate), "
-            f"dv_sys={dv_sys_seed:.0f} km/s (systemic velocity), disc centre "
+            f"dv_sys={dv_sys_seed:.0f} km/s (relative to v_sys_obs), "
+            "disc centre "
             f"x0={x0:.1f}, y0={y0:.1f} uas, PA Omega0={Omega0:.1f} deg; "
             f"{n_hv} high-velocity spots")
     return seeds, info
@@ -422,8 +423,8 @@ _DE_SEED_POLICY = "data_sobol_only"
 _DE_BASE_MODEL_SEED_POLICY = (
     "vanilla_expansion_ridge_sobol_ngc4258_base_config_v5")
 _DE_POPULATION_SCHEDULE = "nfe_linear"
-_DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v2"
-_DE_PEAK_PARTITION_POLICY = "peak_partition_v6"
+_DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v3"
+_DE_PEAK_PARTITION_POLICY = "peak_partition_v7"
 _CANDIDATES_PER_GPU_WAVE = 1
 _PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE = 8
 _F32_ALL_SPOT_GALAXIES = frozenset((
@@ -683,8 +684,7 @@ def _make_batched_fitness(fitness_one, n_dev, devices,
     shared_runner = (jax.pmap(per_device, devices=devices)
                      if shared_pmap else None)
     runners = (() if shared_pmap else
-               tuple(jax.jit(per_device, device=device)
-                     for device in devices))
+               tuple(jax.jit(per_device) for _ in devices))
     state = {
         "assignment_weights": np.full(n_dev, 1.0 / n_dev),
         "profile_weights": np.full(n_dev, 1.0 / n_dev),
@@ -1345,28 +1345,111 @@ def _de_checkpoint_filename(model, seed, fix_floors_pesce=False):
         f"_seed{int(seed)}_lshade_nopesce.npz")
 
 
-def _objective_policy(model):
+def _objective_data_digest(model):
+    """Digest the observed arrays and spot partition used by the objective."""
+    digest = hashlib.sha256()
+    found = False
+    for name in (
+            "_all_x", "_all_y", "_all_sigma_x2", "_all_sigma_y2",
+            "_all_v_rel", "_all_a", "_all_sigma_a2", "_all_sigma_v2",
+            "_all_has_accel", "_idx_sys", "_idx_red", "_idx_blue"):
+        if not hasattr(model, name):
+            continue
+        value = np.ascontiguousarray(np.asarray(getattr(model, name)))
+        digest.update(name.encode())
+        digest.update(value.dtype.str.encode())
+        digest.update(np.asarray(value.shape, dtype=np.int64).tobytes())
+        digest.update(value.tobytes())
+        found = True
+    if hasattr(model, "v_sys_obs"):
+        digest.update(np.float64(model.v_sys_obs).tobytes())
+        found = True
+    return digest.hexdigest()[:16] if found else "none"
+
+
+def _objective_prior_digest(model):
+    """Digest effective prior families and parameters used by the objective."""
+    priors = getattr(model, "priors", None)
+    if not priors:
+        return "none"
+    digest = hashlib.sha256()
+    for name, prior in sorted(priors.items()):
+        digest.update(name.encode())
+        digest.update(
+            f"{type(prior).__module__}.{type(prior).__qualname__}".encode())
+        leaves, tree = jax.tree_util.tree_flatten(prior)
+        digest.update(str(tree).encode())
+        for leaf in leaves:
+            value = np.ascontiguousarray(np.asarray(leaf))
+            digest.update(value.dtype.str.encode())
+            digest.update(np.asarray(value.shape, dtype=np.int64).tobytes())
+            digest.update(value.tobytes())
+    return digest.hexdigest()[:16]
+
+
+def _objective_policy(model, fixed_params=None):
+    def attr(name, default):
+        return getattr(model, name, default)
+
     kernel = ":ecc_hybrid_qf1" if getattr(model, "use_ecc", False) else ""
     radial = (
-        f"r{model._n_r_local}+{model._n_r_global}:"
-        f"K{model._K_sigma:g}:"
-        f"full{int(model._global_r_full_support)}:"
-        f"asym{int(model._asymmetric_r_local)}:"
-        f"width{model._scan_width_drop:g}")
+        f"r{attr('_n_r_local', 151)}+{attr('_n_r_global', 301)}:"
+        f"K{attr('_K_sigma', 5.0):g}:"
+        f"full{int(attr('_global_r_full_support', False))}:"
+        f"asym{int(attr('_asymmetric_r_local', False))}:"
+        f"width{attr('_scan_width_drop', 0.0):g}:"
+        f"R{attr('_R_phys_lo', 0.01):g}-{attr('_R_phys_hi', 2.0):g}:"
+        f"ref{int(attr('_refine_r_center', True))}x"
+        f"{attr('_n_refine_steps', 32)}")
+    geometry = (
+        f":piv{attr('_r_ang_ref_i', 0.0):g},"
+        f"{attr('_r_ang_ref_Omega', 0.0):g},"
+        f"{attr('_r_ang_ref_periapsis', 0.0):g}:"
+        f"data{_objective_data_digest(model)}:"
+        f"priors{_objective_prior_digest(model)}")
+    physics = (
+        f":phys{maser_physics.C_v:.17g},"
+        f"{maser_physics.C_a:.17g},"
+        f"{maser_physics.C_g:.17g},"
+        f"{maser_physics.SPEED_OF_LIGHT:.17g},"
+        f"{maser_physics.PC_PER_MAS_MPC:.17g},"
+        f"{maser_physics.LOG_2PI:.17g},"
+        f"{maser_physics.W_LOG_FLOOR:.17g},"
+        f"{maser_physics.R_EST_EPS:.17g},"
+        f"rg{int(maser_physics.REID_CIRCULAR_GAMMA)}")
+    fixed = ""
+    if fixed_params:
+        fixed = ":fixed=" + ",".join(
+            f"{name}={float(np.asarray(value)):.17g}"
+            for name, value in sorted(fixed_params.items()))
     if model.phi_integration == "peak-partition":
         refine_scope = (
-            ":rrhv" if (model._peak_r_refine_steps
-                         and model._peak_r_refine_hv_only) else "")
+            ":rrhv"
+            if (attr("_peak_r_refine_steps", 0)
+                and attr("_peak_r_refine_hv_only", False))
+            else "")
         return (
             f"{_DE_PEAK_PARTITION_POLICY}{kernel}:"
-            f"sys{model._n_phi_partition_sys}:"
-            f"hv{model._n_phi_partition_hv}:"
-            f"roots{model._phi_partition_root_capacity}:"
-            f"rr{model._peak_r_refine_steps}x"
-            f"{model._peak_r_refine_order}{refine_scope}:"
-            f"rw{model._peak_r_width_steps}:"
-            f"{radial}")
-    return f"{_DE_OBJECTIVE_POLICY}{kernel}:{radial}"
+            f"sys{attr('_n_phi_partition_sys', 129)}:"
+            f"hv{attr('_n_phi_partition_hv', 65)}:"
+            f"roots{attr('_phi_partition_root_capacity', 4)}:"
+            f"rr{attr('_peak_r_refine_steps', 0)}x"
+            f"{attr('_peak_r_refine_order', 7)}{refine_scope}:"
+            f"rw{attr('_peak_r_width_steps', 0)}:"
+            f"{radial}{geometry}{physics}{fixed}")
+    sys_ranges = ",".join(
+        f"{float(lo):g}_{float(hi):g}"
+        for lo, hi in attr(
+            "_phi_sys_ranges_deg", [[-45.0, 45.0], [135.0, 225.0]]))
+    phi = (
+        f":hv{attr('_phi_hv_inner_deg', 45.0):g}-"
+        f"{attr('_phi_hv_outer_deg', 90.0):g}:"
+        f"n{attr('_n_phi_hv_high', 401)}+"
+        f"{attr('_n_phi_hv_low', 101)}:"
+        f"sys{sys_ranges}x{attr('_n_phi_sys', 2001)}")
+    return (
+        f"{_DE_OBJECTIVE_POLICY}{kernel}:"
+        f"{radial}{phi}{geometry}{physics}{fixed}")
 
 
 def _init_block(gal_cfg, model):
@@ -2179,7 +2262,8 @@ def main(argv=None):
         "--phi-integration", choices=("fixed-grid", "peak-partition"),
         default=None,
         help="Phi integration used by the DE 2D marginal. Default: config "
-             "value (fixed-grid in config_maser.toml). peak-partition uses "
+             "value (peak-partition in config_maser.toml). "
+             "peak-partition uses "
              "fixed-size numerical peak searches in both systemic "
              "half-planes and one half-plane per HV group.")
     parser.add_argument(
@@ -2213,6 +2297,15 @@ def main(argv=None):
                              "(-> --gres=gpu:N).")
     args = parser.parse_args(argv)
 
+    if args.no_ecc and args.add_ecc:
+        raise SystemExit("--no-ecc and --add-ecc are mutually exclusive.")
+    if args.no_quadratic_warp and args.add_quadratic_warp:
+        raise SystemExit(
+            "--no-quadratic-warp and --add-quadratic-warp are mutually "
+            "exclusive.")
+    if args.fix_globals and args.fix_globals_pesce:
+        raise SystemExit(
+            "--fix-globals and --fix-globals-pesce are mutually exclusive.")
     if args.fix_floors_pesce and (args.fix_globals or args.fix_globals_pesce):
         raise SystemExit(
             "--fix-floors-pesce only applies to the DE; it cannot combine "
@@ -2471,8 +2564,7 @@ def main(argv=None):
                     float(base_model_params["log_MBH"])
                     - np.log10(float(linear_D_A)))
             ridge_seeds, ridge_info = _data_driven_seed(
-                model, target, base_model_params, _h_ref(model) * 100.0,
-                ridge_count, seed + 2,
+                model, target, base_model_params, ridge_count, seed + 2,
                 sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5),
                 eta_anchor=linear_eta)
             clouds = [
@@ -2486,8 +2578,7 @@ def main(argv=None):
                 f"{pop_size - expansion_count - ridge_count} Sobol")
         else:
             data_seeds, seed_info = _data_driven_seed(
-                model, target, init_params, _h_ref(model) * 100.0,
-                max(1, pop_size // 2), seed + 1,
+                model, target, init_params, max(1, pop_size // 2), seed + 1,
                 sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5))
         if data_seeds is None:
             fprint(f"seed cloud unavailable ({seed_info}); Sobol only")
@@ -2557,7 +2648,7 @@ def main(argv=None):
             seed_points=seed_points, fixed_params=fixed_floors,
             reference_params=pesce_params,
             reference_status=pesce_status,
-            objective_policy=_objective_policy(model),
+            objective_policy=_objective_policy(model, fixed_floors),
             peak_candidates_per_wave=args.peak_candidates_per_wave,
             seed_policy=(
                 _DE_BASE_MODEL_SEED_POLICY

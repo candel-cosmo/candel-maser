@@ -88,7 +88,6 @@ if _F64_ENABLED_HERE:
 
 from numpyro.distributions import Delta  # noqa: E402
 
-import candel.model.maser_blackjax as maser_blackjax  # noqa: E402
 import candel.model.maser_physics as maser_physics  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
@@ -165,9 +164,6 @@ def _apply_reid_physics_constants():
     maser_physics.C_g = cg
     maser_physics.SPEED_OF_LIGHT = _REID_CLIGHT
     maser_physics.REID_CIRCULAR_GAMMA = True
-    # maser_blackjax imports these constants by value for radius seeds.
-    maser_blackjax.C_v = cv
-    maser_blackjax.C_a = ca
     fprint("match-reid: using Reid fit_disk physics constants "
            f"(C_v={cv:.6g}, C_a={ca:.6g}, C_g={cg:.6g}, "
            f"c={_REID_CLIGHT:.6g}) + circular-speed SR gamma")
@@ -627,9 +623,7 @@ def _save_hdf5(path, result, metadata, *, save_latents=False):
         for key in sorted(result.samples):
             if not save_latents and key in _LATENT_SAMPLE_KEYS:
                 continue
-            grp.create_dataset(
-                key, data=np.asarray(result.samples[key]),
-                dtype=np.float32)
+            grp.create_dataset(key, data=np.asarray(result.samples[key]))
 
         f.create_dataset("log_density", data=np.asarray(result.log_density))
 
@@ -1370,7 +1364,7 @@ def _variant_suffix(model, args, init_strategy):
 
 
 def _run_evidence_subprocess(galaxy, chain_path, data_root, spot_batch):
-    """Compute the single-galaxy harmonic evidence on the saved chain.
+    """Compute the finite-support marginal-objective diagnostic.
 
     Spawned as a separate process so the float64 reference grid (a global JAX
     flag) is genuinely double precision even when the chain was sampled in
@@ -1386,12 +1380,12 @@ def _run_evidence_subprocess(galaxy, chain_path, data_root, spot_batch):
         cmd += ["--data-root", data_root]
     if spot_batch is not None:
         cmd += ["--spot-batch", str(spot_batch)]
-    fsection("Single-galaxy evidence (harmonic)")
+    fsection("Single-galaxy marginal-objective diagnostic (harmonic)")
     fprint("running: " + " ".join(cmd))
     try:
         subprocess.run(cmd, check=True)
     except Exception as exc:                            # never abort the run
-        fprint(f"evidence computation failed: {exc}")
+        fprint(f"marginal-objective diagnostic failed: {exc}")
 
 
 def main(argv=None):
@@ -1473,7 +1467,8 @@ def main(argv=None):
                              "2x-denser quadrature grid. Disabled by default.")
     parser.add_argument("--compute-evidence", action="store_true",
                         help="After sampling, compute the single-galaxy "
-                             "harmonic evidence. Disabled by default.")
+                             "finite-support harmonic marginal-objective "
+                             "diagnostic. Disabled by default.")
     parser.add_argument("--save-latents", action="store_true",
                         help="Write per-spot r_ang/phi samples to HDF5. "
                              "Disabled by default; globals, log_density, and "
@@ -1490,6 +1485,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.compare_reid_2x and not args.compare_reid:
         raise SystemExit("--compare-reid-2x requires --compare-reid.")
+    if args.no_ecc and args.add_ecc:
+        raise SystemExit("--no-ecc and --add-ecc are mutually exclusive.")
+    if args.no_quadratic_warp and args.add_quadratic_warp:
+        raise SystemExit(
+            "--no-quadratic-warp and --add-quadratic-warp are mutually "
+            "exclusive.")
 
     galaxies = master_cfg["model"]["galaxies"]
     if args.galaxy not in galaxies:
@@ -1727,6 +1728,7 @@ def main(argv=None):
         "compare_reid_2x": bool(args.compare_reid_2x),
         "compute_evidence": bool(args.compute_evidence),
         "save_latents": bool(args.save_latents),
+        "precision": precision,
     }
     log_density_flat = np.asarray(result.log_density, dtype=float).reshape(-1)
     log_density_finite = log_density_flat[np.isfinite(log_density_flat)]

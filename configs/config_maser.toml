@@ -289,7 +289,7 @@ peak_r_width_steps = 8
 # added coordinates to zero, vary only those added coordinates, and print its
 # active coordinates and exact score.
 [model.galaxies.NGC4258.init]
-# Updaetd on July 24
+# Updated on July 24
 D_A = 7.416
 Omega0 = 86.205
 dOmega_dr = 2.0856

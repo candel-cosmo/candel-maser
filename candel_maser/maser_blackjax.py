@@ -18,8 +18,8 @@ The sampler targets the megamaser disk likelihood:
 
 * global disk parameters are sampled by BlackJAX NUTS in unconstrained
   Euclidean coordinates;
-* the distance/mass block is sampled either as ``D_c`` or direct ``D_A``, and
-  either ``log_MBH`` or ``eta = log_MBH - log10(D_A)``;
+* the production distance/mass block samples direct ``D_A`` and either
+  ``log_MBH`` or ``eta = log_MBH - log10(D_A)``;
 * ``r_ang`` is represented by non-centred log-radius residuals,
   ``z_r = log(r_ang / r_hat(theta))``, and updated jointly with ``phi`` by a
   vectorised per-spot adaptive random-walk Metropolis (correlated ``(z_r,
@@ -46,7 +46,7 @@ from numpyro.distributions import Delta, Uniform
 from numpyro.distributions.transforms import biject_to
 
 from ..util import get_nested
-from .maser_physics import C_a, C_v
+from . import maser_physics
 
 # phys_args positional indices.
 _I_DA, _I_MBH, _I_VSYS, _I_I0, _I_VARVHV, _I_SAF2 = 2, 3, 4, 8, 15, 16
@@ -163,13 +163,14 @@ def _seeds(model, phys_args):
     dv2_safe = jnp.where(
         is_hv, dv * dv + jnp.asarray(1e-6, dtype=dtype),
         jnp.asarray(1.0, dtype=dtype))
-    r_vel = M_BH * (C_v * sin_i) ** 2 / (D_A * dv2_safe)
+    r_vel = M_BH * (maser_physics.C_v * sin_i) ** 2 / (D_A * dv2_safe)
 
     use_accel = (~is_hv) & has_accel
     a_safe = jnp.where(
         use_accel, jnp.abs(model._all_a) + jnp.asarray(1e-6, dtype=dtype),
         jnp.asarray(1.0, dtype=dtype))
-    r_acc_arg = C_a * M_BH * sin_i / (D_A ** 2 * a_safe)
+    r_acc_arg = (
+        maser_physics.C_a * M_BH * sin_i / (D_A ** 2 * a_safe))
     r_acc = jnp.sqrt(jnp.maximum(r_acc_arg, jnp.asarray(1e-30, dtype=dtype)))
 
     r_hat = jnp.where(is_hv, r_vel, r_acc)

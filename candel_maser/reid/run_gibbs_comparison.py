@@ -38,7 +38,7 @@ from compare_reid_candel import (DEFAULT_CONFIG, SHARED,  # noqa: E402
 from run_reid_mcmc import (GLOBAL_NAMES, compute_reid_r_ref,  # noqa: E402
                            load_chain, load_galaxy_config,
                            numpyro_summary_text, parse_data_rows,
-                           set_control_numbers)
+                           reid_D_A, reid_H0, set_control_numbers)
 
 ROOT = HERE.parents[2]
 RUN_SCRIPT = HERE / "run_gibbs_chains.sh"
@@ -191,7 +191,7 @@ def pesce_reid_globals(galaxy, config, data):
                  f"(missing {missing})")
     ex, ey = float(point.get("e_x", 0.0)), float(point.get("e_y", 0.0))
     r0 = {
-        "H0": point["v_native"] / point["D_A"],
+        "H0": float(reid_H0(point["v_native"], point["D_A"])),
         "Mbh_1e7Msun": point["M_BH_1e7"],
         "Vsys_km_s": point["v_native"],
         "x0_mas": point["x0_mas"],
@@ -421,7 +421,8 @@ def main(argv=None):
             os.replace(tmp, pesce_ctrl)
             print(f"[INFO] Pesce init: wrote {pesce_ctrl} (reid_r_ref="
                   f"{r_ref:.6f} mas, H0={glob['H0']:.3f}, "
-                  f"D={glob['Vsys_km_s'] / glob['H0']:.2f} Mpc)")
+                  f"D={float(reid_D_A(glob['Vsys_km_s'], glob['H0'])):.2f} "
+                  "Mpc)")
         control_template = pesce_ctrl
 
     if args.H0_range is not None:

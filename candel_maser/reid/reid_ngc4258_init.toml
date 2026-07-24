@@ -10,6 +10,7 @@
 # - angles: deg
 
 [globals]
+r_ref_mas = 6.101031843100007
 H0 = 70.0
 Mbh_1e7Msun = 4.0
 Vsys_km_s = 474.25

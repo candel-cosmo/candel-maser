@@ -74,7 +74,7 @@ def neg_half_chi2(ctx, galaxy, point, r_ang, phi, D_A=None):
     init_block = {k: float(point[k]) for k in GLOBAL_INIT_KEYS
                   if k in point and np.asarray(point[k]).ndim == 0}
     if "D_c" not in init_block and "D_A" in point:
-        init_block["D_c"] = float(point["D_A"])
+        init_block["D_A"] = float(point["D_A"])
     tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False)
     tomli_w.dump({"model": {"galaxies": {galaxy: {"init": init_block}}}}, tmp)
     tmp.close()

@@ -142,15 +142,16 @@ def _parse_mrt_line(line):
 def load_NGC5765b_spots(root, v_sys_obs=None):
     """Load maser spot data for NGC 5765b from Gao+2016 Table 6.
 
-    The table provides velocity, position (x, y), and acceleration for 192
-    maser spots. All spots have measured accelerations.
+    The table provides velocity, position (x, y), and acceleration columns for
+    192 maser spots. Placeholder and undetected accelerations are masked.
 
     Parameters
     ----------
     root : str
         Directory containing ``NGC5765b_Gao2016_table6.dat``.
     v_sys_obs : float
-        Observed CMB-frame recession velocity in km/s. Required.
+        Fixed velocity reference used to centre residual arithmetic, km/s.
+        The fitted native-frame systemic velocity is ``v_sys_obs + dv_sys``.
 
     Returns
     -------
@@ -236,8 +237,8 @@ def _load_kuo_table2(root, fname, galaxy_label, v_sys_obs=None):
     galaxy_label : str
         Short label used in output messages.
     v_sys_obs : float or None
-        Observed CMB-frame recession velocity in km/s. If None, use the
-        per-galaxy default.
+        Fixed velocity reference used to centre residual arithmetic, km/s.
+        The fitted native-frame systemic velocity is ``v_sys_obs + dv_sys``.
 
     Returns
     -------
@@ -372,7 +373,8 @@ def load_NGC4258_spots(root, v_sys_obs=472.0):
     root : str
         Directory containing ``N4258_disk_data_MarkReid.final``.
     v_sys_obs : float
-        Observed CMB-frame recession velocity in km/s.
+        Fixed velocity reference used to centre residual arithmetic, km/s.
+        The fitted native-frame systemic velocity is ``v_sys_obs + dv_sys``.
 
     Returns
     -------
@@ -469,8 +471,8 @@ def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
     galaxy : str
         Galaxy name: ``"CGCG074-064"``, ``"NGC5765b"``, etc.
     v_sys_obs : float or None
-        Observed CMB-frame recession velocity in km/s. Required except for
-        NGC4258, where a default is supplied.
+        Fixed velocity reference used to centre residual arithmetic, km/s.
+        Required except for NGC4258, where a default is supplied.
 
     Returns
     -------

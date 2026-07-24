@@ -2,8 +2,9 @@
 """Write a Reid ``fit_disk`` data file for any megamaser galaxy.
 
 Drives off ``load_megamaser_spots`` so every galaxy uses CANDEL's frame and
-unit conventions (positions micro-arcsec -> mas, optical-LSR velocities), and
-keeps the loader spot order so per-spot quantities line up with CANDEL chains.
+unit conventions (positions micro-arcsec -> mas, native-frame optical
+velocities), and keeps the loader spot order so per-spot quantities line up
+with CANDEL chains.
 
 Reid's likelihood uses the control-file error floors (params 16-20), so the
 floor values written in the data header here are inert placeholders; only the
@@ -67,7 +68,7 @@ def main(argv=None):
         f"! Reid fit_disk data for {args.galaxy} from load_megamaser_spots "
         f"({d['n_spots']} spots, {n_sys} systemic, "
         f"{int(measured.sum())} with acceleration).",
-        f"! Velocities optical-LSR (frame={d['velocity_frame']}); "
+        f"! Native-frame optical velocities (frame={d['velocity_frame']}); "
         "positions in mas; raw velocity error set to sigma_v_default.",
         "! Unmeasured accelerations flagged with sigma_A = -2.",
         "! ID  Vlsr_opt  sigma_V   x  sigma_x   y  sigma_y   Acc  sigma_Acc",

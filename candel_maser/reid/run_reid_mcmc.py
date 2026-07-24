@@ -18,10 +18,13 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+import astropy.units as u
+from astropy.cosmology import FlatLambdaCDM, z_at_value
 
 try:
     import tomllib
@@ -205,14 +208,15 @@ def load_reid_init(path: Path, vcor: float | None = None,
     values = {name: float(init[name]) for name in GLOBAL_NAMES}
     if vcor is not None:
         values["Vcor_km_s"] = float(vcor)
+    r_ref = float(init.get("r_ref_mas", 0.0))
     values.update(
         {
-            "_D_c": (
-                values["Vsys_km_s"] +
-                values["Vcor_km_s"]) /
-            values["H0"],
-            "_r_ref_i": 0.0,
-            "_r_ref_PA": 0.0,
+            "_D_A": reid_D_A(
+                values["Vsys_km_s"] + values["Vcor_km_s"],
+                values["H0"]),
+            "_reid_r_ref": r_ref or None,
+            "_r_ref_i": r_ref,
+            "_r_ref_PA": r_ref,
             "_r_ref_peri": 0.0})
     return ReidInit(values=values, source=f"reid-init:{tag}")
 
@@ -242,6 +246,20 @@ def load_galaxy_config(config_path: Path, galaxy: str) -> dict:
     return default_gcfg
 
 
+def config_D_A_from_D_c(cfg: dict, D_c):
+    """Convert CANDEL config comoving distance to angular diameter distance."""
+    model = cfg.get("model", {})
+    cosmo = FlatLambdaCDM(
+        H0=float(model.get("H0_ref", 73.0)),
+        Om0=float(model.get("Om", model.get("Om0", 0.3))),
+    )
+    D_c = np.asarray(D_c, dtype=np.float64)
+    z = np.asarray(
+        z_at_value(cosmo.comoving_distance, D_c * u.Mpc).value)
+    D_A = D_c / (1.0 + z)
+    return float(D_A) if D_A.ndim == 0 else D_A
+
+
 def load_toml_init(path: Path, galaxy: str, vcor: float,
                    variant: str = "init") -> ReidInit:
     cfg = load_toml(path)
@@ -265,10 +283,12 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float,
     v_sys = float(gcfg["v_sys_obs"]) + float(init.get("dv_sys", 0.0))
     if "D_A" in init:
         distance = float(init["D_A"])
+        comoving_distance = None
         h0 = float(reid_H0(v_sys + vcor, distance))
     elif "D_c" in init:
-        distance = float(init["D_c"])
-        h0 = (v_sys + vcor) / distance
+        comoving_distance = float(init["D_c"])
+        distance = config_D_A_from_D_c(cfg, comoving_distance)
+        h0 = float(reid_H0(v_sys + vcor, distance))
     else:
         raise KeyError(f"{variant} must contain D_A or D_c")
 
@@ -306,7 +326,8 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float,
             # and d2i/dr2 warp gradients are correspondingly sign-flipped.
             "i0_deg": 180.0 - float(init.get("i0", 94.0)),
             "di_dr_deg_mas": -float(init.get("di_dr", 0.0)),
-            "d2i_dr2_deg_mas2": -float(init.get("d2i_dr2", 0.0)),
+            "d2i_dr2_deg_mas2": (
+                -float(init.get("d2i_dr2", 0.0)) or 0.0),
             "PA_deg": float(init.get("Omega0", 89.0)),
             "dPA_dr_deg_mas": float(init.get("dOmega_dr", 0.0)),
             "d2PA_dr2_deg_mas2": float(init.get("d2Omega_dr2", 0.0)),
@@ -320,7 +341,7 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float,
             "sigma_vhv_km_s": float(init.get("sigma_v_hv", 1.0)),
             "sigma_acc_km_s_yr": float(init.get("sigma_a_floor", 0.4)),
             "_D_A": distance,
-            "_D_c": float(init.get("D_c", distance)),
+            "_D_c": comoving_distance,
             "_r_ref_i": float(gcfg.get("r_ang_ref_i", init.get("r_ang_ref", 0.0))),  # noqa: E501
             "_r_ref_PA": float(
                 gcfg.get("r_ang_ref_Omega", init.get("r_ang_ref", 0.0))
@@ -476,7 +497,8 @@ def initial_r_phi(rows: np.ndarray,
     acc = rows[:, 7]
     if str(header["velocity_flag"]).lower().startswith("r"):
         v = radio_to_optical(v)
-    D = (init["Vsys_km_s"] + init["Vcor_km_s"]) / init["H0"]
+    D = float(reid_D_A(
+        init["Vsys_km_s"] + init["Vcor_km_s"], init["H0"]))
     bh_mass = init["Mbh_1e7Msun"] * 1e7
     vmin = float(header["Vmin"])
     vmax = float(header["Vmax"])
@@ -673,20 +695,17 @@ def _reid_dnum(v):
     directions of the mapping fall out of it -- D_A = _reid_dnum(v)/H0 and its
     inverse H0 = _reid_dnum(v)/D_A.
 
-    Vectorised: eq14int depends only on z, so it is precomputed on a shared
-    z-grid and interpolated per sample (grid error <1e-6; agrees with the
-    Fortran's per-draw D_A to ~6e-5, the residual being its integer-km/s Ez
-    rounding this deliberately smooths), keeping million-row chains
-    memory-safe."""
-    c, Om, Ol = 299792.458, 0.27, 0.73
+    Vectorised, but literal: fit_disk rounds the velocity to an integer when
+    selecting ``Ez_int`` and uses the unrounded velocity in ``1 + z``. The
+    small set of integer numerators in a chain is cached."""
     v = np.asarray(v, dtype=np.float64)
-    z = v / c
-    zmax = float(np.nanmax(z)) if z.size else 0.0
-    zg = np.linspace(0.0, zmax if zmax > 0.0 else 1e-6, 20001)
-    inv_E = 1.0 / np.sqrt(Om * (1.0 + zg) ** 3 + Ol)
-    eq14 = np.concatenate(
-        ([0.0], np.cumsum(0.5 * (inv_E[1:] + inv_E[:-1]) * np.diff(zg))))
-    return c * np.interp(z, zg, eq14) / (1.0 + z)
+    n_v = np.trunc(v + 0.5).astype(np.int64)
+    unique, inverse = np.unique(n_v, return_inverse=True)
+    numerators = np.asarray(
+        [_reid_eq14_numerator(int(n)) for n in unique])
+    return (
+        numerators[inverse].reshape(v.shape)
+        / (1.0 + v / 299792.5))
 
 
 def reid_D_A(v, H0):
@@ -696,21 +715,34 @@ def reid_D_A(v, H0):
     it to the sampled H0 gives a Reid D_A directly comparable to CANDEL's
     sampled D_A -- unlike the naive Hubble ratio v/H0, which overshoots D_A by
     the cosmological (1+z)/E(z) factor (~3% at MCP redshifts)."""
+    if np.ndim(v) == 0 and np.ndim(H0) == 0:
+        return _reid_dnum_scalar(v) / float(H0)
     return _reid_dnum(v) / np.asarray(H0, dtype=np.float64)
 
 
-def _reid_dnum_scalar(v):
-    """Literal scalar distance numerator used by ``calc_warped_model``."""
+@lru_cache(maxsize=None)
+def _reid_eq14_numerator(n_v):
+    """Cached ``c * eq14int`` at fit_disk's integer velocity index."""
+    if not 1 <= n_v <= 50000:
+        raise ValueError(
+            f"Reid fit_disk Ez_int index {n_v} is outside [1, 50000]")
     c_dampc = 299792.458
     c_model = 299792.5
-    z = int(float(v) + 0.5) / c_dampc
+    z = n_v / c_dampc
     dz = z / 1000.0
     eq14 = 0.0
     for i in range(1001):
         zp = i * dz
         inv_e = 1.0 / math.sqrt(0.27 * (1.0 + zp) ** 3 + 0.73)
         eq14 += 0.5 * inv_e if i in (0, 1000) else inv_e
-    return c_model * eq14 * dz / (1.0 + float(v) / c_model)
+    return c_model * eq14 * dz
+
+
+def _reid_dnum_scalar(v):
+    """Literal scalar distance numerator used by ``calc_warped_model``."""
+    c_model = 299792.5
+    n_v = int(float(v) + 0.5)
+    return _reid_eq14_numerator(n_v) / (1.0 + float(v) / c_model)
 
 
 def reid_H0(v, D_A):
@@ -1220,9 +1252,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     header, data_rows = parse_data_rows(args.data)
-    run_init = shift_warp_pivots(
-        reid_init.values, compute_reid_r_ref(
-            data_rows, header, reid_init.values))
+    run_r_ref = reid_init.values.get("_reid_r_ref") or compute_reid_r_ref(
+        data_rows, header, reid_init.values)
+    run_init = shift_warp_pivots(reid_init.values, run_r_ref)
 
     h0_low = args.h0_low
     h0_high = args.h0_high

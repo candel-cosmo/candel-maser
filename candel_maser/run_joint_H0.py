@@ -788,7 +788,7 @@ def _print_toy_support_diagnostics(result, items):
 
 
 def _toy_distance_kde_plots(items, outpath):
-    """Overlay each toy distance KDE on a fine histogram of its raw D_c
+    """Overlay each toy distance KDE on a fine histogram of its raw D_A
     samples so the rule-of-thumb bandwidth can be eyeballed for
     over/under-smoothing."""
     import matplotlib

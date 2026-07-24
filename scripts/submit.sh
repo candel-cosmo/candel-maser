@@ -81,10 +81,10 @@ Required:
                          saved single-galaxy MCMC chains.  --galaxy takes the
                          comma list (or all = the five MCP H0 galaxies; NGC4258
                          rejected).
-  --evidence             Submit the single-galaxy harmonic evidence job for an
-                         existing MCMC HDF5 chain. The chain path is resolved
-                         from --galaxy, --init-strategy, and model flags.
-                         This is the GPU path for total evidence.
+  --evidence             Submit the single-galaxy harmonic marginal-objective
+                         diagnostic for an existing MCMC HDF5 chain. The chain
+                         path is resolved from --galaxy, --init-strategy, and
+                         model flags. This is not rigorous absolute evidence.
 
 Joint H0 options (with --infer-H0), passed to run_joint_H0.py:
   --selection none|distance|redshift
@@ -142,7 +142,7 @@ Experimental MCMC options passed to run_maser.py --sampler mcmc:
   --compare-reid-2x     With --compare-reid, also run the 2x-denser-grid
                          logZ check. Disabled by default.
   --compute-evidence    Not supported through submit.sh; run a separate
-                         --evidence submission after the chain finishes.
+                         --evidence diagnostic after the chain finishes.
   --save-latents        Save per-spot r_ang/phi samples in the HDF5 output.
                          Disabled by default.
 
@@ -164,9 +164,10 @@ DE optimiser options passed to run_maser.py --sampler de:
                          published Pesce/Reid values (all other globals free).
   --phi-integration fixed-grid|peak-partition
                          Phi integration for the 2D marginal. Default:
-                         fixed-grid. peak-partition numerically locates and
-                         refines peaks in two independent systemic half-planes
-                         and one half-plane for each high-velocity group.
+                         config_maser.toml (currently peak-partition).
+                         peak-partition numerically locates and refines peaks
+                         in two independent systemic half-planes and one
+                         half-plane for each high-velocity group.
   --peak-candidates-per-wave 1|2|4|8
                          Concurrent candidates per GPU for peak-partition.
                          Default: 8; try 2 or 4 when calibrating throughput.
