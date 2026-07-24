@@ -292,6 +292,74 @@ def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
     return seeds, info
 
 
+def _base_model_variation_seeds(model, target, base_init, n_seed, seed,
+                                sobol_n_sigma=5):
+    """Hold a base-model MAP fixed and vary only added model coordinates."""
+    n_seed = int(n_seed)
+    if n_seed < 1:
+        return None, f"n_seed={n_seed} < 1"
+
+    names = target.names
+    centre = _theta_to_flat(base_init, names)
+    priors = {site: prior for site, _, prior in target.sites}
+    bounds = np.array([
+        _prior_bounds(priors[name], sobol_n_sigma=sobol_n_sigma)
+        for name in names
+    ], dtype=float)
+    rng = np.random.default_rng(seed)
+    seeds = np.repeat(centre[None, :], n_seed, axis=0)
+    added = [name for name in
+             ("e_x", "e_y", "dperiapsis_dr", "d2i_dr2", "d2Omega_dr2")
+             if name in names]
+    r_ang = np.asarray(base_init["r_ang"], dtype=float)
+    scale_info = []
+
+    for name in ("e_x", "e_y"):
+        if name not in names:
+            continue
+        i = names.index(name)
+        prior_sigma = (
+            bounds[i, 1] - bounds[i, 0]) / (2.0 * sobol_n_sigma)
+        sigma = 10.0 ** rng.uniform(
+            np.log10(prior_sigma * 1e-3), np.log10(prior_sigma), n_seed)
+        seeds[:, i] = rng.normal(0.0, sigma)
+        scale_info.append(
+            f"{name} sigma log-U({prior_sigma * 1e-3:.3g},"
+            f"{prior_sigma:.3g})")
+
+    radial_scales = {
+        "dperiapsis_dr": (
+            model._r_ang_ref_periapsis, 0.1, 180.0, "deg"),
+        "d2i_dr2": (model._r_ang_ref_i, 0.01, 10.0, "deg"),
+        "d2Omega_dr2": (model._r_ang_ref_Omega, 0.01, 10.0, "deg"),
+    }
+    for name, (pivot, effect_lo, effect_hi, unit) in radial_scales.items():
+        if name not in names:
+            continue
+        power = 1 if name == "dperiapsis_dr" else 2
+        lever = np.max(np.abs(r_ang - pivot) ** power)
+        sigma_lo, sigma_hi = effect_lo / lever, effect_hi / lever
+        sigma = 10.0 ** rng.uniform(
+            np.log10(sigma_lo), np.log10(sigma_hi), n_seed)
+        i = names.index(name)
+        seeds[:, i] = rng.normal(0.0, sigma)
+        scale_info.append(
+            f"{name} gives {effect_lo:g}-{effect_hi:g} {unit} sigma "
+            "at the furthest linear-MAP radius")
+
+    for name in added:
+        i = names.index(name)
+        if np.all(np.isfinite(bounds[i])):
+            seeds[:, i] = np.clip(
+                seeds[:, i], bounds[i, 0], bounds[i, 1])
+    info = (
+        f"{n_seed} expansion-only variations of the vanilla [init] MAP; "
+        "all fitted linear-model coordinates are copied exactly; added "
+        f"coordinates centred at zero: {', '.join(added)}; "
+        + "; ".join(scale_info))
+    return seeds, info
+
+
 def _make_init(model, init_cfg, strategy, num_samples, rng_key):
     strategy = str(strategy).lower()
     if strategy == "median":
@@ -341,7 +409,8 @@ def _normalise_theta_point(theta, names, lo, hi):
 
 _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
-_DE_BASE_MODEL_SEED_POLICY = "data_sobol_ngc4258_base_config"
+_DE_BASE_MODEL_SEED_POLICY = (
+    "vanilla_expansion_variations_sobol_ngc4258_base_config_v3")
 _DE_POPULATION_SCHEDULE = "nfe_linear"
 _DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v2"
 _DE_PEAK_PARTITION_POLICY = "peak_partition_v6"
@@ -1516,6 +1585,38 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
     return jnp.asarray(population), jnp.asarray(fitness)
 
 
+def _print_required_de_seeds(names, seed_points, fitness,
+                             required_seed_points, fixed=None):
+    """Audit required physical seed coordinates and their exact DE scores."""
+    required_seed_points = int(required_seed_points)
+    if not required_seed_points:
+        return
+    points = np.atleast_2d(np.asarray(seed_points, dtype=float))
+    fitness = np.asarray(fitness)
+    fixed = dict(fixed) if fixed else {}
+    for i, point in enumerate(points[:required_seed_points]):
+        fsection("Required NGC4258 base-model seed (injected)")
+        fprint("source: [model.galaxies.NGC4258.init], lifted into the "
+               "active expanded model")
+        fprint("scoring: exact all-spot joint (r_ang, phi) marginal + "
+               "global priors, identical to every DE candidate")
+        fprint("note: added normalised priors can shift absolute logP from "
+               "the nested linear-model value even at zero")
+        for name, value in zip(names, point):
+            fprint(f"  {name:20s} = {value:.10g}")
+        for name, value in fixed.items():
+            fprint(f"  {name:20s} = {float(np.asarray(value)):.10g} [fixed]")
+        if "eta" in names and "D_A" in names:
+            eta = point[names.index("eta")]
+            D_A = point[names.index("D_A")]
+            fprint(f"  {'log_MBH (derived)':20s} = "
+                   f"{eta + np.log10(D_A):.10g}")
+        rank = 1 + int(np.sum(fitness < fitness[i]))
+        fprint(f"exact all-spot marginal unnormalised logP = "
+               f"{-float(fitness[i]):.6f}")
+        fprint(f"initial-population rank = {rank}/{fitness.size}")
+
+
 # Per-observable noise floors, in the order candel_theta_from_point emits them.
 _PESCE_FLOOR_UNITS = (("sigma_x_floor", "uas"), ("sigma_y_floor", "uas"),
                       ("sigma_v_sys", "km/s"), ("sigma_v_hv", "km/s"),
@@ -1581,8 +1682,9 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     fprint("population-reduction horizon only; candidate evaluations are not "
            "capped and do not terminate the optimiser")
     if seed_policy == _DE_BASE_MODEL_SEED_POLICY:
-        fprint("seed policy: NGC4258 base-model config point + data-derived "
-               "ridge + Sobol; Pesce/Reid is never inserted")
+        fprint("seed policy: NGC4258 exact vanilla config point + "
+               "expansion-only variation cloud + Sobol; Pesce/Reid is "
+               "never inserted")
     else:
         fprint("seed policy: data-derived ridge + Sobol only; "
                "Pesce/Reid is scored as a reference and never inserted")
@@ -1709,6 +1811,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             required_seed_points=required_seed_points)
         population = np.asarray(population)
         fitness = np.asarray(fitness)
+        _print_required_de_seeds(
+            names, seed_points, fitness, required_seed_points, fixed=fixed)
         key = jax.random.PRNGKey(seed)
         initial_pop_size = pop_size
         best_idx = int(np.argmin(np.asarray(fitness)))
@@ -2207,7 +2311,12 @@ def main(argv=None):
     base_model_params = None
     if expanded_ngc4258 and not args.skip_base_model_seed:
         try:
-            base_model_params = _clean_init(model, gal_blk["init"])
+            base_model_init = dict(gal_blk["init"])
+            for key in (
+                    "e_x", "e_y", "ecc", "periapsis", "periapsis_rad",
+                    "dperiapsis_dr", "d2i_dr2", "d2Omega_dr2"):
+                base_model_init.pop(key, None)
+            base_model_params = _clean_init(model, base_model_init)
         except KeyError as exc:
             raise SystemExit(
                 "NGC4258 base-model DE seeding requires [model.galaxies."
@@ -2315,14 +2424,20 @@ def main(argv=None):
         # Pesce/Reid is passed only to the shared objective for an independent
         # reference score.
         pop_size = int(opt_cfg.get("pop_size", 1000))
-        data_seeds, seed_info = _data_driven_seed(
-            model, target, init_params, _h_ref(model) * 100.0,
-            max(1, pop_size // 2), seed + 1,
-            sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5))
-        if data_seeds is None:
-            fprint(f"data seed unavailable ({seed_info}); Sobol only")
+        if base_model_params is not None:
+            data_seeds, seed_info = _base_model_variation_seeds(
+                model, target, base_model_params, max(1, pop_size // 2),
+                seed + 1,
+                sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5))
         else:
-            fprint(f"data seed: {seed_info}")
+            data_seeds, seed_info = _data_driven_seed(
+                model, target, init_params, _h_ref(model) * 100.0,
+                max(1, pop_size // 2), seed + 1,
+                sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5))
+        if data_seeds is None:
+            fprint(f"seed cloud unavailable ({seed_info}); Sobol only")
+        else:
+            fprint(f"seed cloud: {seed_info}")
         base_model_seed = (
             None if base_model_params is None
             else _theta_to_flat(base_model_params, target.names))

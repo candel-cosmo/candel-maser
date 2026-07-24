@@ -67,10 +67,13 @@ horizon, not an NFE limit: evaluations continue beyond it.  There is no
 classic/hybrid selector and no Adam polishing path.
 
 The initial population contains the data-derived ridge and scrambled Sobol
-points.  Eccentric and/or quadratic-warp NGC4258 runs also require the
-no-eccentricity, no-quadratic-warp `[init]` config point; pass
-`--skip-base-model-seed` to omit it explicitly.  The Pesce/Reid point is never
-inserted, including through the DE initialisation strategy.  Its exact all-spot
+points.  Eccentric and/or quadratic-warp NGC4258 runs instead seed the exact
+no-eccentricity, no-quadratic-warp `[init]` config point plus variations that
+hold its fitted coordinates fixed and scatter only the newly enabled terms
+around zero.  Scrambled Sobol points retain global coverage; pass
+`--skip-base-model-seed` to omit the lifted point and its variations explicitly.
+The Pesce/Reid point is never inserted, including through the DE initialisation
+strategy.  Its exact all-spot
 unnormalised log posterior density is still printed as an independent
 reference and is scored through the same compiled DE objective rather than a
 separate startup executable.  (A single point has zero probability mass in a

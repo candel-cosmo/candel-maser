@@ -146,12 +146,14 @@ Experimental MCMC options passed to run_maser.py --sampler mcmc:
                          Disabled by default.
 
 DE optimiser options passed to run_maser.py --sampler de:
-  DE always uses L-SHADE and a data-ridge + Sobol initial population.
-                         Expanded NGC4258 models also include the base-model
-                         config point. The Pesce/Reid point is never seeded.
+  DE always uses L-SHADE. The initial population normally uses a data ridge
+                         plus Sobol points. Expanded NGC4258 models use the exact
+                         lifted base-model point and an expansion-only cloud.
+                         Sobol points retain global coverage; Pesce/Reid is
+                         never seeded.
                          Population reduction follows DE fitness evaluations,
                          independently of the generation ceiling.
-  --skip-base-model-seed Explicitly omit that NGC4258 base-model config point.
+  --skip-base-model-seed Explicitly omit that NGC4258 point and seed cloud.
   --resume               Resume from the DE checkpoint if present.
   --fix-globals          Skip the DE search; score logP and the conditional
                          r_ang MAP at the config [init] globals.
