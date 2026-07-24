@@ -66,13 +66,15 @@ ceiling stops the run.  The 5,000,000 value is only the population-reduction
 horizon, not an NFE limit: evaluations continue beyond it.  There is no
 classic/hybrid selector and no Adam polishing path.
 
-The initial population contains only the data-derived ridge and scrambled
-Sobol points.  The Pesce/Reid point is never inserted, including through the
-DE initialisation strategy.  Its exact all-spot unnormalised log posterior
-density is still printed as an independent reference and is scored through the
-same compiled DE objective rather than a separate startup executable.  (A
-single point has zero probability mass in a continuous posterior.) Runs use
-the explicit
+The initial population contains the data-derived ridge and scrambled Sobol
+points.  Eccentric and/or quadratic-warp NGC4258 runs also require the
+no-eccentricity, no-quadratic-warp `[init]` config point; pass
+`--skip-base-model-seed` to omit it explicitly.  The Pesce/Reid point is never
+inserted, including through the DE initialisation strategy.  Its exact all-spot
+unnormalised log posterior density is still printed as an independent
+reference and is scored through the same compiled DE objective rather than a
+separate startup executable.  (A single point has zero probability mass in a
+continuous posterior.) Runs use the explicit
 `*_lshade_nopesce.npz` checkpoint plus a SQLite exact-evaluation sidecar, and
 `--resume` restores both without accepting an older seeded or
 generation-scheduled checkpoint.

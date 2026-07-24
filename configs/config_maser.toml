@@ -580,8 +580,9 @@ spot_batch = 4
 
 [optimise]
 # DE always uses L-SHADE (current-to-pbest/1, success-history F/CR, and linear
-# population reduction). Its population contains only the data-derived ridge
-# and Sobol points; Pesce/Reid is never seeded and is scored only as a reference.
+# population reduction). Expanded NGC4258 models also seed the no-eccentricity,
+# no-quadratic-warp [init] point unless --skip-base-model-seed is passed.
+# Pesce/Reid is never seeded and is scored only as a reference.
 log2_N = 14
 pop_size = 2000
 min_pop_size = 1024

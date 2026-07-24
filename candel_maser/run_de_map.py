@@ -341,6 +341,7 @@ def _normalise_theta_point(theta, names, lo, hi):
 
 _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
+_DE_BASE_MODEL_SEED_POLICY = "data_sobol_ngc4258_base_config"
 _DE_POPULATION_SCHEDULE = "nfe_linear"
 _DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v2"
 _DE_PEAK_PARTITION_POLICY = "peak_partition_v6"
@@ -360,11 +361,14 @@ def _de_candidates_per_wave(model, peak_override=None):
     return _CANDIDATES_PER_GPU_WAVE
 
 
-def _initial_de_seed_points(data_seeds):
-    """Return only data-derived seeds; reference solutions are never seeded."""
-    if data_seeds is None:
-        return None
-    return np.asarray(data_seeds, dtype=float).copy()
+def _initial_de_seed_points(data_seeds, base_model_seed=None):
+    """Put the optional required base-model point before data-derived seeds."""
+    seeds = []
+    if base_model_seed is not None:
+        seeds.append(np.atleast_2d(np.asarray(base_model_seed, dtype=float)))
+    if data_seeds is not None:
+        seeds.append(np.atleast_2d(np.asarray(data_seeds, dtype=float)))
+    return np.vstack(seeds) if seeds else None
 
 
 def _de_spot_batch_policy(galaxy, use_f64, requested, configured, planned):
@@ -1389,7 +1393,8 @@ def _load_de_checkpoint(path, lo, hi, names, sizes):
 
 
 def _validate_de_checkpoint_policy(
-        checkpoint, path, objective_policy=_DE_OBJECTIVE_POLICY):
+        checkpoint, path, objective_policy=_DE_OBJECTIVE_POLICY,
+        seed_policy=_DE_SEED_POLICY):
     """Reject incompatible algorithm, objective, seed, or schedule state."""
     saved_algorithm = (
         str(np.asarray(checkpoint["algorithm"]).item())
@@ -1402,16 +1407,17 @@ def _validate_de_checkpoint_policy(
         str(np.asarray(checkpoint["seed_policy"]).item())
         if "seed_policy" in checkpoint.files else None)
     if saved_seed_policy is None:
-        if not os.path.basename(path).endswith("_nopesce.npz"):
+        if (seed_policy != _DE_SEED_POLICY
+                or not os.path.basename(path).endswith("_nopesce.npz")):
             raise ValueError(
-                "Legacy L-SHADE checkpoint has no seed-policy marker; only "
-                "a *_nopesce.npz checkpoint can be resumed.")
+                "Legacy L-SHADE checkpoint has no seed-policy marker "
+                "compatible with this run.")
         fprint("Legacy *_nopesce checkpoint establishes the unseeded "
                "Pesce/Reid policy.")
-    elif saved_seed_policy != _DE_SEED_POLICY:
+    elif saved_seed_policy != seed_policy:
         raise ValueError(
             f"Checkpoint seed policy is {saved_seed_policy!r}, requested "
-            f"{_DE_SEED_POLICY!r}.")
+            f"{seed_policy!r}.")
     saved_schedule = (
         str(np.asarray(checkpoint["population_schedule"]).item())
         if "population_schedule" in checkpoint.files else None)
@@ -1452,7 +1458,7 @@ def _screen_eval(batch_eval, x, desc, chunk=512):
 
 def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
                                 N_sobol, min_dist_frac,
-                                seed_points=None):
+                                seed_points=None, required_seed_points=0):
     scale = hi - lo
     D = lo.size
 
@@ -1473,11 +1479,18 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
     seeds = np.empty((0, D))
     if seed_points is not None:
         seeds = np.atleast_2d(np.asarray(seed_points, dtype=float))
+        required_seed_points = int(required_seed_points)
+        if not 0 <= required_seed_points <= min(seeds.shape[0], pop_size):
+            raise ValueError("Invalid required DE seed count.")
         ok = (np.all(np.isfinite(seeds), axis=1)
               & np.all((seeds >= lo) & (seeds <= hi), axis=1))
+        if np.any(~ok[:required_seed_points]):
+            raise ValueError("Required DE seed point is outside the bounds.")
         if np.any(~ok):
             fprint(f"Skipped {np.sum(~ok)} DE seed point(s) outside bounds.")
         seeds = seeds[ok][:pop_size]
+    elif required_seed_points:
+        raise ValueError("Required DE seed point is missing.")
 
     n_sobol = pop_size - seeds.shape[0]
     if n_sobol:
@@ -1515,7 +1528,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             resume_path=None, checkpoint_interval=900.0,
             seed_points=None, fixed_params=None, reference_params=None,
             reference_status=(), objective_policy=_DE_OBJECTIVE_POLICY,
-            peak_candidates_per_wave=None):
+            peak_candidates_per_wave=None, seed_policy=_DE_SEED_POLICY,
+            required_seed_points=0):
     log2_N = int(opt_cfg.get("log2_N", 16))
     pop_size = int(opt_cfg.get("pop_size", 1000))
     max_generations = int(opt_cfg.get("max_generations", 5000))
@@ -1547,7 +1561,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     if resume_path is not None:
         ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
         _validate_de_checkpoint_policy(
-            ckpt, resume_path, objective_policy=objective_policy)
+            ckpt, resume_path, objective_policy=objective_policy,
+            seed_policy=seed_policy)
     # seed_points arrive in full target.names order; drop the fixed columns.
     if fixed and seed_points is not None:
         free_idx = [target.names.index(n) for n in names]
@@ -1565,8 +1580,12 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
            f"the first {reduction_evaluations:,} DE candidate evaluations")
     fprint("population-reduction horizon only; candidate evaluations are not "
            "capped and do not terminate the optimiser")
-    fprint("seed policy: data-derived ridge + Sobol only; "
-           "Pesce/Reid is scored as a reference and never inserted")
+    if seed_policy == _DE_BASE_MODEL_SEED_POLICY:
+        fprint("seed policy: NGC4258 base-model config point + data-derived "
+               "ridge + Sobol; Pesce/Reid is never inserted")
+    else:
+        fprint("seed policy: data-derived ridge + Sobol only; "
+               "Pesce/Reid is scored as a reference and never inserted")
     fprint("initial DE population: seed points + scrambled Sobol candidates"
            if seed_points is not None
            else "initial DE population: scrambled Sobol candidates only")
@@ -1686,7 +1705,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     else:
         population, fitness = _make_de_initial_population(
             exact_eval, lo, hi, pop_size, seed, N_sobol,
-            min_dist_frac, seed_points=seed_points)
+            min_dist_frac, seed_points=seed_points,
+            required_seed_points=required_seed_points)
         population = np.asarray(population)
         fitness = np.asarray(fitness)
         key = jax.random.PRNGKey(seed)
@@ -1735,7 +1755,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     def checkpoint_extra():
         return {
             "algorithm": np.asarray(_DE_ALGORITHM),
-            "seed_policy": np.asarray(_DE_SEED_POLICY),
+            "seed_policy": np.asarray(seed_policy),
             "population_schedule": np.asarray(_DE_POPULATION_SCHEDULE),
             "objective_policy": np.asarray(objective_policy),
             "initial_pop_size": np.asarray(initial_pop_size),
@@ -2003,6 +2023,11 @@ def main(argv=None):
     parser.add_argument("--add-ecc", action="store_true")
     parser.add_argument("--no-quadratic-warp", action="store_true")
     parser.add_argument("--add-quadratic-warp", action="store_true")
+    parser.add_argument(
+        "--skip-base-model-seed", action="store_true",
+        help="Do not include the config [init] no-eccentricity, "
+             "no-quadratic-warp NGC4258 point in an expanded-model DE "
+             "initial population. By default that point is required.")
     parser.add_argument("--mass-parameterization",
                         choices=("eta", "log_mbh"), default=None,
                         help="Global mass coordinate for the optimiser. "
@@ -2172,6 +2197,22 @@ def main(argv=None):
     finally:
         os.unlink(tmp.name)
 
+    expanded_ngc4258 = (
+        args.galaxy == "NGC4258"
+        and (model.use_ecc or model.use_quadratic_warp))
+    if args.skip_base_model_seed and not expanded_ngc4258:
+        raise SystemExit(
+            "--skip-base-model-seed requires an eccentric and/or quadratic-"
+            "warp NGC4258 DE run.")
+    base_model_params = None
+    if expanded_ngc4258 and not args.skip_base_model_seed:
+        try:
+            base_model_params = _clean_init(model, gal_blk["init"])
+        except KeyError as exc:
+            raise SystemExit(
+                "NGC4258 base-model DE seeding requires [model.galaxies."
+                "NGC4258.init].") from exc
+
     init_strategy = str(args.init_strategy or _required_inference(
         inf_cfg, "init_strategy")).lower()
     if init_strategy == "reid":
@@ -2272,8 +2313,7 @@ def main(argv=None):
                 f"--resume: no checkpoint found at {ckpt_path}, "
                 "starting fresh")
         # Pesce/Reid is passed only to the shared objective for an independent
-        # reference score. The population is structurally limited to
-        # data-derived and Sobol points.
+        # reference score.
         pop_size = int(opt_cfg.get("pop_size", 1000))
         data_seeds, seed_info = _data_driven_seed(
             model, target, init_params, _h_ref(model) * 100.0,
@@ -2283,7 +2323,17 @@ def main(argv=None):
             fprint(f"data seed unavailable ({seed_info}); Sobol only")
         else:
             fprint(f"data seed: {seed_info}")
-        seed_points = _initial_de_seed_points(data_seeds)
+        base_model_seed = (
+            None if base_model_params is None
+            else _theta_to_flat(base_model_params, target.names))
+        seed_points = _initial_de_seed_points(
+            data_seeds, base_model_seed=base_model_seed)
+        if base_model_seed is not None:
+            fprint("NGC4258 base-model config point is required in the "
+                   "initial DE population.")
+        elif args.skip_base_model_seed:
+            fprint("NGC4258 base-model config point skipped explicitly "
+                   "(--skip-base-model-seed).")
         fprint("Pesce/Reid reference is not part of the DE initial "
                "population.")
         sb_flag = " [--spot-batch]" if args.spot_batch is not None else ""
@@ -2338,7 +2388,11 @@ def main(argv=None):
             reference_params=pesce_params,
             reference_status=pesce_status,
             objective_policy=_objective_policy(model),
-            peak_candidates_per_wave=args.peak_candidates_per_wave)
+            peak_candidates_per_wave=args.peak_candidates_per_wave,
+            seed_policy=(
+                _DE_BASE_MODEL_SEED_POLICY
+                if base_model_seed is not None else _DE_SEED_POLICY),
+            required_seed_points=int(base_model_seed is not None))
         pesce_logp = run_info["reference_logp"]
         run_summary = f"generations = {run_info['generations']}"
     dt = time.time() - t0
