@@ -183,7 +183,7 @@ def _principal_angle_deg(x, y):
 
 
 def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
-                      sobol_n_sigma=5):
+                      sobol_n_sigma=5, eta_anchor=None):
     """Random DE seed points sliding along the distance-mass degeneracy.
 
     The masers fix ``eta = log10(M_BH/D_A)`` (distance-free, from the angular
@@ -191,7 +191,9 @@ def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
     near-flat along the ``M_BH ∝ D_A`` ridge.  So instead of one seed, draw
     ``n_seed`` points with random distance spanning the prior box at *fixed*
     ``eta`` — in the eta parameterisation that is literally sliding along the
-    ridge, with ``log M_BH`` tracking ``D_A`` automatically.  Geometry
+    ridge, with ``log M_BH`` tracking ``D_A`` automatically.  ``eta_anchor``
+    can supply that fixed coordinate from a fitted linear model; otherwise it
+    is estimated from the high-velocity envelope with a small scatter. Geometry
     (centre/PA/inclination/``dv_sys``) is jittered around its data seeds, with
     the ±180° PA ambiguity flipped on a random half.  Every other dimension
     (error floors, ecc/warp) is drawn Sobol-random within the DE box
@@ -226,18 +228,25 @@ def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
     # (sin phi≈1), so the median recovers M_BH/D_A within ~10% (validated vs
     # Pesce) and is robust to the noisy upper tail.
     v_sys = float(np.median(v[sel]))
-    theta = np.hypot(x[is_hv] - x0, y[is_hv] - y0) / 1e3
-    dv = v[is_hv] - v_sys
-    g = (theta > 0) & np.isfinite(dv)
-    s = float(np.median(theta[g] * dv[g] ** 2))
-    eta_seed = np.log10(s) - 2.0 * np.log10(C_v) + 7.0  # M_BH in Msun, +log1e7
+    if eta_anchor is None:
+        theta = np.hypot(x[is_hv] - x0, y[is_hv] - y0) / 1e3
+        dv = v[is_hv] - v_sys
+        g = (theta > 0) & np.isfinite(dv)
+        s = float(np.median(theta[g] * dv[g] ** 2))
+        eta_seed = (
+            np.log10(s) - 2.0 * np.log10(C_v) + 7.0)  # M_BH in Msun, +log1e7
+        eta_source = "high-velocity envelope"
+    else:
+        eta_seed = float(eta_anchor)
+        eta_source = "linear-model MAP"
     dv_sys_seed = float(np.clip(v_sys - cz, -900.0, 900.0))
 
     rng = np.random.default_rng(seed)
     D_lo, D_hi = _prior_bounds(model.priors["D"])
     distance_name = "D_A" if model._D_A_uniform else "D_c"
     D = rng.uniform(D_lo, D_hi, n_seed)                # slide along the ridge
-    eta = eta_seed + rng.normal(0.0, 0.02, n_seed)     # tight: on the ridge
+    eta = (np.full(n_seed, eta_seed) if eta_anchor is not None
+           else eta_seed + rng.normal(0.0, 0.02, n_seed))
     i0 = np.clip(90.0 + rng.normal(0.0, 3.0, n_seed), 65.0, 115.0)
     flip = np.where(rng.random(n_seed) < 0.5, 180.0, 0.0)
     Omega = (Omega0 + flip + rng.normal(0.0, 5.0, n_seed)) % 360.0
@@ -285,7 +294,8 @@ def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
 
     info = (f"{n_seed} seed candidates along the {distance_name} degeneracy "
             f"ridge: {distance_name}~U({D_lo:.0f},{D_hi:.0f}) Mpc, other "
-            f"globals fixed at eta_seed={eta_seed:.3f} (BH-mass coordinate), "
+            f"globals fixed at eta_seed={eta_seed:.3f} from {eta_source} "
+            "(BH-mass coordinate), "
             f"dv_sys={dv_sys_seed:.0f} km/s (systemic velocity), disc centre "
             f"x0={x0:.1f}, y0={y0:.1f} uas, PA Omega0={Omega0:.1f} deg; "
             f"{n_hv} high-velocity spots")
@@ -410,7 +420,7 @@ def _normalise_theta_point(theta, names, lo, hi):
 _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
 _DE_BASE_MODEL_SEED_POLICY = (
-    "vanilla_expansion_variations_sobol_ngc4258_base_config_v3")
+    "vanilla_expansion_ridge_sobol_ngc4258_base_config_v5")
 _DE_POPULATION_SCHEDULE = "nfe_linear"
 _DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v2"
 _DE_PEAK_PARTITION_POLICY = "peak_partition_v6"
@@ -1327,6 +1337,14 @@ def _phi_integration_suffix(model):
             if model.phi_integration == "peak-partition" else "")
 
 
+def _de_checkpoint_filename(model, seed, fix_floors_pesce=False):
+    floor_suffix = "_pescefloors" if fix_floors_pesce else ""
+    return (
+        f"de_ckpt_rmap{_variant_suffix(model)}"
+        f"{_phi_integration_suffix(model)}{floor_suffix}"
+        f"_seed{int(seed)}_lshade_nopesce.npz")
+
+
 def _objective_policy(model):
     kernel = ":ecc_hybrid_qf1" if getattr(model, "use_ecc", False) else ""
     radial = (
@@ -1463,7 +1481,7 @@ def _load_de_checkpoint(path, lo, hi, names, sizes):
 
 def _validate_de_checkpoint_policy(
         checkpoint, path, objective_policy=_DE_OBJECTIVE_POLICY,
-        seed_policy=_DE_SEED_POLICY):
+        seed_policy=_DE_SEED_POLICY, optimizer_seed=None):
     """Reject incompatible algorithm, objective, seed, or schedule state."""
     saved_algorithm = (
         str(np.asarray(checkpoint["algorithm"]).item())
@@ -1487,6 +1505,14 @@ def _validate_de_checkpoint_policy(
         raise ValueError(
             f"Checkpoint seed policy is {saved_seed_policy!r}, requested "
             f"{seed_policy!r}.")
+    if optimizer_seed is not None:
+        if "optimizer_seed" not in checkpoint.files:
+            raise ValueError("L-SHADE checkpoint is missing optimizer_seed.")
+        saved_seed = int(checkpoint["optimizer_seed"])
+        if saved_seed != int(optimizer_seed):
+            raise ValueError(
+                f"Checkpoint optimizer seed is {saved_seed}, requested "
+                f"{int(optimizer_seed)}.")
     saved_schedule = (
         str(np.asarray(checkpoint["population_schedule"]).item())
         if "population_schedule" in checkpoint.files else None)
@@ -1663,7 +1689,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
         _validate_de_checkpoint_policy(
             ckpt, resume_path, objective_policy=objective_policy,
-            seed_policy=seed_policy)
+            seed_policy=seed_policy, optimizer_seed=seed)
     # seed_points arrive in full target.names order; drop the fixed columns.
     if fixed and seed_points is not None:
         free_idx = [target.names.index(n) for n in names]
@@ -1676,6 +1702,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
            f"patience={patience}, "
            f"{candidates_per_wave} candidate"
            f"{'s' if candidates_per_wave != 1 else ''} per GPU wave")
+    fprint(f"optimizer random seed: {seed}")
     fprint(f"current-to-pbest/1, success-history F/CR, "
            f"linear pop {pop_size}->{min_pop_size} over "
            f"the first {reduction_evaluations:,} DE candidate evaluations")
@@ -1683,8 +1710,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
            "capped and do not terminate the optimiser")
     if seed_policy == _DE_BASE_MODEL_SEED_POLICY:
         fprint("seed policy: NGC4258 exact vanilla config point + "
-               "expansion-only variation cloud + Sobol; Pesce/Reid is "
-               "never inserted")
+               "expansion-only variation cloud + linear-mass ridge + Sobol; "
+               "Pesce/Reid is never inserted")
     else:
         fprint("seed policy: data-derived ridge + Sobol only; "
                "Pesce/Reid is scored as a reference and never inserted")
@@ -1860,6 +1887,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         return {
             "algorithm": np.asarray(_DE_ALGORITHM),
             "seed_policy": np.asarray(seed_policy),
+            "optimizer_seed": np.asarray(seed),
             "population_schedule": np.asarray(_DE_POPULATION_SCHEDULE),
             "objective_policy": np.asarray(objective_policy),
             "initial_pop_size": np.asarray(initial_pop_size),
@@ -2100,7 +2128,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Run 2D-marginal MAP optimisation for one megamaser disk.")
     parser.add_argument("galaxy", type=str)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="DE random seed. Different seeds use independent checkpoint, "
+             "exact-archive, and progress-plot files.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--fix-globals", action="store_true",
                         help="Skip the DE search: hold the disc globals at "
@@ -2408,12 +2439,10 @@ def main(argv=None):
             master_cfg["io"].get("root_output", "results/Megamaser"),
             "de_checkpoints", args.galaxy)
         os.makedirs(ckpt_dir, exist_ok=True)
-        floor_suffix = "_pescefloors" if args.fix_floors_pesce else ""
         ckpt_path = os.path.join(
-            ckpt_dir,
-            f"de_ckpt_rmap{_variant_suffix(model)}"
-            f"{_phi_integration_suffix(model)}{floor_suffix}"
-            "_lshade_nopesce.npz")
+            ckpt_dir, _de_checkpoint_filename(
+                model, seed, fix_floors_pesce=args.fix_floors_pesce))
+        fprint(f"DE checkpoint: {ckpt_path}")
         resume_path = (
             ckpt_path if args.resume and os.path.isfile(ckpt_path)
             else None)
@@ -2425,10 +2454,36 @@ def main(argv=None):
         # reference score.
         pop_size = int(opt_cfg.get("pop_size", 1000))
         if base_model_params is not None:
-            data_seeds, seed_info = _base_model_variation_seeds(
-                model, target, base_model_params, max(1, pop_size // 2),
+            expansion_count = pop_size // 4
+            ridge_count = pop_size // 4
+            expansion_seeds, expansion_info = _base_model_variation_seeds(
+                model, target, base_model_params,
+                max(0, expansion_count - 1),
                 seed + 1,
                 sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5))
+            if "eta" in base_model_params:
+                linear_eta = float(base_model_params["eta"])
+            else:
+                linear_D_A = (
+                    base_model_params["D_A"] if model._D_A_uniform
+                    else _D_A_from_D_c(model, base_model_params["D_c"]))
+                linear_eta = (
+                    float(base_model_params["log_MBH"])
+                    - np.log10(float(linear_D_A)))
+            ridge_seeds, ridge_info = _data_driven_seed(
+                model, target, base_model_params, _h_ref(model) * 100.0,
+                ridge_count, seed + 2,
+                sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5),
+                eta_anchor=linear_eta)
+            clouds = [
+                points for points in (expansion_seeds, ridge_seeds)
+                if points is not None]
+            data_seeds = np.vstack(clouds) if clouds else None
+            seed_info = f"{expansion_info}; {ridge_info}"
+            fprint(
+                f"expanded seed mix: {expansion_count} expansion-only "
+                f"(one exact anchor), {ridge_count} linear-mass ridge, "
+                f"{pop_size - expansion_count - ridge_count} Sobol")
         else:
             data_seeds, seed_info = _data_driven_seed(
                 model, target, init_params, _h_ref(model) * 100.0,

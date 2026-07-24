@@ -584,8 +584,9 @@ spot_batch = 4
 [optimise]
 # DE always uses L-SHADE (current-to-pbest/1, success-history F/CR, and linear
 # population reduction). Expanded NGC4258 models seed the no-eccentricity,
-# no-quadratic-warp [init] point plus zero-centred variations of only the added
-# model coordinates unless --skip-base-model-seed is passed.
+# no-quadratic-warp [init] point plus expansion-only and linear-mass ridge
+# clouds (one quarter of the population each); the remaining half is Sobol.
+# Pass --skip-base-model-seed to omit the expanded-model policy.
 # Pesce/Reid is never seeded and is scored only as a reference.
 log2_N = 14
 pop_size = 2000

@@ -252,9 +252,7 @@ def _checkpoint_points(
         master["io"].get("root_output", "results/Megamaser"),
         "de_checkpoints", galaxy)
     ckpt_path = os.path.join(
-        ckpt_dir,
-        f"de_ckpt_rmap{de._variant_suffix(model)}"
-        f"{de._phi_integration_suffix(model)}_lshade_nopesce.npz")
+        ckpt_dir, de._de_checkpoint_filename(model, seed))
 
     def sobol_fallback(reason):
         exponent = max(0, (int(candidates) - 1).bit_length())
@@ -272,7 +270,8 @@ def _checkpoint_points(
         checkpoint = de._load_de_checkpoint(
             ckpt_path, lo, hi, names, sizes)
         de._validate_de_checkpoint_policy(
-            checkpoint, ckpt_path, de._objective_policy(model))
+            checkpoint, ckpt_path, de._objective_policy(model),
+            optimizer_seed=seed)
     except (KeyError, ValueError) as exc:
         if checkpoint is not None:
             checkpoint.close()

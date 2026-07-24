@@ -70,7 +70,10 @@ The initial population contains the data-derived ridge and scrambled Sobol
 points.  Eccentric and/or quadratic-warp NGC4258 runs instead seed the exact
 no-eccentricity, no-quadratic-warp `[init]` config point plus variations that
 hold its fitted coordinates fixed and scatter only the newly enabled terms
-around zero.  Scrambled Sobol points retain global coverage; pass
+around zero.  The production population of 2,000 contains 500 expansion-only
+starts (one exact anchor plus 499 variations), 500 data-driven ridge starts
+whose mass-to-distance coordinate is fixed to the linear fit, and 1,000
+screened Sobol starts.  Scrambled Sobol points retain global coverage; pass
 `--skip-base-model-seed` to omit the lifted point and its variations explicitly.
 The Pesce/Reid point is never inserted, including through the DE initialisation
 strategy.  Its exact all-spot
@@ -78,9 +81,11 @@ unnormalised log posterior density is still printed as an independent
 reference and is scored through the same compiled DE objective rather than a
 separate startup executable.  (A single point has zero probability mass in a
 continuous posterior.) Runs use the explicit
-`*_lshade_nopesce.npz` checkpoint plus a SQLite exact-evaluation sidecar, and
-`--resume` restores both without accepting an older seeded or
-generation-scheduled checkpoint.
+`*_seed<N>_lshade_nopesce.npz` checkpoint plus a SQLite exact-evaluation
+sidecar.  `--resume` restores both without accepting an older seeded or
+generation-scheduled checkpoint.  `--seed N` selects the optimiser randomness
+and its independent checkpoint, sidecar, and progress plot, so different seeds
+can run concurrently.
 
 Every L-SHADE proposal is evaluated with the exact all-spot objective and
 deduplicated in the sidecar.  Spot batching remains allowed because it is an
@@ -176,7 +181,7 @@ bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --infer-H0 
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --infer-H0 --selection redshift --distance-prior volume
 ```
 
-Common forwarded options are `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. DE accepts `--init-strategy median|config`; MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit single-galaxy evidence separately with `submit.sh --evidence` after the chain exists. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses the matching saved per-galaxy `samples/D_A` chains (legacy `samples/D_c` chains are converted to D_A) as KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
+Common forwarded options are `--seed`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. DE accepts `--init-strategy median|config`; MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit single-galaxy evidence separately with `submit.sh --evidence` after the chain exists. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses the matching saved per-galaxy `samples/D_A` chains (legacy `samples/D_c` chains are converted to D_A) as KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
 
 Automatic retries use the watcher wrapper. The `--max-retries` shortcut
 launches the watcher in a detached `screen`/`tmux` session and prints the
@@ -338,7 +343,7 @@ bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu \
     --galaxies NGC4258 --sobol-candidates 0 --no-config-point \
     --no-pesce-point \
     --checkpoint-candidate \
-    results/Megamaser/de_checkpoints/NGC4258/de_ckpt_rmap_peakpartition_lshade_nopesce.npz \
+    results/Megamaser/de_checkpoints/NGC4258/de_ckpt_rmap_peakpartition_seed44_lshade_nopesce.npz \
     --allow-checkpoint-policy-mismatch
 ```
 

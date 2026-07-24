@@ -113,6 +113,9 @@ Common options passed to run_maser.py:
   --add-quadratic-warp   Also valid with --infer-H0 (applies to all galaxies;
                          selects matching distance files).
   --f64                  Emergency/debug precision override.
+  --seed N               Random seed (all samplers; default: config
+                         inference/seed). DE checkpoints and exact-value
+                         sidecars are separated by seed.
   --fix-floors-pesce     Hold the five error floors fixed at the published
                          Pesce/Reid values. de: dropped from the DE search;
                          mcmc: dropped from the sampled sites.
@@ -120,8 +123,6 @@ Common options passed to run_maser.py:
 MCMC/joint quick overrides passed to the Python runner:
   --num-warmup N
   --num-samples N
-  --seed N               Random seed (all samplers; default: config
-                         inference/seed).
   --num-chains N         Run N chains sequentially in one job. With the
                          default config/reid init they all start from the
                          same point with independent per-chain seeds and
@@ -148,9 +149,9 @@ Experimental MCMC options passed to run_maser.py --sampler mcmc:
 DE optimiser options passed to run_maser.py --sampler de:
   DE always uses L-SHADE. The initial population normally uses a data ridge
                          plus Sobol points. Expanded NGC4258 models use the exact
-                         lifted base-model point and an expansion-only cloud.
-                         Sobol points retain global coverage; Pesce/Reid is
-                         never seeded.
+                         lifted base-model point, an expansion-only cloud, a
+                         ridge anchored to the linear-fit mass, and Sobol.
+                         Pesce/Reid is never seeded.
                          Population reduction follows DE fitness evaluations,
                          independently of the generation ceiling.
   --skip-base-model-seed Explicitly omit that NGC4258 point and seed cloud.
