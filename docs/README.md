@@ -214,7 +214,7 @@ Peak partition searches the two systemic half-planes independently using
 129 nodes per half-plane, and uses 65 nodes for each red/blue half-plane;
 validated per-galaxy overrides can raise either scan independently. It
 then locates extrema from neighbouring likelihood values, refines all fixed-size
-brackets in parallel, and integrates peak/tail partitions. All 128 global
+brackets in parallel, and integrates peak/tail partitions. All 176 global
 radii span the full physical support and are scanned concurrently; radius-only
 position, velocity, and acceleration terms are precomputed once. A three-point
 log-radius interpolation supplies the local-grid centre, avoiding the former
@@ -253,9 +253,11 @@ UGC3789; NGC6264 and NGC6323 retain 129/65.  NGC5765b uses a centred
 321-node local-radius grid.  UGC3789 uses 384 local nodes and a
 `scan_width_drop = 50` support envelope.  NGC4258 uses 513/65 scans, three
 all-class radial refinements, an eight-step value-only width solve, and a
-32-spot tile.  NGC6264 also uses a 32-spot tile; the other float32 DE targets
-use all spots.  The complete circular/eccentric validation, pathological-point
-audit, sustained GPU speedups, memory measurements, and caveats are in
+32-spot tile.  Every galaxy, disk variant, and integration method uses 176
+global-radius discovery nodes.  NGC6264 also uses a 32-spot tile; the other
+float32 DE targets use all spots.  The complete circular/eccentric validation,
+pathological-point audit, sustained GPU speedups, memory measurements, and
+the known NGC4258 circular tradeoff are in
 `docs/notes/megamaser_phi_integration_all_galaxies.md`; the preceding
 algorithm-development study is
 `docs/notes/megamaser_phi_integration_research.md`.

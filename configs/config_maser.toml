@@ -50,7 +50,10 @@ n_phi_sys = 10001
 # quadrature diagnostics. The explicit MCMC sampler uses the non-centred
 # log residual z_r = log(r_ang / r_hat(theta)).
 n_r_local = 256
-n_r_global = 128
+# Production policy: use the same 176-node full-support discovery grid for
+# every galaxy, disk variant, and phi-integration method.  This deliberately
+# accepts the documented NGC4258 circular regression from the transfer audit.
+n_r_global = 176
 K_sigma = 10.0
 # Scan the same number of global-radius nodes across the complete physical
 # support.  This catches disconnected modes at bad DE proposals without
@@ -270,8 +273,11 @@ conditional_spot_batch = 32
 # Dense-reference validation at both the Pesce/Reid point and an independent
 # unseeded DE checkpoint supports the value-only peak path for NGC4258.  Its
 # eccentric Pesce stress point requires a 513-node systemic scan and the
-# three-pass value-only radial refinement for every spot class.  The width
-# solve remains eight fixed bisections.  See the all-galaxy report.
+# three-pass value-only radial refinement for every spot class.  The
+# eccentric-plus-quadratic-warp Pesce point needs the global 176-node policy
+# above to discover three narrow systemic modes; 160 narrowly fails while
+# 176, 192, and 256 pass.  The width solve remains eight fixed bisections.
+# See the all-galaxy report.
 phi_integration = "peak-partition"
 n_phi_partition_sys = 513
 n_phi_partition_hv = 65

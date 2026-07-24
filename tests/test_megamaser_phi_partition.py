@@ -230,6 +230,22 @@ def test_asymmetric_local_grid_does_not_collapse_at_support_edge():
     assert np.all(np.diff(np.asarray(r[0])) >= 0.0)
 
 
+def test_global_radius_count_is_integration_and_variant_agnostic():
+    for integration, eccentric, quadratic_warp in (
+            ("peak-partition", False, False),
+            ("peak-partition", True, False),
+            ("peak-partition", False, True),
+            ("peak-partition", True, True),
+            ("fixed-grid", True, True)):
+        model = object.__new__(MaserDiskModel)
+        model.config = {"model": {"n_r_local": 256, "n_r_global": 176}}
+        model.phi_integration = integration
+        model.use_ecc = eccentric
+        model.use_quadratic_warp = quadratic_warp
+        model._build_r_config({}, {})
+        assert model._n_r_global == 176
+
+
 def test_peak_radius_stencil_refines_coarse_group_centres():
     class Model:
         phi_integration = "peak-partition"
