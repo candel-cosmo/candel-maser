@@ -21,7 +21,6 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import sys
 import tempfile
 import time
@@ -655,8 +654,7 @@ def _make_batched_fitness(fitness_one, n_dev, devices,
     shapes. Homogeneous multi-GPU jobs compile one shared ``pmap`` executable;
     heterogeneous devices retain concurrent device-local JITs and weighted
     round-robin assignment. Output is restored to input order on the host.
-    Finite padding is excluded from the exact archive and algorithmic NFE
-    count.
+    Finite padding is discarded and excluded from the algorithmic NFE count.
     """
     candidates_per_wave = int(candidates_per_wave)
     if (candidates_per_wave < 1
@@ -825,214 +823,6 @@ def _make_batched_fitness(fitness_one, n_dev, devices,
     batch_eval.device_profile = device_profile
 
     return batch_eval
-
-
-_ARCHIVE_FINGERPRINT_VERSION = "blake2b64-v1"
-_ARCHIVE_FINGERPRINT_BATCH = 10_000
-# Buffered exact-value rows are flushed to SQLite in one commit at each
-# checkpoint. The cap bounds RAM during the one-off Sobol screen.
-_ARCHIVE_WRITE_BUFFER_ROWS = 65_536
-
-
-class _ExactArchive:
-    """Persistent exact-value cache for one optimiser checkpoint."""
-
-    def __init__(self, path, dimension, resume=False, objective_policy=None):
-        archive_exists = path != ":memory:" and os.path.exists(path)
-        if archive_exists and not resume:
-            os.unlink(path)
-            archive_exists = False
-        self.connection = sqlite3.connect(path)
-        self.connection.execute(
-            "CREATE TABLE IF NOT EXISTS evaluations "
-            "(point BLOB PRIMARY KEY, fitness REAL NOT NULL) WITHOUT ROWID")
-        self.connection.execute(
-            "CREATE TABLE IF NOT EXISTS metadata "
-            "(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID")
-        self.connection.execute(
-            "CREATE TABLE IF NOT EXISTS evaluation_fingerprints "
-            "(fingerprint INTEGER PRIMARY KEY)")
-        row = self.connection.execute(
-            "SELECT value FROM metadata WHERE key='dimension'").fetchone()
-        if row is not None and int(row[0]) != dimension:
-            raise ValueError("Exact-evaluation archive dimension mismatch.")
-        self.connection.execute(
-            "INSERT OR REPLACE INTO metadata VALUES ('dimension', ?)",
-            (str(dimension),))
-        if objective_policy is not None:
-            row = self.connection.execute(
-                "SELECT value FROM metadata "
-                "WHERE key='objective_policy'").fetchone()
-            if archive_exists and (row is None or row[0] != objective_policy):
-                self.connection.close()
-                raise ValueError(
-                    "Exact-evaluation archive objective policy is "
-                    f"{row[0] if row else 'legacy'!r}, requested "
-                    f"{objective_policy!r}; start a fresh run.")
-            self.connection.execute(
-                "INSERT OR REPLACE INTO metadata VALUES "
-                "('objective_policy', ?)", (objective_policy,))
-        self.connection.commit()
-
-        backfill_start = time.perf_counter()
-        row = self.connection.execute(
-            "SELECT value FROM metadata "
-            "WHERE key='fingerprint_version'").fetchone()
-        if row is None or row[0] != _ARCHIVE_FINGERPRINT_VERSION:
-            self.connection.execute("DELETE FROM evaluation_fingerprints")
-            last_point = None
-            while True:
-                if last_point is None:
-                    rows = self.connection.execute(
-                        "SELECT point FROM evaluations ORDER BY point "
-                        "LIMIT ?", (_ARCHIVE_FINGERPRINT_BATCH,)).fetchall()
-                else:
-                    rows = self.connection.execute(
-                        "SELECT point FROM evaluations WHERE point > ? "
-                        "ORDER BY point LIMIT ?",
-                        (last_point,
-                         _ARCHIVE_FINGERPRINT_BATCH)).fetchall()
-                if not rows:
-                    break
-                self.connection.executemany(
-                    "INSERT OR IGNORE INTO evaluation_fingerprints VALUES "
-                    "(?)",
-                    [(self._fingerprint(point),) for point, in rows])
-                self.connection.commit()
-                last_point = rows[-1][0]
-            self.connection.execute(
-                "INSERT OR REPLACE INTO metadata VALUES "
-                "('fingerprint_version', ?)",
-                (_ARCHIVE_FINGERPRINT_VERSION,))
-            self.connection.commit()
-        self.index_backfill_seconds = time.perf_counter() - backfill_start
-
-        t0 = time.perf_counter()
-        # Only deterministic 64-bit fingerprints are loaded from NFS.  A
-        # collision causes a redundant exact BLOB lookup, never a false cache
-        # hit, because the evaluations table remains authoritative.
-        self._known_fingerprints = {
-            int(row[0]) for row in self.connection.execute(
-                "SELECT fingerprint FROM evaluation_fingerprints")}
-        self.index_load_seconds = time.perf_counter() - t0
-        self.hits = 0
-        self.evaluations = 0
-        # Buffered (key -> fitness) rows and their fingerprints, committed on
-        # flush(). Lookups consult this buffer before touching SQL.
-        self._pending = {}
-        self._pending_fingerprints = []
-        self.reset_timing()
-
-    @staticmethod
-    def _key(point):
-        return np.ascontiguousarray(point, dtype=np.float64).tobytes()
-
-    @staticmethod
-    def _fingerprint(key):
-        digest = hashlib.blake2b(
-            key, digest_size=8, person=b"CANDEL-DE-v1").digest()
-        return int.from_bytes(digest, "little", signed=True)
-
-    def __call__(self, batch_eval, points, desc=None):
-        lookup_start = time.perf_counter()
-        x = np.asarray(points)
-        out = np.empty(x.shape[0], dtype=float)
-        pending = {}
-        for i, point in enumerate(x):
-            key = self._key(point)
-            if key in pending:
-                pending[key].append(i)
-                self.hits += 1
-                continue
-            pending[key] = [i]
-
-        # A fingerprint hit may reference a buffered, not-yet-written row, so
-        # the RAM buffer is consulted before issuing any SQL SELECT.
-        possible_hits = [
-            key for key in pending
-            if self._fingerprint(key) in self._known_fingerprints]
-        cached = {}
-        sql_hits = []
-        for key in possible_hits:
-            if key in self._pending:
-                cached[key] = self._pending[key]
-            else:
-                sql_hits.append(key)
-        for start in range(0, len(sql_hits), 512):
-            keys = sql_hits[start:start + 512]
-            placeholders = ",".join("?" for _ in keys)
-            rows = self.connection.execute(
-                "SELECT point, fitness FROM evaluations WHERE point IN ("
-                + placeholders + ")", keys)
-            cached.update(rows)
-        missing_keys = []
-        missing = []
-        for key, indices in pending.items():
-            if key in cached:
-                out[indices] = cached[key]
-                self.hits += 1
-            else:
-                missing_keys.append(key)
-                missing.append(indices[0])
-        self.lookup_seconds += time.perf_counter() - lookup_start
-        self.lookup_keys += len(pending)
-        self.lookup_queries += ((len(sql_hits) + 511) // 512)
-
-        if missing:
-            evaluation_start = time.perf_counter()
-            values = np.asarray(batch_eval(
-                jnp.asarray(x[missing]), desc=desc), dtype=float)
-            self.evaluation_seconds += (
-                time.perf_counter() - evaluation_start)
-            values = np.where(np.isnan(values), np.inf, values)
-            for key, value in zip(missing_keys, values):
-                indices = pending[key]
-                out[indices] = value
-            write_start = time.perf_counter()
-            new_fingerprints = [
-                self._fingerprint(key) for key in missing_keys]
-            for key, value in zip(missing_keys, values):
-                self._pending[key] = float(value)
-            self._pending_fingerprints.extend(new_fingerprints)
-            self._known_fingerprints.update(new_fingerprints)
-            self.write_seconds += time.perf_counter() - write_start
-            self.evaluations += len(missing)
-            if len(self._pending) > _ARCHIVE_WRITE_BUFFER_ROWS:
-                self.flush()
-        return out
-
-    def flush(self):
-        """Commit buffered rows in one transaction and clear the buffer."""
-        if not self._pending:
-            return
-        write_start = time.perf_counter()
-        self.connection.executemany(
-            "INSERT INTO evaluations VALUES (?, ?)",
-            list(self._pending.items()))
-        self.connection.executemany(
-            "INSERT OR IGNORE INTO evaluation_fingerprints VALUES (?)",
-            [(fingerprint,) for fingerprint in self._pending_fingerprints])
-        self.connection.commit()
-        self._pending.clear()
-        self._pending_fingerprints.clear()
-        self.write_seconds += time.perf_counter() - write_start
-
-    def reset_timing(self):
-        """Reset per-optimisation-phase timing without changing counters."""
-        self.lookup_seconds = 0.0
-        self.evaluation_seconds = 0.0
-        self.write_seconds = 0.0
-        self.lookup_keys = 0
-        self.lookup_queries = 0
-
-    def count(self):
-        self.flush()
-        return int(self.connection.execute(
-            "SELECT COUNT(*) FROM evaluations").fetchone()[0])
-
-    def close(self):
-        self.flush()
-        self.connection.close()
 
 
 def _lshade_draw_indices(order, n_pbest, n, n_union, rng):
@@ -1617,8 +1407,8 @@ def _screen_eval(batch_eval, x, desc, chunk=512):
     """Evaluate ``x`` in slices with progress/ETA prints.
 
     Slicing only changes call granularity: the same points reach the same
-    per-candidate executable, so values, archive contents and NFE counts
-    are identical to a single call.
+    per-candidate executable, so values and NFE counts are identical to a
+    single call.
     """
     n = x.shape[0]
     if n <= chunk:
@@ -1670,18 +1460,23 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
     elif required_seed_points:
         raise ValueError("Required DE seed point is missing.")
 
+    population_parts = []
+    fitness_parts = []
+    if seeds.shape[0]:
+        seed_population = (seeds - lo) / scale
+        population_parts.append(seed_population)
+        fitness_parts.append(_screen_eval(
+            batch_eval, jnp.asarray(seed_population),
+            "Initial seeded candidates"))
+
     n_sobol = pop_size - seeds.shape[0]
     if n_sobol:
         selected = _select_distinct(
             sobol_points, logp_all, n_sobol, min_dist_frac)
-        population = np.asarray((sobol_points[selected] - lo) / scale)
-    else:
-        population = np.empty((0, D))
-    if seeds.shape[0]:
-        population = np.vstack(((seeds - lo) / scale, population))
-    fitness = _screen_eval(
-        batch_eval, jnp.asarray(population), "Initial-population candidates")
-    jax.block_until_ready(fitness)
+        population_parts.append((sobol_points[selected] - lo) / scale)
+        fitness_parts.append(-logp_all[selected])
+    population = np.vstack(population_parts)
+    fitness = np.concatenate(fitness_parts)
     if population.shape[0] != pop_size:
         raise RuntimeError(
             f"DE initial population has {population.shape[0]} members, "
@@ -1818,39 +1613,30 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     batch_eval = _make_batched_fitness(
         fitness_one, n_dev, devices,
         candidates_per_wave=candidates_per_wave)
-    archive_path = (checkpoint_path + ".sqlite"
-                    if checkpoint_path is not None else ":memory:")
-    exact_archive = _ExactArchive(
-        archive_path, D, resume=resume_path is not None,
-        objective_policy=objective_policy)
-
-    # Reproduce the archive's historical device-transfer downcast: the SQLite
-    # cache holds float64, but x64-disabled runs consumed it as float32.
     host_dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    evaluation_seconds = 0.0
 
     def exact_eval(points, desc=None):
-        return np.asarray(
-            exact_archive(batch_eval, points, desc=desc), dtype=host_dtype)
+        nonlocal evaluation_seconds
+        evaluation_start = time.perf_counter()
+        values = np.asarray(
+            batch_eval(jnp.asarray(points), desc=desc), dtype=host_dtype)
+        evaluation_seconds += time.perf_counter() - evaluation_start
+        return np.where(np.isnan(values), np.inf, values)
 
     t0 = time.time()
     reference_logp = None
     if reference_params is None:
-        # A new process always needs to compile, independently of archive
-        # resume state. Homogeneous GPUs share one pmap compilation; mixed
-        # devices retain one device-local compilation each.
+        # A new process always needs to compile. Homogeneous GPUs share one
+        # pmap compilation; mixed devices retain one device-local compilation
+        # each.
         warmup = batch_eval(jnp.full((1, D), 0.5))
         jax.block_until_ready(warmup)
     else:
         reference_point = _normalise_theta_point(
             reference_params, names, lo, hi)[None]
-        evaluations_before = exact_archive.evaluations
         reference_fitness = exact_eval(reference_point)
         jax.block_until_ready(reference_fitness)
-        if exact_archive.evaluations == evaluations_before:
-            # The SQLite sidecar supplied the value, but this process still
-            # needs the same executable for the population that follows.
-            warmup = batch_eval(jnp.asarray(reference_point))
-            jax.block_until_ready(warmup)
         reference_logp = -float(np.asarray(reference_fitness)[0])
     execution_mode = batch_eval.device_profile()["execution_mode"]
     fprint(f"JIT compiled in {time.time() - t0:.1f}s "
@@ -1988,12 +1774,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             "history_D_A": np.asarray(history_D_A),
         }
 
-    if resume_path is not None:
-        fprint("Exact-archive fingerprint index: "
-               f"{len(exact_archive._known_fingerprints):,} entries loaded "
-               f"in {exact_archive.index_load_seconds:.2f}s; "
-               f"legacy backfill={exact_archive.index_backfill_seconds:.2f}s")
-    exact_archive.reset_timing()
+    evaluation_seconds = 0.0
     phase_timing = {
         "trials": 0.0,
         "update": 0.0,
@@ -2004,18 +1785,13 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     def report_timing(label):
         host_seconds = (
             phase_timing["trials"] + phase_timing["update"]
-            + phase_timing["checkpoint"] + exact_archive.lookup_seconds
-            + exact_archive.write_seconds)
+            + phase_timing["checkpoint"])
         per_generation = host_seconds / max(1, timed_generations)
         fprint(
             f"  {label}: {timed_generations} generations; "
-            f"exact-eval={exact_archive.evaluation_seconds:.2f}s, "
+            f"exact-eval={evaluation_seconds:.2f}s, "
             f"host={host_seconds:.2f}s ({per_generation:.3f}s/gen): "
             f"trials={phase_timing['trials']:.2f}s, "
-            f"lookup={exact_archive.lookup_seconds:.2f}s "
-            f"({exact_archive.lookup_queries} SQL queries/"
-            f"{exact_archive.lookup_keys} keys), "
-            f"archive-write={exact_archive.write_seconds:.2f}s, "
             f"update={phase_timing['update']:.2f}s, "
             f"checkpoint={phase_timing['checkpoint']:.2f}s")
         if hasattr(batch_eval, "device_profile"):
@@ -2114,9 +1890,6 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
 
         if (checkpoint_path is not None
                 and time.time() - last_ckpt >= checkpoint_interval):
-            # Commit buffered exact values so the archive is never staler than
-            # the checkpoint it serves on resume.
-            exact_archive.flush()
             phase_start = time.perf_counter()
             _save_de_checkpoint(
                 checkpoint_path, population, fitness, best_solution,
@@ -2133,7 +1906,6 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             break
 
     if checkpoint_path is not None:
-        exact_archive.flush()
         phase_start = time.perf_counter()
         _save_de_checkpoint(
             checkpoint_path, population, fitness, best_solution,
@@ -2142,9 +1914,6 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             extra=checkpoint_extra())
         phase_timing["checkpoint"] += time.perf_counter() - phase_start
     report_timing("final timing")
-    fprint(f"Exact archive: {exact_archive.count()} unique evaluations, "
-           f"{exact_archive.hits} cache hits")
-    exact_archive.close()
 
     x_best = np.asarray(lo + jnp.asarray(best_solution) * scale)
     params_best = _flat_to_theta(jnp.asarray(x_best), names)
@@ -2214,7 +1983,7 @@ def main(argv=None):
     parser.add_argument(
         "--seed", type=int, default=None,
         help="DE random seed. Different seeds use independent checkpoint, "
-             "exact-archive, and progress-plot files.")
+             "and progress-plot files.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--fix-globals", action="store_true",
                         help="Skip the DE search: hold the disc globals at "
@@ -2611,7 +2380,7 @@ def main(argv=None):
         fprint(f"DE device executable: fixed {_DEVICE_LOCAL_BLOCK_SIZE}-"
                f"candidate block in {n_waves} "
                f"wave{'s' if n_waves != 1 else ''} "
-               "(padding is excluded from NFE/archive)")
+               "(padding is excluded from candidate NFE)")
         if _use_shared_pmap(n_dev, gpu_devices):
             fprint("DE multi-GPU compilation: one shared pmap executable "
                    "for homogeneous devices")

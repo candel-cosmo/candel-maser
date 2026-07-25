@@ -114,8 +114,7 @@ Common options passed to run_maser.py:
                          selects matching distance files).
   --f64                  Emergency/debug precision override.
   --seed N               Random seed (all samplers; default: config
-                         inference/seed). DE checkpoints and exact-value
-                         sidecars are separated by seed.
+                         inference/seed). DE checkpoints are separated by seed.
   --fix-floors-pesce     Hold the five error floors fixed at the published
                          Pesce/Reid values. de: dropped from the DE search;
                          mcmc: dropped from the sampled sites.

@@ -5,8 +5,8 @@ Supported megamaser workflow:
 - `run_maser.py`: unified megamaser runner. It defaults to `--sampler mcmc` (the explicit-latent `(r_ang, phi)` NUTS chain); use `--sampler de` for the 2D-marginal differential-evolution MAP (delegates to `run_de_map.py`), the global search used to seed the MCMC.
 - `run_de_map.py`: 2D-marginal MAP optimiser. Per spot it marginalises `(r_ang, phi)` jointly on a conditional per-spot r-grid (`_build_conditional_r_grids` + `_sum_phi_marginal`; not phi at a profiled `r_ang`, which overfits `D_A`) and optimises the globals with differential evolution. Phi integration defaults to the GPU-shaped peak-partition routine in `config_maser.toml`; the legacy fixed grids remain selectable with `--phi-integration fixed-grid`. Reached via `run_maser.py --sampler de`.
 - `benchmark_de_batching.py`: fixed-candidate exact-likelihood benchmark for
-  spot batching. Suite mode uses fresh child processes, bypasses SQLite, and
-  reads candidates from the current compatible DE checkpoint, or uses a
+  spot batching. Suite mode uses fresh child processes and reads candidates
+  from the current compatible DE checkpoint, or uses a
   deterministic scrambled-Sobol fallback when no checkpoint exists.
 - `run_joint_H0.py`: toy joint MCP megamaser H0 inference using KDE distance likelihoods from the saved single-galaxy MCMC chains.
 - `submit.sh`: cluster/local submission helper for `--sampler mcmc`, `--sampler de`, or the toy joint H0 via `--infer-H0`.
@@ -81,15 +81,14 @@ unnormalised log posterior density is still printed as an independent
 reference and is scored through the same compiled DE objective rather than a
 separate startup executable.  (A single point has zero probability mass in a
 continuous posterior.) Runs use the explicit
-`*_seed<N>_lshade_nopesce.npz` checkpoint plus a SQLite exact-evaluation
-sidecar.  `--resume` restores both without accepting an older seeded or
-generation-scheduled checkpoint.  `--seed N` selects the optimiser randomness
-and its independent checkpoint, sidecar, and progress plot, so different seeds
-can run concurrently.
+`*_seed<N>_lshade_nopesce.npz` checkpoint. `--resume` restores the complete
+optimiser state without accepting an older seeded or generation-scheduled
+checkpoint. `--seed N` selects the optimiser randomness and its independent
+checkpoint and progress plot, so different seeds can run concurrently.
 
-Every L-SHADE proposal is evaluated with the exact all-spot objective and
-deduplicated in the sidecar.  Spot batching remains allowed because it is an
-exact sum. The five standard float32 galaxies (`CGCG074-064`, `NGC5765b`,
+Every L-SHADE proposal is evaluated with the exact all-spot objective. Spot
+batching remains allowed because it is an exact sum. The five standard
+float32 galaxies (`CGCG074-064`, `NGC5765b`,
 `NGC6264`, `NGC6323`, and `UGC3789`) default to true all-spots evaluation;
 an explicit `--spot-batch` or per-galaxy setting still overrides this. The f64
 `NGC4258` path retains its configured/planned spot batching. GPU runs use
@@ -106,15 +105,10 @@ the setting changes only batching, not the objective. Heterogeneous devices
 retain concurrent device-local JITs, learn bounded per-device throughput weights, and
 adopt a weighted assignment only when its block-aware predicted makespan
 improves by at least 2%. Fixed-grid candidate batching remains an implementation
-invariant. Padding is evaluated but
-excluded from the archive and algorithmic NFE count.
-The SQLite sidecar persists deterministic 64-bit
-fingerprints, so a resume loads the compact fingerprint table instead of every
-full point key.  Possible matches are still verified against the complete BLOB
-key, preserving exact cache semantics even under a fingerprint collision.
-Checkpoint logs report exact-evaluation, trial-generation, archive lookup/write,
-device balance, update, and checkpoint timings.  Pass budget overrides after
-`--` when using `submit.sh`, for example:
+invariant. Padding is evaluated but discarded and excluded from the algorithmic
+NFE count. Checkpoint logs report exact-evaluation, trial-generation, device
+balance, update, and checkpoint timings. Pass budget overrides after `--` when
+using `submit.sh`, for example:
 
 ```bash
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC6264 \
@@ -132,10 +126,9 @@ python scripts/megamaser/benchmark_de_batching.py UGC3789 --suite \
 ```
 
 The benchmark reports compile/adaptation passes separately from steady timed
-passes. It does not change the checkpoint or exact-evaluation sidecar. To
-trace the production-like fixed/config score and DE evaluator at 50 ms
-resolution, while isolating allocator state in one fresh process per setting,
-use for example:
+passes. It does not change the checkpoint. To trace the production-like
+fixed/config score and DE evaluator at 50 ms resolution, while isolating
+allocator state in one fresh process per setting, use for example:
 
 ```bash
 python scripts/megamaser/benchmark_de_batching.py UGC3789 --suite \
