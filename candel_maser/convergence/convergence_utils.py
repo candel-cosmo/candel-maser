@@ -200,7 +200,8 @@ def dense_r_phi_reference_per_spot(model, phys_args, phys_kw, n_r, n_phi,
     n_r, n_phi = int(n_r), int(n_phi)
     r_chunk = int(r_chunk)
     if n_r < 3 or n_phi < 3 or r_chunk < 1:
-        raise ValueError("n_r and n_phi must be >= 3; r_chunk must be positive.")
+        raise ValueError(
+            "n_r and n_phi must be >= 3; r_chunk must be positive.")
 
     dtype = jnp.asarray(phys_args[2]).dtype
     if dtype != jnp.float64:

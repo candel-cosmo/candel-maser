@@ -36,7 +36,8 @@ import tomli_w  # noqa: E402
 
 if jax.default_backend() != "gpu":
     # This must precede importing run_de_map, which configures the persistent
-    # cache. Old CPU PjRt peak executables can terminate during deserialisation.
+    # cache. Old CPU PjRt peak executables can terminate during
+    # deserialisation.
     jax.config.update("jax_enable_compilation_cache", False)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -46,6 +47,7 @@ if str(MASER_DIR) not in sys.path:
     sys.path.insert(0, str(MASER_DIR))
 
 import run_de_map as de  # noqa: E402
+
 try:  # noqa: E402
     from .convergence_utils import (cast_floats, cast_model_floats,
                                     dense_r_phi_reference_per_spot)
@@ -271,7 +273,8 @@ def _parse_scheme_setting(value):
         raise argparse.ArgumentTypeError(
             f"{method}.{key} requires a {expected.__name__} value")
     if minimum is not None:
-        valid_value = parsed >= minimum if expected is int else parsed > minimum
+        valid_value = (
+            parsed >= minimum if expected is int else parsed > minimum)
         if not valid_value:
             relation = ">=" if expected is int else ">"
             raise argparse.ArgumentTypeError(
@@ -1678,12 +1681,15 @@ def _candidate_table_row(galaxy, variant, candidate, separator):
     results = [candidate["methods"][method] for method in METHODS]
     comparisons = [result["comparison"] for result in results]
     seconds = candidate.get("production_seconds") or {}
+    absolute_errors = [r["absolute_total_error"] for r in comparisons]
+    spot_errors = [r["max_absolute_spot_error"] for r in comparisons]
+    timings = [seconds.get(method) for method in METHODS]
     return (
         f"| {galaxy} | {variant} | {source} | {cid} | "
         f"{_fmt(results[0]['reference_total_log_likelihood'], '.6g')} | "
-        f"{_paired([r['absolute_total_error'] for r in comparisons], separator=separator)} | "
-        f"{_paired([r['max_absolute_spot_error'] for r in comparisons], separator=separator)} | "
-        f"{_paired([seconds.get(method) for method in METHODS], '.3g', separator)} |")
+        f"{_paired(absolute_errors, separator=separator)} | "
+        f"{_paired(spot_errors, separator=separator)} | "
+        f"{_paired(timings, '.3g', separator)} |")
 
 
 def _markdown(report):
@@ -1773,12 +1779,15 @@ def _markdown(report):
         lines.extend(f"- {row}" for row in overflows)
 
     lines.extend([
-        "", "## Aggregate by galaxy, variant, point source, and phi integration", "",
+        "",
+        "## Aggregate by galaxy, variant, point source, and phi integration",
+        "",
         "| Galaxy | Variant | Source | Phi integration | N | Irrelevant | "
         "Unconverged refs | Unconverged excused | "
         "mask mismatch | overflows | worst abs total | worst spot | "
         "worst p99 | worst RMS | Pass |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ("|---|---|---|---|---:|---:|---:|---:|"
+         "---:|---:|---:|---:|---:|---:|---:|"),
     ])
     for row in report["aggregate"]:
         lines.append(
@@ -1845,8 +1854,9 @@ def _markdown(report):
     lines.extend([
         "", "## Rankings and worst spots", "",
         "Rankings and worst spots exclude irrelevant candidates.", "",
-        "| Galaxy | Variant | Phi integration | Reference ranking inversions | "
-        "test/reference inversions | Worst candidate | Worst spot error |",
+        "| Galaxy | Variant | Phi integration | "
+        "Reference ranking inversions | test/reference inversions | "
+        "Worst candidate | Worst spot error |",
         "|---|---|---|---:|---:|---|---:|",
     ])
     for case in report["cases"]:
@@ -1860,7 +1870,9 @@ def _markdown(report):
                 f"{worst['candidate']} | "
                 f"{_fmt(worst['max_absolute_spot_error'])} |")
     lines.extend([
-        "", "| Galaxy | Variant | Phi integration | Candidate | Spot | Population | "
+        "",
+        "| Galaxy | Variant | Phi integration | Candidate | "
+        "Spot | Population | "
         "signed error | absolute error | roots | overflow |",
         "|---|---|---|---|---:|---|---:|---:|---:|---:|",
     ])
@@ -2070,12 +2082,18 @@ def _print_case(case):
         results = [candidate["methods"][method] for method in METHODS]
         comparisons = [result["comparison"] for result in results]
         seconds = candidate.get("production_seconds") or {}
+        absolute_errors = _paired(
+            [r["absolute_total_error"] for r in comparisons])
+        spot_errors = _paired(
+            [r["max_absolute_spot_error"] for r in comparisons])
+        timings = _paired(
+            [seconds.get(method) for method in METHODS], ".3g")
         print(
             f"{candidate['id'] + marker:<20} "
             f"{_fmt(results[0]['reference_total_log_likelihood'], '.6g'):>16} "
-            f"{_paired([r['absolute_total_error'] for r in comparisons]):>30} "
-            f"{_paired([r['max_absolute_spot_error'] for r in comparisons]):>31} "
-            f"{_paired([seconds.get(method) for method in METHODS], '.3g'):>22}",
+            f"{absolute_errors:>30} "
+            f"{spot_errors:>31} "
+            f"{timings:>22}",
             flush=True)
     _print_reference_convergence(case)
     flagged = [candidate for candidate in case["candidates"]
