@@ -19,8 +19,9 @@ quantities are
                    by the within-chain spread turns the raw Mpc scatter into a
                    "statistical sigma": <<1 when chains agree within their own
                    width, ~1 when they sit a full posterior width apart.  This
-                   makes galaxies with very different posterior widths (e.g. the
-                   tight UGC~3789 vs the broad NGC~6323) directly comparable.
+                   makes galaxies with very different posterior widths (e.g.
+                   the tight UGC~3789 vs the broad NGC~6323) directly
+                   comparable.
 
 Data source: the sweep produced by ``submit_gibbs_comparison.sh`` (twelve
 chains of 1e6 warm-up + 1e6 sampling steps per variant), laid out as

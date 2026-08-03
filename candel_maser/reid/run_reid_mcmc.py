@@ -22,8 +22,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
-import numpy as np
 import astropy.units as u
+import numpy as np
 from astropy.cosmology import FlatLambdaCDM, z_at_value
 
 try:

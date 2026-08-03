@@ -37,8 +37,8 @@ from compare_reid_candel import (DEFAULT_CONFIG, SHARED,  # noqa: E402
                                  overlay_three, per_chain_distance_histogram)
 from run_reid_mcmc import (GLOBAL_NAMES, compute_reid_r_ref,  # noqa: E402
                            load_chain, load_galaxy_config,
-                           numpyro_summary_text, parse_data_rows,
-                           reid_D_A, reid_H0, set_control_numbers)
+                           numpyro_summary_text, parse_data_rows, reid_D_A,
+                           reid_H0, set_control_numbers)
 
 ROOT = HERE.parents[2]
 RUN_SCRIPT = HERE / "run_gibbs_chains.sh"
