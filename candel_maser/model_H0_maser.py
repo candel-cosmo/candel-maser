@@ -51,11 +51,10 @@ from . import maser_physics as _maser_physics
 from .base_model import ModelBase
 from .integration import trapz_log_weights
 from .maser_physics import (LOG_2PI, PC_PER_MAS_MPC, R_EST_EPS, W_LOG_FLOOR,
-                            centripetal_acceleration, predict_acceleration_los,
-                            gamma_minus_one, gravitational_redshift_minus1,
-                            keplerian_speed, predict_position,
-                            predict_velocity_los,
-                            radius_from_los_acceleration,
+                            centripetal_acceleration, gamma_minus_one,
+                            gravitational_redshift_minus1, keplerian_speed,
+                            predict_acceleration_los, predict_position,
+                            predict_velocity_los, radius_from_los_acceleration,
                             radius_from_los_velocity, velocity_rel_affine,
                             warp_geometry)
 from .optim1d import brent_1d
