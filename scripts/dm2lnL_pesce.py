@@ -3,8 +3,9 @@ chi2_evidence_table.py, but retaining the Gaussian log-normalisation
 sum ln(2 pi sigma^2_tot) that chi^2 drops.
 
 For each galaxy the posterior-median (ours) and reported P20 globals are held
-fixed and the per-spot (r, phi) are profiled by evaluate_at_globals -- the exact
-code path behind the chi^2 column.  The full per-spot Gaussian log-likelihood
+fixed and the per-spot (r, phi) are profiled by evaluate_at_globals -- the
+exact code path behind the chi^2 column.  The full per-spot Gaussian
+log-likelihood
 (_make_perspot_eval, = lnorm + lnorm_a - 0.5 chi^2) is summed at those same
 optimised latents, so -2 ln L = -2 sum(per) = chi^2 + sum ln(2 pi sigma^2_tot)
 by construction.  Reports per solution chi^2, normalisation, and -2 ln L, and
@@ -31,8 +32,8 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import run_map as rm  # noqa: E402
 
-from candel.model.maser_map import (  # noqa: E402
-    evaluate_at_globals, _make_perspot_eval)
+from candel.model.maser_map import _make_perspot_eval  # noqa: E402
+from candel.model.maser_map import evaluate_at_globals  # noqa: E402
 
 GALAXIES = ["CGCG074-064", "NGC5765b", "UGC3789", "NGC6264", "NGC6323"]
 

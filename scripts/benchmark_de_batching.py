@@ -23,7 +23,6 @@ import tempfile
 import threading
 import time
 
-
 _RESULT_PREFIX = "BATCH_BENCHMARK_JSON="
 
 

@@ -31,9 +31,8 @@ import jax  # noqa: E402
 jax.config.update("jax_enable_x64", True)
 import h5py  # noqa: E402
 import numpy as np  # noqa: E402
-from scipy.stats import gaussian_kde, multivariate_normal, norm  # noqa: E402
-
 import run_map as rm  # noqa: E402
+from scipy.stats import gaussian_kde, multivariate_normal, norm  # noqa: E402
 
 from candel.model.maser_map import evaluate_at_globals  # noqa: E402
 
@@ -83,7 +82,8 @@ def _savage_dickey(gal, tag):
     post_g = float(multivariate_normal(mu, cov, allow_singular=True).pdf(
         [0.0, 0.0]))
     post_k = float(gaussian_kde(x.T)(np.zeros((2, 1)))[0])
-    maha = float(np.sqrt(mu @ np.linalg.solve(cov, mu)))  # sigma of 0 from mean
+    # Separation of zero from the mean in standard deviations.
+    maha = float(np.sqrt(mu @ np.linalg.solve(cov, mu)))
     return dict(B01_g=post_g / prior0, B01_k=post_k / prior0, maha=maha)
 
 
@@ -116,7 +116,8 @@ def main():
         lnk = np.log(r["B01_k"]) if r["B01_k"] > 0 else float("-inf")
         fav = "linear" if lng > 0 else "quadratic"
         note = "  (Mahal>3: trust B01_G)" if r["maha"] > 3 else ""
-        print(f"{r['gal']:13s} {r['nu_L']:4d} {r['cnu_L']:8.2f} {r['nu_Q']:4d} "
+        print(f"{r['gal']:13s} {r['nu_L']:4d} {r['cnu_L']:8.2f} "
+              f"{r['nu_Q']:4d} "
               f"{r['cnu_Q']:8.2f} {r['dchi2']:7.1f} | {lng:7.2f} "
               f"{r['B01_g']:9.2e} {lnk:7.2f} {r['maha']:5.1f}  {fav}{note}")
 

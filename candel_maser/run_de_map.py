@@ -89,9 +89,9 @@ from tqdm import trange  # noqa: E402
 
 from candel.inference.optimise import _prior_bounds  # noqa: E402
 from candel.inference.optimise import _select_distinct  # noqa: E402
+from candel.model import maser_physics  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
-from candel.model import maser_physics  # noqa: E402
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
 from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
 from candel.util import (data_path, fprint, fsection, get_nested,  # noqa: E402
