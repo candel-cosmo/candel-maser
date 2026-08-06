@@ -47,6 +47,7 @@ if str(MASER_DIR) not in sys.path:
     sys.path.insert(0, str(MASER_DIR))
 
 import run_de_map as de  # noqa: E402
+from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
 
 try:  # noqa: E402
     from .convergence_utils import (cast_floats, cast_model_floats,
@@ -312,6 +313,7 @@ def _reference_grids(galaxy, args):
 
 def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
+    add_dataset_arg(parser)
     parser.add_argument(
         "--galaxies", nargs="+",
         default=list(de._MASTER_CFG["model"]["galaxies"]),
@@ -571,7 +573,7 @@ def _build_case(galaxy, variant, args, seed):
         "phi_integration", master["model"].get(
             "phi_integration", "fixed-grid"))
     data = de.load_megamaser_spots(
-        de.data_path("data", "Megamaser"), galaxy,
+        de.maser_data_root(master["io"]["dataset"]), galaxy,
         v_sys_obs=gcfg["v_sys_obs"])
     distance_bounds = de._distance_bounds(gcfg)
     if distance_bounds is not None:
@@ -2153,6 +2155,7 @@ def _print_case(case):
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(raw_argv)
+    apply_dataset(de._MASTER_CFG, args.dataset)
     _validate_args(args)
     cache_dir = _reference_cache_dir(args)
     if args.clean_cache:

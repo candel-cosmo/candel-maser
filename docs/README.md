@@ -205,6 +205,56 @@ separately with
 
 The main config is `config_maser.toml`.
 
+### Datasets
+
+Two spot-table datasets coexist and are selected end to end with `--dataset`,
+accepted by `submit.sh` and by every runner (`run_maser.py`, `run_de_map.py`,
+`run_map.py`, `run_joint_H0.py`, `evidence_single_galaxy.py`, the convergence
+scripts and `check_reid/prepare_reid_data.py`):
+
+| dataset | what it is |
+|---|---|
+| `original_published` | the literature tables as published; what this repository fitted before 2026-08-05 — **the default while fiducial DE inits are incomplete** |
+| `fiducial` | the tables Pesce et al. (2020) actually fitted, released with their erratum |
+
+They differ for NGC5765b, NGC6264, NGC6323 and UGC3789 (spots removed in MCP
+vetting, NGC6323 augmented, NGC6264 acceleration uncertainties replaced).
+CGCG074-064 and NGC4258 are byte-identical in both. Full provenance is in
+`data/Megamaser/README`.
+
+Layout, both namespaced by dataset so nothing can be mixed silently:
+
+```
+data/Megamaser/<dataset>/       spot tables (+ generated *_loader_reid.inp)
+results/Megamaser/<dataset>/    chains, DE checkpoints, joint-H0 outputs
+```
+
+`data/` is intentionally ignored by Git. Provision the selected spot-table
+directory separately on every machine before running; the fiducial tables came
+from the MCP `fiducial_tables.zip` response and are not part of this checkout.
+
+`reid_mcmc/`, `convergence/` and `logs/` stay directly under
+`results/Megamaser/` — they are Reid-side and numerics artefacts, not
+dataset-specific.
+
+The per-galaxy DE MAP best points (`[model.galaxies.<G>.init*]`) and the warp
+pivots (`r_ang_ref_*`) live in `init_original_published.toml` and
+`init_fiducial.toml`, not in `config_maser.toml`. They are dataset-specific by
+construction: each init carries a per-spot `r_ang` array whose length is that
+dataset's spot count. `maser_config.apply_dataset` merges the selected file
+and appends the dataset to `[io].root_output`.
+
+The default is set by `[io].dataset` in `config_maser.toml`; `--dataset`
+overrides it. `original_published` remains the operational default while four
+fiducial config initialisations are pending; select fiducial explicitly with
+`--dataset fiducial`.
+
+`init_fiducial.toml` has no init block for NGC5765b, NGC6264, NGC6323 or
+UGC3789 yet: their spot tables changed, so the published best points do not
+apply. `--init-strategy config` fails loudly for them until DE reruns land;
+use `--init-strategy median` to bootstrap. `validate_megamaser_config` reports
+them as `pending_de` rather than as errors.
+
 The all-galaxy validated DE default is `phi_integration = "peak-partition"`.
 The legacy dense fixed grid remains available for controlled comparisons:
 
@@ -259,12 +309,9 @@ UGC3789; NGC6264 and NGC6323 retain 129/65.  NGC5765b uses a centred
 all-class radial refinements, an eight-step value-only width solve, and a
 32-spot tile.  Every galaxy, disk variant, and integration method uses 176
 global-radius discovery nodes.  NGC6264 also uses a 32-spot tile; the other
-float32 DE targets use all spots.  The complete circular/eccentric validation,
-pathological-point audit, sustained GPU speedups, memory measurements, and
-the known NGC4258 circular tradeoff are in
-`docs/notes/megamaser_phi_integration_all_galaxies.md`; the preceding
-algorithm-development study is
-`docs/notes/megamaser_phi_integration_research.md`.
+float32 DE targets use all spots. Reproduce the current acceptance evidence
+with `convergence/validate_phi_partition.py`; do not infer it from these
+configuration values alone.
 
 ### Fixed-grid versus peak-partition validation
 
@@ -455,10 +502,8 @@ variant, seed, candidate options, and reference options fixed across trials.
 An agent can treat a zero exit code and `passed: true` as the feasibility gate,
 then rank feasible trials by the selected method's warmed throughput in
 `cases[].timing`. Local CPU trials are suitable for accuracy and workflow
-checks; final performance choices must be repeated on the production GPU.
-The completed all-galaxy multi-loop benchmark, physical analysis, pass/fail
-boundaries, and production recommendation are recorded in
-`docs/notes/megamaser_phi_integration_all_galaxies.md`.
+checks; final performance choices must be repeated on the production GPU and
+the generated report retained with the run artefacts.
 
 The production objective timing separates the cold compile/evaluation from
 warmed throughput and records backend peak memory when JAX exposes it.
@@ -472,6 +517,13 @@ phi_sys_ranges_deg = [[-180, 180]]
 MCMC samples non-centred log-radius residuals,
 `z_r = log(r_ang / r_hat(theta))`. Per-spot `r_ang`/`phi` samples are not
 written by default; pass `--save-latents` to keep them in the HDF5 output.
+The optional global `sample_n_inner` setting controls saved-sample Gibbs
+sweeps, while per-galaxy `mcmc_target_accept_theta` and
+`mcmc_sample_n_inner` values can override global NUTS and Gibbs settings.
+`--target-accept-theta` and `--n-inner` still take precedence. Only NGC4258
+enables `mcmc_transport_systemic_phi`: its numerous, tightly constrained
+systemic spots exhibit the astrometric-centre ridge targeted by the fixed
+linear transport. Saved angles remain physical.
 The DE MAP marginalises `(r_ang, phi)` rather than sampling them.
 
 The default mass coordinate is `mass_parameterization = "eta"`, i.e. `eta = log_MBH - log10(D_A)`. Saved samples still include derived `log_MBH`, and the original `log_MBH` prior is applied to that derived value. Change `mass_parameterization` in `config_maser.toml` to sample `log_MBH` directly. The single-galaxy megamaser distance is always sampled as uniform `D_A` over the configured distance bounds (no flag).
@@ -480,6 +532,12 @@ The default mass coordinate is `mass_parameterization = "eta"`, i.e. `eta = log_
 
 `check_reid/reid_profile.py` evaluates Mark Reid's unmodified `fit_disk` likelihood through the local f2py wrapper.  The data file and init TOML are the inputs; per-spot `(r, phi)` latents are MAP-profiled for each query.
 CANDEL config inputs are converted automatically using their `D_A` and active `eta`/`log_mbh` mass coordinate.  Moving a quadratic warp to Reid's data-derived reference radius preserves the complete polynomial by shifting both its intercept and linear coefficient.
+
+The Reid Gibbs comparison wrappers also accept `--dataset`. Unlabelled legacy
+`mystart_globals.toml` and `reid_control_<galaxy>.inp` files are treated as
+`original_published`; a fiducial run requires dataset-labelled globals and a
+control generated with `make_candel_globals.py --dataset fiducial` and
+`make_reid_control.py --dataset fiducial`.
 
 ```bash
 python scripts/megamaser/check_reid/reid_profile.py \

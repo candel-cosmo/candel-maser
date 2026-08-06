@@ -43,6 +43,10 @@ if needed:
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
 with open(_CONFIG_PATH, "rb") as f:
     _MASTER_CFG = tomli.load(f)
@@ -93,9 +97,12 @@ from candel.model import maser_physics  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
-from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
-from candel.util import (data_path, fprint, fsection, get_nested,  # noqa: E402
+from candel.pvdata.megamaser_data import (  # noqa: E402
+    load_megamaser_spots, maser_data_root)
+from candel.util import (fprint, fsection, get_nested,  # noqa: E402
                          results_path)
+from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
+                          check_init_block)
 
 if _F64_ENABLED_HERE:
     print(f"float64 enabled ({_F64_REASON})", flush=True)
@@ -120,6 +127,7 @@ def _distance_bounds(gcfg):
 
 
 def _clean_init(model, init_cfg):
+    check_init_block(init_cfg, model)
     init_params = {key: jnp.asarray(value) for key, value in init_cfg.items()}
     init_params.pop("M_BH", None)
     if model._D_A_uniform:
@@ -1980,6 +1988,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Run 2D-marginal MAP optimisation for one megamaser disk.")
     parser.add_argument("galaxy", type=str)
+    add_dataset_arg(parser)
     parser.add_argument(
         "--seed", type=int, default=None,
         help="DE random seed. Different seeds use independent checkpoint, "
@@ -2080,6 +2089,7 @@ def main(argv=None):
             "--fix-floors-pesce only applies to the DE; it cannot combine "
             "with --fix-globals/--fix-globals-pesce (those skip the DE).")
     master_cfg = _MASTER_CFG
+    dataset = apply_dataset(master_cfg, args.dataset)
     galaxies = master_cfg["model"]["galaxies"]
     if args.galaxy not in galaxies:
         raise SystemExit(
@@ -2116,7 +2126,7 @@ def main(argv=None):
 
     fsection(f"Loading {args.galaxy} data")
     data = load_megamaser_spots(
-        data_path("data", "Megamaser"), args.galaxy,
+        maser_data_root(dataset), args.galaxy,
         v_sys_obs=gcfg["v_sys_obs"])
     distance_bounds = _distance_bounds(gcfg)
     if distance_bounds is not None:
@@ -2458,7 +2468,7 @@ def main(argv=None):
         else:
             vals = ", ".join(str(round(float(x), 4)) for x in value)
             lines.append(f"{key} = [{vals}]")
-    fprint("MAP init (copy into config_maser.toml manually if desired):")
+    fprint(f"MAP init (copy into init_{dataset}.toml manually if desired):")
     print("\n".join(lines), flush=True)
 
 

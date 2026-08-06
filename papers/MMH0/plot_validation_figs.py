@@ -54,7 +54,7 @@ def _setup(galaxy):
     init = rm._complete_mass_point(
         model, {k: np.asarray(v[0]) for k, v in samples.items()})
     target = rm.MaserBlackJaxTarget(model, rm._h_ref(model), init)
-    ctx = rm._reid_loglik_context(galaxy, model.n_spots)
+    ctx = rm._reid_loglik_context(galaxy, model.n_spots, cra.DATASET)
     return model, target, samples, ctx
 
 
@@ -201,13 +201,14 @@ def print_evidence(fid, qw):
 # Figure: likelihood gain vs distance shift, ours - P20
 # --------------------------------------------------------------------------
 # Published Pesce+2020 angular-diameter-distance uncertainties: the symmetrised
-# reported 1sigma in Mpc, from the values tabulated in
-# tab:distance_pesce_comparison (external literature, not a pipeline output).
-PESCE_DA_SIG = {"CGCG074-064": 0.5 * (5.8 + 4.7),
+# reported 1sigma in Mpc, from their table 1 and, for the four galaxies they
+# remodelled, their table 2 (external literature, not a pipeline output).
+# CGCG 074-064 is 87.6 +7.9 -7.2 (P20 table 1, from Pesce+2020a).
+PESCE_DA_SIG = {"CGCG074-064": 0.5 * (7.9 + 7.2),
                 "NGC5765b": 0.5 * (5.4 + 5.1),
-                "UGC3789": 0.5 * (3.9 + 3.8),
-                "NGC6264": 0.5 * (8.9 + 8.0),
-                "NGC6323": 0.5 * (7.4 + 7.1)}
+                "UGC3789": 0.5 * (4.5 + 4.0),
+                "NGC6264": 0.5 * (21.2 + 17.3),
+                "NGC6323": 0.5 * (34.2 + 23.4)}
 
 
 def collect_evidence_vs_distance():

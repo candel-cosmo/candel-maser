@@ -34,11 +34,20 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 fallback
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR.parent) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR.parent))
+
+from candel.pvdata.megamaser_data import (MASER_DATASETS,  # noqa: E402
+                                          maser_data_root)
+from maser_config import (add_dataset_arg, dataset_init_path,  # noqa: E402
+                          resolve_dataset)
+
 REID_DIR = ROOT / "background_info/fit_disk_Reid"
 REID_SOURCE = REID_DIR / "fit_disk_v24d_unblinded.f"
 REID_CONTROL_TEMPLATE = REID_DIR / "fit_disk_control.inp"
 DEFAULT_CONFIG = ROOT / "scripts/megamaser/config_maser.toml"
-DEFAULT_DATA = ROOT / "data/Megamaser/N4258_disk_data_MarkReid.final"
+DEFAULT_DATA_NAME = "N4258_disk_data_MarkReid.final"
+# Dataset-agnostic: one Reid run directory tree for every dataset.
 DEFAULT_RESULTS = ROOT / "results/Megamaser/reid_mcmc"
 DEFAULT_REID_INIT = ROOT / "scripts/megamaser/check_reid/reid_ngc4258_init.toml"  # noqa: E501
 MAX_CORNER_SAMPLES = 20000
@@ -121,6 +130,34 @@ def load_toml(path: Path) -> dict:
         return tomllib.load(f)
 
 
+def reid_data_path(galaxy: str, dataset: str) -> Path:
+    """Reid-format data file written by ``prepare_reid_data.py --dataset``."""
+    return Path(maser_data_root(dataset)) / f"{galaxy}_loader_reid.inp"
+
+
+def reid_control_path(galaxy, dataset):
+    """Default control path, retaining legacy names for published tables."""
+    prefix = "" if dataset == "original_published" else f"{dataset}_"
+    return SCRIPT_DIR / f"reid_control_{prefix}{galaxy}.inp"
+
+
+def reid_control_dataset(path):
+    """Dataset recorded by a control file; unlabelled legacy files are old."""
+    match = re.search(
+        r"^!\s*CANDEL dataset:\s*(\S+)\s*$", Path(path).read_text(),
+        flags=re.MULTILINE)
+    dataset = match.group(1) if match else "original_published"
+    if dataset not in MASER_DATASETS:
+        raise ValueError(f"{path} records unknown dataset {dataset!r}")
+    return dataset
+
+
+def dataset_galaxy_block(dataset: str, galaxy: str) -> dict:
+    """`galaxy`'s init blocks and r_ang_ref_* from ``init_<dataset>.toml``."""
+    cfg = load_toml(Path(dataset_init_path(dataset)))
+    return dict(cfg["model"]["galaxies"].get(galaxy, {}))
+
+
 def first_data_header(text: str) -> str | None:
     for line in text.splitlines():
         stripped = line.strip()
@@ -186,10 +223,12 @@ def radio_to_optical(v_radio: np.ndarray | float) -> np.ndarray | float:
 
 def load_reid_init(path: Path, vcor: float | None = None,
                    galaxy: str | None = None,
-                   variant: str = "init") -> ReidInit:
+                   variant: str = "init",
+                   dataset: str | None = None) -> ReidInit:
     init = load_toml(path)["globals"]
     tag = str(path)
-    if any(isinstance(v, dict) for v in init.values()):
+    merged = any(isinstance(v, dict) for v in init.values())
+    if merged:
         # Merged multi-galaxy file: [globals.<GALAXY>.<variant>].
         if not isinstance(init.get(galaxy), dict):
             available = sorted(k for k, v in init.items()
@@ -205,6 +244,15 @@ def load_reid_init(path: Path, vcor: float | None = None,
                 f"available variants: {sorted(by_variant)}")
         init = by_variant[variant]
         tag = f"{path}:{galaxy}:{variant}"
+    # Written by make_candel_globals.py; absent in hand-written, dataset-
+    # independent files such as reid_ngc4258_init.toml.
+    init_dataset = init.get("dataset")
+    if init_dataset is None and merged:
+        init_dataset = "original_published"
+    if dataset is not None and init_dataset not in (None, dataset):
+        raise ValueError(
+            f"{tag} was generated for dataset '{init_dataset}', not "
+            f"'{dataset}'")
     values = {name: float(init[name]) for name in GLOBAL_NAMES}
     if vcor is not None:
         values["Vcor_km_s"] = float(vcor)
@@ -234,9 +282,15 @@ def resolve_init_toml(name: str) -> Path:
     return path
 
 
-def load_galaxy_config(config_path: Path, galaxy: str) -> dict:
+def load_galaxy_config(config_path: Path, galaxy: str,
+                       dataset: str | None = None) -> dict:
     cfg = load_toml(config_path)
     gcfg = dict(cfg["model"]["galaxies"][galaxy])
+    if dataset is not None:
+        # init* and r_ang_ref_* live in init_<dataset>.toml, not in
+        # config_maser.toml. Keys present in config_path win: it may be a
+        # one-point fragment (reid_chi2) whose init must not be overwritten.
+        gcfg = {**dataset_galaxy_block(dataset, galaxy), **gcfg}
     if "v_sys_obs" in gcfg:
         return gcfg
 
@@ -261,24 +315,37 @@ def config_D_A_from_D_c(cfg: dict, D_c):
 
 
 def load_toml_init(path: Path, galaxy: str, vcor: float,
-                   variant: str = "init") -> ReidInit:
+                   variant: str = "init",
+                   dataset: str | None = None) -> ReidInit:
     cfg = load_toml(path)
     if "globals" in cfg:
-        return load_reid_init(path, vcor, galaxy=galaxy, variant=variant)
-    try:
-        cfg["model"]["galaxies"][galaxy][variant]
-    except KeyError as exc:
-        raise ValueError(
-            f"{path} must contain [globals] or "
-            f"[model.galaxies.{galaxy}.{variant}]"
-        ) from exc
-    return load_config_init(path, galaxy, vcor, variant=variant)
+        return load_reid_init(path, vcor, galaxy=galaxy, variant=variant,
+                              dataset=dataset)
+    if dataset is None:
+        # With a dataset the block may legitimately come from its init file.
+        try:
+            cfg["model"]["galaxies"][galaxy][variant]
+        except KeyError as exc:
+            raise ValueError(
+                f"{path} must contain [globals] or "
+                f"[model.galaxies.{galaxy}.{variant}]"
+            ) from exc
+    return load_config_init(path, galaxy, vcor, variant=variant,
+                            dataset=dataset)
 
 
 def load_config_init(config_path: Path, galaxy: str, vcor: float,
-                     variant: str = "init") -> ReidInit:
+                     variant: str = "init",
+                     dataset: str | None = None) -> ReidInit:
     cfg = load_toml(config_path)
-    gcfg = load_galaxy_config(config_path, galaxy)
+    gcfg = load_galaxy_config(config_path, galaxy, dataset=dataset)
+    if variant not in gcfg:
+        where = (f"scripts/megamaser/init_{dataset}.toml"
+                 if dataset is not None else "a dataset init file (no dataset "
+                 "was selected)")
+        raise KeyError(
+            f"no [model.galaxies.{galaxy}.{variant}] in {config_path.name} "
+            f"or {where}")
     init = dict(gcfg[variant])
     v_sys = float(gcfg["v_sys_obs"]) + float(init.get("dv_sys", 0.0))
     if "D_A" in init:
@@ -1080,7 +1147,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Prepare, run, and plot Mark Reid fit_disk MCMC without editing the Reid source.")  # noqa: E501
     parser.add_argument("--galaxy", default="NGC4258")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
+    add_dataset_arg(parser)
+    parser.add_argument(
+        "--data", type=Path, default=None,
+        help=f"Reid-format data file (default: the selected dataset's "
+             f"{DEFAULT_DATA_NAME}).")
     parser.add_argument(
         "--init",
         default=DEFAULT_REID_INIT.name,
@@ -1244,10 +1315,15 @@ def main(argv: list[str] | None = None) -> int:
     if status_interval < 1:
         raise ValueError("--status-interval must be >=1, or 0 for automatic")
 
+    dataset = resolve_dataset(load_toml(args.config), args.dataset)
+    if args.data is None:
+        args.data = Path(maser_data_root(dataset)) / DEFAULT_DATA_NAME
+
     try:
         init_toml = resolve_init_toml(args.init)
         reid_init = load_toml_init(
-            init_toml, args.galaxy, args.vcor, variant=args.variant)
+            init_toml, args.galaxy, args.vcor, variant=args.variant,
+            dataset=dataset)
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
@@ -1312,6 +1388,7 @@ def main(argv: list[str] | None = None) -> int:
         "run_dir": str(run_dir),
         "reid_source": str(REID_SOURCE),
         "data_source": str(args.data),
+        "dataset": dataset,
         "init_source": reid_init.source,
         "burnin": args.burnin,
         "trials": args.trials,

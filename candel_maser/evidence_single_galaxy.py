@@ -75,8 +75,11 @@ from candel.inference.evidence import harmonic_evidence  # noqa: E402
 from candel.inference.evidence import laplace_evidence  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
-from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
-from candel.util import data_path, fprint, fsection  # noqa: E402
+from candel.pvdata.megamaser_data import (  # noqa: E402
+    load_megamaser_spots, maser_data_root)
+from candel.util import fprint, fsection  # noqa: E402
+from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
+                          check_chain_dataset)
 
 # Quadrature grids scaled to build the float64 reference.
 _GRID_KEYS = (
@@ -307,7 +310,10 @@ def main(argv=None):
     parser.add_argument("galaxy", type=str)
     parser.add_argument("--chain", required=True,
                         help="run_maser HDF5 chain with global samples.")
-    parser.add_argument("--data-root", default=data_path("data", "Megamaser"))
+    add_dataset_arg(parser)
+    parser.add_argument("--data-root", default=None,
+                        help="Spot-table directory. Default: the selected "
+                             "dataset's directory.")
     parser.add_argument("--spot-batch", type=int, default=None,
                         help="Spots per quadrature batch (memory control). "
                              "Unset: auto-size from VRAM on GPU (per target, "
@@ -340,10 +346,17 @@ def main(argv=None):
 
     with open(_CONFIG_PATH, "rb") as f:
         master_cfg = tomli.load(f)
+    dataset = apply_dataset(master_cfg, args.dataset)
+    if args.data_root is None:
+        args.data_root = maser_data_root(dataset)
     if args.galaxy not in master_cfg["model"]["galaxies"]:
         raise SystemExit(f"Unknown galaxy {args.galaxy!r}.")
 
     attrs, samples = _load_chain(args.chain)
+    try:
+        check_chain_dataset(attrs, dataset, args.chain)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if _attr_bool(attrs, "fix_floors_pesce"):
         raise SystemExit(
             "the diagnostic for --fix-floors-pesce chains is not supported "

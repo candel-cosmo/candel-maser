@@ -29,10 +29,14 @@ import h5py  # noqa: E402
 import numpy as np  # noqa: E402
 import reid_chi2  # noqa: E402
 import run_map as rm  # noqa: E402
+from maser_config import apply_dataset  # noqa: E402
 
 from candel.model.maser_map import evaluate_at_globals  # noqa: E402
 
 GALAXIES = ["CGCG074-064", "NGC5765b", "UGC3789", "NGC6264", "NGC6323"]
+
+# Scores the published chains, which live under results/Megamaser/<this>/.
+DATASET = "original_published"
 # Published this-work-minus-P20 Delta lnP_2D (main.tex, sec:results_disc),
 # for a consistency check against the values read back from the logs.
 PAPER_DLNP = {"NGC5765b": 48.9, "CGCG074-064": 18.7, "UGC3789": 14.5,
@@ -75,12 +79,13 @@ def _chi2(gal, target, ctx, gdict):
 
 
 def main():
+    apply_dataset(rm._MASTER_CFG, DATASET)
     rows = []
     for gal in GALAXIES:
         try:
             gcfg = rm._MASTER_CFG["model"]["galaxies"][gal]
-            model, target, _ = rm._build_target(gal, gcfg, None)
-            ctx = reid_chi2.loglik_context(gal, model.n_spots)
+            model, target, _ = rm._build_target(gal, gcfg, None, DATASET)
+            ctx = reid_chi2.loglik_context(gal, model.n_spots, DATASET)
             med_glob = _median_globals(gal, target)
             ours = _chi2(gal, target, ctx, med_glob)
             p20 = _chi2(gal, target, ctx, rm._pesce_globals(target, gal))

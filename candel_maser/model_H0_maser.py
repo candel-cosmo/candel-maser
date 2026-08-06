@@ -444,6 +444,7 @@ class MaserDiskModel(ModelBase):
         Returns the galaxy config dict.
         """
         gname = data.get("galaxy_name", "")
+        self.galaxy_name = gname
         gal_cfg = get_nested(self.config, f"model/galaxies/{gname}", {})
         self._configure_features(gal_cfg)
         self._configure_mass_parameterization(gal_cfg)

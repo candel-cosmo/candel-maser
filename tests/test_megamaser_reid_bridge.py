@@ -16,6 +16,27 @@ import pesce_globals as pg  # noqa: E402
 import run_reid_mcmc as rr  # noqa: E402
 
 
+def test_legacy_reid_artifacts_are_original_published(tmp_path):
+    control = tmp_path / "control.inp"
+    control.write_text("! legacy control\n")
+    assert rr.reid_control_dataset(control) == "original_published"
+
+    init = REID_DIR / "mystart_globals.toml"
+    with pytest.raises(ValueError, match="original_published.*fiducial"):
+        rr.load_reid_init(
+            init, galaxy="NGC6323", variant="init", dataset="fiducial")
+
+
+def test_reid_control_dataset_marker_and_default_paths(tmp_path):
+    control = tmp_path / "control.inp"
+    control.write_text("! CANDEL dataset: fiducial\n")
+    assert rr.reid_control_dataset(control) == "fiducial"
+    assert rr.reid_control_path(
+        "NGC6323", "original_published").name == "reid_control_NGC6323.inp"
+    assert rr.reid_control_path(
+        "NGC6323", "fiducial").name == "reid_control_fiducial_NGC6323.inp"
+
+
 def test_scalar_reid_distance_uses_literal_fortran_mapping():
     v = 472.911
     H0 = 62.733

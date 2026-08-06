@@ -20,7 +20,7 @@ occupies one COLUMN and its two sampler variants are stacked vertically:
 The two panels in a column share their distance axis, so the change in
 inter-chain agreement is read directly.  Each galaxy's twelve chains share ONE
 starting point and differ only in their random seed, so any inter-chain spread
-is the sampler alone (see ``docs/reid_fit_disk_modifications.md``).
+is the sampler alone (see ``docs/notes/reid_fit_disk_modifications.md``).
 
 Curves in every panel
 ---------------------
@@ -42,15 +42,15 @@ Data sources
                    read off the ``D_Mpc`` row of ``<GALAXY>_<variant>_global_
                    summary.txt`` (numpyro; same diagnostic as the CANDEL
                    summaries), so the annotated numbers are never hand-entered.
-    CANDEL      : ``results/Megamaser/<GALAXY>/<GALAXY>_blackjax_mcmc_rphi_
-                   initreid.hdf5``, distance samples ``samples/D_A`` (Mpc),
-                   directly comparable to Reid's ``D_Mpc``.
+    CANDEL      : ``results/Megamaser/<dataset>/<GALAXY>/<GALAXY>_blackjax_
+                   mcmc_rphi_initreid.hdf5``, distance samples ``samples/D_A``
+                   (Mpc), directly comparable to Reid's ``D_Mpc``.
 
 Run
 ---
     python plot_reid_chain_nonmixing.py --outdir figs
     # writes the three figures listed above into <outdir>
-    # optional: --sweep <dir>  --candel-root <results/Megamaser>
+    # optional: --sweep <dir>  --dataset <name>  --candel-root <dir>
 """
 import argparse
 import sys
@@ -64,6 +64,8 @@ import scienceplots  # noqa: F401
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_gibbs_comparison import load_variant_chains  # noqa: E402
+from run_reid_mcmc import (DEFAULT_CONFIG, add_dataset_arg,  # noqa: E402
+                           load_toml, resolve_dataset)
 
 ROOT = HERE.parents[2]
 SWEEP = ROOT / "results/Megamaser/reid_mcmc/gibbs_sweep_20260705_014726"
@@ -154,9 +156,16 @@ def plot_group(subset, chains, cand, diag, out):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Per-chain distance grids.")
     ap.add_argument("--sweep", type=Path, default=SWEEP)
-    ap.add_argument("--candel-root", type=Path, default=CANDEL_ROOT)
+    add_dataset_arg(ap)
+    ap.add_argument("--candel-root", type=Path, default=None,
+                    help="CANDEL results root (default: "
+                         "results/Megamaser/<dataset>).")
     ap.add_argument("--outdir", type=Path, default=HERE)
     args = ap.parse_args(argv)
+
+    if args.candel_root is None:
+        args.candel_root = CANDEL_ROOT / resolve_dataset(
+            load_toml(DEFAULT_CONFIG), args.dataset)
 
     label = dict(GALAXIES)
     chains, cand, diag = {}, {}, {}

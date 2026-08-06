@@ -40,7 +40,9 @@ from convergence_utils import (build_model, ensure_grad_sample,  # noqa: E402
                                extend_grad_params, jax_phys_from_sample,
                                resolve_grid_for_galaxy)
 
-from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
+from candel.pvdata.megamaser_data import (  # noqa: E402
+    load_megamaser_spots, maser_data_root)
+from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
 
@@ -262,6 +264,7 @@ def main():
                         "|AD| and |FD| are below this")
     p.add_argument("--skip-full-pipeline", action="store_true",
                    help="Skip check B (slower, traces through grid builder)")
+    add_dataset_arg(p)
     args = p.parse_args()
 
     os.system("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"
@@ -272,6 +275,7 @@ def main():
 
     with open(CONFIG_PATH, "rb") as fh:
         master_cfg = tomli.load(fh)
+    apply_dataset(master_cfg, args.dataset)
     galaxies_cfg = master_cfg["model"]["galaxies"]
 
     # ── Build model ──
@@ -403,7 +407,7 @@ def main():
 
         data_sub = subsample_data(
             load_megamaser_spots(
-                master_cfg["io"]["maser_data"]["root"],
+                maser_data_root(master_cfg["io"]["dataset"]),
                 galaxy=args.galaxy,
                 v_sys_obs=galaxies_cfg[args.galaxy]["v_sys_obs"]),
             n_total=_N_CHECKB_SPOTS)

@@ -20,14 +20,31 @@ axis so the intermediate fits on a 12 GB GPU.
 """
 
 from functools import partial
+import os
+import sys
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import tomli
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
 from candel.util import get_nested
+
+MASER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if MASER_DIR not in sys.path:
+    sys.path.insert(0, MASER_DIR)
+
+from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
+
+
+def load_master_config(path, dataset=None):
+    """Load the base megamaser config and apply its selected dataset."""
+    with open(path, "rb") as f:
+        cfg = tomli.load(f)
+    apply_dataset(cfg, dataset)
+    return cfg
 
 
 def cast_floats(x, dtype):
@@ -269,7 +286,8 @@ def build_model(galaxy, master_cfg, dtype=None, **overrides):
 
     import tomli_w
 
-    from candel.pvdata.megamaser_data import load_megamaser_spots
+    from candel.pvdata.megamaser_data import (load_megamaser_spots,
+                                              maser_data_root)
 
     cfg = {k: (v.copy() if isinstance(v, dict) else v)
            for k, v in master_cfg.items()}
@@ -290,7 +308,7 @@ def build_model(galaxy, master_cfg, dtype=None, **overrides):
         cfg["model"][k] = v
 
     data = load_megamaser_spots(
-        master_cfg["io"]["maser_data"]["root"], galaxy=galaxy,
+        maser_data_root(master_cfg["io"]["dataset"]), galaxy=galaxy,
         v_sys_obs=master_cfg["model"]["galaxies"][galaxy]["v_sys_obs"])
     for key in ("D_lo", "D_hi"):
         if key in master_cfg["model"]["galaxies"][galaxy]:

@@ -91,8 +91,8 @@ def _optimise_latents(perspot, theta, r_ang, phi, lo, hi, ctr, nm_opts,
     # jit a scalar objective instead.
     if rng is None:
         rng = np.random.default_rng(0)
-    r_vec = np.asarray(r_ang, dtype=np.float64).copy()
-    phi_vec = np.asarray(phi, dtype=np.float64).copy()
+    r_vec = np.asarray(r_ang).copy()
+    phi_vec = np.asarray(phi).copy()
     for i in range(r_vec.shape[0]):
         a_lo, a_hi, a_ctr = float(lo[i]), float(hi[i]), float(ctr[i])
         logr_i = np.log(max(r_vec[i], 1e-6))
@@ -170,19 +170,21 @@ def evaluate_at_globals(target, globals_point, *, init_r_ang=None,
     model = target.model
     # Build theta directly from the fixed globals -- no unconstrain round-trip,
     # so out-of-prior published globals still yield a well-defined chi^2.
-    gp = {n: jnp.asarray(globals_point[n], dtype=jnp.float64)
-          for n in target.names}
+    use_x64 = jax.config.jax_enable_x64
+    dtype = jnp.float64 if use_x64 else jnp.float32
+    np_dtype = np.float64 if use_x64 else np.float32
+    gp = {n: jnp.asarray(globals_point[n], dtype=dtype) for n in target.names}
     theta = target.complete_params(gp)
     phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
-    dtype = jnp.float64
 
     if init_r_ang is not None:
-        r_ang = np.asarray(init_r_ang, dtype=np.float64)
+        r_ang = np.asarray(init_r_ang, dtype=np_dtype)
     else:
         r_ang = np.asarray(model.conditional_r_ang_map(phys_args, phys_kw),
-                           dtype=np.float64)
-    phi = np.asarray(_initial_phi(model, dtype), dtype=np.float64)
-    lo, hi, ctr = (np.asarray(a) for a in _phi_support_arrays(model, dtype))
+                           dtype=np_dtype)
+    phi = np.asarray(_initial_phi(model, dtype), dtype=np_dtype)
+    lo, hi, ctr = (np.asarray(a, dtype=np_dtype)
+                   for a in _phi_support_arrays(model, dtype))
 
     perspot = _make_perspot_eval(target)
     nm_opts = dict(maxiter=nm_maxiter, xatol=1e-7, fatol=1e-7)

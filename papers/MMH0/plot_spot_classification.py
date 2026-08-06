@@ -12,7 +12,7 @@ from os.path import abspath, dirname, join
 
 import numpy as np
 
-from candel.pvdata.megamaser_data import load_megamaser_spots
+from candel.pvdata.megamaser_data import load_megamaser_spots, maser_data_root
 
 sys.path.insert(0, dirname(abspath(__file__)))
 from spot_classification import plot_spot_classification  # noqa: E402
@@ -20,6 +20,7 @@ from spot_classification import plot_spot_classification  # noqa: E402
 REPO = abspath(join(dirname(__file__), "..", ".."))
 CONFIG = join(REPO, "scripts", "megamaser", "config_maser.toml")
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
+DATASET = "original_published"
 
 # Display name -> config key.
 GALAXIES = {
@@ -31,7 +32,7 @@ GALAXIES = {
 with open(CONFIG, "rb") as f:
     cfg = tomllib.load(f)["model"]["galaxies"]
 
-root = join(REPO, "data", "Megamaser")
+root = maser_data_root(DATASET)
 galaxies = [
     (disp, load_megamaser_spots(root, key, v_sys_obs=cfg[key]["v_sys_obs"]))
     for disp, key in GALAXIES.items()

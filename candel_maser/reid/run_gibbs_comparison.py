@@ -6,8 +6,8 @@ each as several parallel chains via run_gibbs_chains.sh, then report
 genuine multi-chain Gelman-Rubin R-hat and make the CANDEL vs Reid
 overlay plots.
 
-The Reid data file (data/Megamaser/<galaxy>_loader_reid.inp) is generated
-automatically if missing.
+The Reid data file (data/Megamaser/<dataset>/<galaxy>_loader_reid.inp) is
+generated automatically if missing.
 
 Modes:
   default        run chains AND the R-hat/summaries/plots post-processing
@@ -35,10 +35,12 @@ import prepare_reid_data  # noqa: E402
 from compare_reid_candel import (DEFAULT_CONFIG, SHARED,  # noqa: E402
                                  candel_to_reid, overlay_distance_histogram,
                                  overlay_three, per_chain_distance_histogram)
-from run_reid_mcmc import (GLOBAL_NAMES, compute_reid_r_ref,  # noqa: E402
-                           load_chain, load_galaxy_config,
-                           numpyro_summary_text, parse_data_rows, reid_D_A,
-                           reid_H0, set_control_numbers)
+from run_reid_mcmc import (GLOBAL_NAMES, add_dataset_arg,  # noqa: E402
+                           compute_reid_r_ref, load_chain, load_galaxy_config,
+                           load_toml, numpyro_summary_text, parse_data_rows,
+                           reid_D_A, reid_H0, reid_control_dataset,
+                           reid_control_path, reid_data_path, resolve_dataset,
+                           set_control_numbers)
 
 ROOT = HERE.parents[2]
 RUN_SCRIPT = HERE / "run_gibbs_chains.sh"
@@ -86,12 +88,12 @@ def _banner(title):
     print(f"\n{line}\n{title}\n{line}")
 
 
-def run_identity(g, args):
-    """One-line run identity (galaxy, init source, eta/floor/reweight
+def run_identity(g, args, dataset):
+    """One-line run identity (galaxy, dataset, init source, eta/floor/reweight
     toggles) stamped on every printed section and saved artifact, so a
     report or log excerpt is self-describing without needing the
-    filename's tag suffix."""
-    bits = [f"galaxy={g}", f"init={args.init}",
+    filename's tag suffix (the Reid output tree is not dataset-namespaced)."""
+    bits = [f"galaxy={g}", f"dataset={dataset}", f"init={args.init}",
             f"eta={'on' if args.eta else 'off'}"]
     if args.H0_range:
         bits.append(f"H0={args.H0_range[0]:g}-{args.H0_range[1]:g}")
@@ -172,7 +174,7 @@ def ks_block(reid_pooled, cand):
     return "\n".join(lines)
 
 
-def pesce_reid_globals(galaxy, config, data):
+def pesce_reid_globals(galaxy, config, data, dataset):
     """Published Pesce/Reid disk point in Reid GLOBAL_NAMES convention, with
     the warp angles evaluated at the data-derived reid_r_ref.
 
@@ -183,8 +185,8 @@ def pesce_reid_globals(galaxy, config, data):
     import math
 
     import pesce_globals  # local: pulls jax/astropy, only for --init pesce
-    master = {"model": {"galaxies": {galaxy: load_galaxy_config(config,
-                                                                galaxy)}}}
+    master = {"model": {"galaxies": {galaxy: load_galaxy_config(
+        config, galaxy, dataset=dataset)}}}
     point, missing = pesce_globals.paper_point(galaxy, master)
     if point is None:
         sys.exit(f"[ERROR] no published Pesce point for {galaxy} "
@@ -276,10 +278,11 @@ def main(argv=None):
     p.add_argument("--galaxy", default="NGC6323")
     p.add_argument("--variant", default="init", choices=["init", "init_qw"])
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    add_dataset_arg(p)
     p.add_argument("--control-template", type=Path, default=None,
                    help="fit_disk_control.inp with this galaxy's priors "
-                        "(default: reid_control_<galaxy>.inp next to this "
-                        "script)")
+                        "(default: the selected dataset's control next to "
+                        "this script)")
     p.add_argument("--init", choices=["config", "pesce"], default="config",
                    help="chain start point: 'config' uses the control "
                         "template's value column (CANDEL config globals in "
@@ -376,12 +379,25 @@ def main(argv=None):
            + ("_origfloor" if args.match_priors == "orig" else "")
            + (f"_h0{args.H0_range[0]:g}_{args.H0_range[1]:g}"
               if args.H0_range else ""))
-    control_template = args.control_template or HERE / f"reid_control_{g}.inp"
-    data = args.data or ROOT / f"data/Megamaser/{g}_loader_reid.inp"
+    dataset = resolve_dataset(load_toml(args.config), args.dataset)
+    control_template = args.control_template or reid_control_path(g, dataset)
+    data = args.data or reid_data_path(g, dataset)
     suffix = "_qw" if args.variant == "init_qw" else ""
     candel = args.candel or (
-        ROOT / "results/Megamaser"
+        ROOT / "results/Megamaser" / dataset
         / f"{g}/{g}_blackjax_mcmc_rphi{suffix}_initreid.hdf5")
+
+    if not Path(control_template).exists():
+        sys.exit(f"[ERROR] missing control template: {control_template}")
+    try:
+        control_dataset = reid_control_dataset(control_template)
+    except ValueError as exc:
+        sys.exit(f"[ERROR] {exc}")
+    if control_dataset != dataset:
+        sys.exit(
+            f"[ERROR] {control_template} was generated for dataset "
+            f"{control_dataset!r}, not {dataset!r}; regenerate it with "
+            f"make_reid_control.py --dataset {dataset}")
 
     if not Path(data).exists():
         # generated artifact (data/ is untracked); rebuild it in place.
@@ -390,10 +406,10 @@ def main(argv=None):
         print(f"[INFO] generating Reid data file: {data}")
         Path(data).parent.mkdir(parents=True, exist_ok=True)
         tmp = f"{data}.tmp{os.getpid()}"
-        prepare_reid_data.main([g, "--out", tmp])
+        prepare_reid_data.main([g, "--out", tmp, "--dataset", dataset])
         os.replace(tmp, data)
 
-    checks = [(control_template, "control template"), (data, "data file")]
+    checks = [(data, "data file")]
     if not args.chains_only:
         checks.append((candel, "CANDEL posterior"))
     for pth, label in checks:
@@ -402,7 +418,7 @@ def main(argv=None):
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    identity = run_identity(g, args)
+    identity = run_identity(g, args, dataset)
 
     if args.init == "pesce":
         # reid_control_<g>_pesce.inp lives in --out-dir (not next to this
@@ -415,7 +431,7 @@ def main(argv=None):
             # point. Write-to-temp + atomic replace: concurrent per-variant
             # cluster jobs sharing an --out-dir all regenerate the same
             # deterministic file.
-            glob, r_ref = pesce_reid_globals(g, args.config, data)
+            glob, r_ref = pesce_reid_globals(g, args.config, data, dataset)
             tmp = f"{pesce_ctrl}.tmp{os.getpid()}"
             write_pesce_control(control_template, tmp, glob)
             os.replace(tmp, pesce_ctrl)
@@ -473,7 +489,8 @@ def main(argv=None):
     # test and the overlays (not available in --chains-only mode).
     cand = None
     if not args.chains_only:
-        cand = candel_to_reid(candel, g, args.config, args.variant, data)
+        cand = candel_to_reid(candel, g, args.config, args.variant, data,
+                              dataset)
 
     _banner(f"R-hat -- {identity}")
     header = f"{'variant':14s}" + "".join(f"{k:>16s}" for k in PARAMS)

@@ -22,19 +22,25 @@ jax.config.update("jax_enable_x64", True)
 import numpy as np  # noqa: E402
 import reid_chi2  # noqa: E402
 import run_map as rm  # noqa: E402
+from maser_config import apply_dataset  # noqa: E402
 
 from candel.model.maser_map import evaluate_at_globals  # noqa: E402
 
 GALAXIES = ["CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789"]
 
+# Scores the published chains, which live under results/Megamaser/<this>/.
+DATASET = "original_published"
+
 
 def main():
+    apply_dataset(rm._MASTER_CFG, DATASET)
     rows = []
     for gal in GALAXIES:
         try:
             gcfg = rm._MASTER_CFG["model"]["galaxies"][gal]
-            model, target, init = rm._build_target(gal, gcfg, None)
-            ctx = reid_chi2.loglik_context(gal, model.n_spots)   # build once
+            model, target, init = rm._build_target(gal, gcfg, None, DATASET)
+            ctx = reid_chi2.loglik_context(          # build once
+                gal, model.n_spots, DATASET)
 
             # Points to score: DE/config globals (r seeded from config) and the
             # reported Pesce 2020 globals (r from the conditional r-MAP).

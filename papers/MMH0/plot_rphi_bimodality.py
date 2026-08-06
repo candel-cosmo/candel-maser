@@ -35,11 +35,13 @@ from matplotlib.colors import PowerNorm  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "convergence"))
 from convergence_utils import build_model  # noqa: E402
+from maser_config import apply_dataset, check_chain_dataset  # noqa: E402
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
 GALAXY = "NGC5765b"
-HDF5 = ("results/Megamaser/NGC5765b/"
-        "NGC5765b_blackjax_mcmc_rphi_initconfig.hdf5")
+DATASET = "original_published"
+HDF5 = (f"results/Megamaser/{DATASET}/{GALAXY}/"
+        f"{GALAXY}_blackjax_mcmc_rphi_initconfig.hdf5")
 # Global keys whose posterior median pins the disc; eta drives the mass under
 # mass_parameterization == "eta".
 GLOBAL_KEYS = ("D_A", "D_c", "eta", "log_MBH", "i0", "di_dr", "Omega0",
@@ -50,6 +52,7 @@ GLOBAL_KEYS = ("D_A", "D_c", "eta", "log_MBH", "i0", "di_dr", "Omega0",
 
 def median_globals(path):
     with h5py.File(path, "r") as f:
+        check_chain_dataset(f.attrs, DATASET, path)
         s = f["samples"]
         return {k: float(np.median(np.asarray(s[k]).ravel()))
                 for k in GLOBAL_KEYS if k in s}
@@ -225,6 +228,7 @@ def main():
 
     with open(CONFIG_PATH, "rb") as f:
         master_cfg = tomli.load(f)
+    apply_dataset(master_cfg, DATASET)
     sample = median_globals(HDF5)
     print("median globals:", {k: round(v, 3) for k, v in sample.items()})
 

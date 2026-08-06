@@ -35,6 +35,7 @@ MATCH_REID=false
 FIX_FLOORS_PESCE=false
 LOO_DROPPED=""
 
+DATASET=""
 ALWAYS_ARGS=()
 SINGLE_ARGS=()
 VARIANT_ARGS=()       # --add-ecc/--add-quadratic-warp: valid for single + joint
@@ -63,6 +64,11 @@ Required:
                          (glamdring CPU: redwood|berg|cmb;
                          glamdring GPU: gpulong|cmbgpu|optgpu;
                          arc: short|medium|long).
+  --dataset original_published|fiducial
+                         Spot-table dataset. Default: [io].dataset from
+                         config_maser.toml (original_published). Selects the tables,
+                         the init_<dataset>.toml best points, and the
+                         <root_output>/<dataset>/ results namespace.
   --galaxy GAL[,GAL,...]|all
                          Galaxy/galaxies to submit.
                          Choices: $ALL_GALS
@@ -328,6 +334,7 @@ while [[ $# -gt 0 ]]; do
         --skip-done) SKIP_DONE=true; shift ;;
         --infer-H0) INFER_H0=true; shift ;;
         --evidence) EVIDENCE=true; shift ;;
+        --dataset) DATASET="$2"; ALWAYS_ARGS+=("$1" "$2"); shift 2 ;;
         --f64) ALWAYS_ARGS+=("--f64"); shift ;;
         --seed) ALWAYS_ARGS+=("--seed" "$2"); shift 2 ;;
         --Vext)
@@ -661,10 +668,16 @@ done
 GALAXY="${expanded_galaxies[*]}"
 
 RUNNER="$ROOT/scripts/megamaser/run_maser.py"
+[[ -z "$DATASET" ]] && DATASET="$(config_value io dataset)"
+[[ -z "$DATASET" ]] && DATASET="original_published"
+# Short tag so the same galaxy can run on both datasets concurrently without
+# colliding on job name or scheduler-log destination.
+ds_tag="${DATASET%%_*}"
+
 case "$SAMPLER" in
-    de) JOB_PREFIX="maser_de" ;;
-    mcmc) JOB_PREFIX="maser_mcmc" ;;
-    *) JOB_PREFIX="maser_mcmc" ;;
+    de) JOB_PREFIX="maser_de_${ds_tag}" ;;
+    mcmc) JOB_PREFIX="maser_mcmc_${ds_tag}" ;;
+    *) JOB_PREFIX="maser_mcmc_${ds_tag}" ;;
 esac
 
 # Local runs are tee'd to a per-run log under the galaxy's output subdir, so the
@@ -682,7 +695,9 @@ maser_root_output="$(
     ' "$ROOT/scripts/megamaser/config_maser.toml" 2>/dev/null || true
 )"
 [[ -z "$maser_root_output" ]] && maser_root_output="results/Maser"
-MASER_OUT="$ROOT/$maser_root_output"
+# run_maser.py/run_de_map.py namespace root_output by dataset, so mirror that
+# here or the chain and log paths below point at the wrong dataset.
+MASER_OUT="$ROOT/$maser_root_output/$DATASET"
 stamp="$(date '+%Y%m%d_%H%M%S')"
 
 if [[ "$EVIDENCE" == true ]]; then
@@ -701,7 +716,7 @@ if [[ "$EVIDENCE" == true ]]; then
                 exit 1
             fi
         fi
-        evidence_args=(--chain "$chain")
+        evidence_args=(--chain "$chain" --dataset "$DATASET")
         [[ -n "$GPU_MEM" ]] && evidence_args+=(--gpu-mem "$GPU_MEM")
         [[ -n "$SPOT_BATCH" ]] && evidence_args+=(--spot-batch "$SPOT_BATCH")
         [[ ${#PASSTHRU_ARGS[@]} -gt 0 ]] && evidence_args+=("${PASSTHRU_ARGS[@]}")

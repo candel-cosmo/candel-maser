@@ -49,6 +49,10 @@ if needed:
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
 with open(_CONFIG_PATH, "rb") as f:
     master_cfg = tomli.load(f)
@@ -96,8 +100,10 @@ from candel.model.maser_blackjax import (  # noqa: E402
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
 from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
 from candel.pvdata.megamaser_data import (  # noqa: E402
-    megamaser_velocity_frame, v_sys_from_cmb)
-from candel.util import data_path, fprint, fsection, results_path  # noqa: E402
+    maser_data_root, megamaser_velocity_frame, v_sys_from_cmb)
+from candel.util import fprint, fsection, results_path  # noqa: E402
+from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
+                          check_init_block)
 
 # Per-observable noise floors held fixed by --fix-floors-pesce, with units.
 _PESCE_FLOOR_UNITS = (("sigma_x_floor", "uas"), ("sigma_y_floor", "uas"),
@@ -205,6 +211,7 @@ def _strip_sampler_arg(argv):
 
 
 def _clean_init(model, init_cfg):
+    check_init_block(init_cfg, model)
     init_params = {key: jnp.asarray(value) for key, value in init_cfg.items()}
     init_params.pop("H0", None)
     init_params.pop("sigma_pec", None)
@@ -999,7 +1006,8 @@ def _add_logZ_2x(rows, model, init, galaxy, data_root, spot_batch):
         fprint("2x-grid logZ check: building doubled quadrature target...")
         target2x = _grid_scaled_target(
             model, _h_ref(model), init, galaxy,
-            data_root or data_path("data", "Megamaser"), spot_batch, 2)
+            data_root or maser_data_root(master_cfg["io"]["dataset"]),
+            spot_batch, 2)
     except Exception as exc:                           # diagnostic only
         fprint(f"2x-grid logZ unavailable: {exc}")
         return
@@ -1026,12 +1034,15 @@ _REID_GLOBAL_INIT_KEYS = (
 _REID_SCATTER_DRAWS = 20
 
 
-def _reid_loglik_context(galaxy, n_spots):
+def _reid_loglik_context(galaxy, n_spots, dataset=None):
     """Import the f2py Reid likelihood and build its data once.
 
-    Returns ``(rp, rr, d)`` or None if the Reid likelihood (reidlik) is not
-    built in this environment (e.g. on the cluster) or the spot count differs.
+    Returns ``(rp, rr, d, dataset)`` or None if the Reid likelihood (reidlik)
+    is not built in this environment (e.g. on the cluster) or the spot count
+    differs.
     """
+    if dataset is None:
+        dataset = master_cfg["io"]["dataset"]
     helper_dir = os.path.join(os.path.dirname(__file__), "check_reid")
     for p in (helper_dir, os.path.join(helper_dir, "reidlik_build")):
         if p not in sys.path:
@@ -1046,13 +1057,15 @@ def _reid_loglik_context(galaxy, n_spots):
 
     rp.setup_numbers()
     inp = os.path.join(tempfile.gettempdir(), f"{galaxy}_reid_scatter.inp")
-    prepare_reid_data.main([galaxy, "--out", inp])
+    # Without forwarding the dataset this regenerates the .inp from whichever
+    # one the config defaults to, silently scoring against the wrong table.
+    prepare_reid_data.main([galaxy, "--out", inp, "--dataset", dataset])
     d = rp.build_data(inp)
     if d["N"] != int(n_spots):
         fprint(f"skipping Reid scatter: spot count mismatch "
                f"(Reid {d['N']} vs CANDEL {n_spots}).")
         return None
-    return rp, rr, d
+    return rp, rr, d, dataset
 
 
 def _reid_h0_for_D_A(rp, g, D_A):
@@ -1088,7 +1101,7 @@ def _reid_neg_half_chi2(ctx, galaxy, point, r_ang, phi, D_A=None):
     pure additive constants that say nothing about the fit and are excluded
     here.  chi^2 is dimensionless, so the result is convention-free.
     """
-    rp, rr, d = ctx
+    rp, rr, d, dataset = ctx
     r_ang = np.asarray(r_ang, dtype=float)
     init_block = {k: float(point[k]) for k in _REID_GLOBAL_INIT_KEYS
                   if k in point and np.asarray(point[k]).ndim == 0}
@@ -1096,7 +1109,11 @@ def _reid_neg_half_chi2(ctx, galaxy, point, r_ang, phi, D_A=None):
     tomli_w.dump({"model": {"galaxies": {galaxy: {"init": init_block}}}}, tmp)
     tmp.close()
     try:
-        reid_init = rr.load_toml_init(rr.Path(tmp.name), galaxy, 0.0)
+        # This fragment carries only the point, so the warp pivots must come
+        # from the dataset file; without it they default to 0 and
+        # shift_warp_pivots silently skips the shift.
+        reid_init = rr.load_toml_init(rr.Path(tmp.name), galaxy, 0.0,
+                                      dataset=dataset)
     finally:
         os.unlink(tmp.name)
     g = rp.with_derived(rr.shift_warp_pivots(
@@ -1363,7 +1380,8 @@ def _variant_suffix(model, args, init_strategy):
     return "_" + "_".join(parts)
 
 
-def _run_evidence_subprocess(galaxy, chain_path, data_root, spot_batch):
+def _run_evidence_subprocess(galaxy, chain_path, data_root, spot_batch,
+                             dataset=None):
     """Compute the finite-support marginal-objective diagnostic.
 
     Spawned as a separate process so the float64 reference grid (a global JAX
@@ -1376,6 +1394,8 @@ def _run_evidence_subprocess(galaxy, chain_path, data_root, spot_batch):
         os.path.dirname(os.path.abspath(__file__)),
         "evidence_single_galaxy.py")
     cmd = [sys.executable, "-u", script, galaxy, "--chain", chain_path]
+    if dataset:
+        cmd += ["--dataset", dataset]
     if data_root:
         cmd += ["--data-root", data_root]
     if spot_batch is not None:
@@ -1402,8 +1422,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Run one megamaser disk inference job.")
     parser.add_argument("galaxy", type=str)
-    parser.add_argument("--data-root", type=str,
-                        default=data_path("data", "Megamaser"))
+    add_dataset_arg(parser)
+    parser.add_argument("--data-root", type=str, default=None,
+                        help="Spot-table directory. Default: the selected "
+                             "dataset's directory.")
     parser.add_argument("--num-warmup", type=int, default=None)
     parser.add_argument("--num-samples", type=int, default=None)
     parser.add_argument("--num-chains", type=int, default=None,
@@ -1435,6 +1457,13 @@ def main(argv=None):
     parser.add_argument("--reflect-prob", type=float, default=None,
                         help="High-velocity phi reflection proposal "
                              "probability for --sampler mcmc.")
+    phi_transport = parser.add_mutually_exclusive_group()
+    phi_transport.add_argument(
+        "--transport-systemic-phi", dest="transport_systemic_phi",
+        action="store_true", default=None)
+    phi_transport.add_argument(
+        "--no-transport-systemic-phi", dest="transport_systemic_phi",
+        action="store_false")
     parser.add_argument("--max-tree-depth", type=int, default=None)
     parser.add_argument("--no-ecc", action="store_true")
     parser.add_argument("--add-ecc", action="store_true")
@@ -1475,9 +1504,9 @@ def main(argv=None):
                              "sampler_parameters/latent_scale are still "
                              "saved.")
     parser.add_argument("--map-overlay", dest="map_overlay",
-                        action="store_true", default=True,
+                        action="store_true", default=False,
                         help="Overlay the joint MAP (from the DE/config init) "
-                             "on the corner plot. On by default.")
+                             "on the corner plot. Disabled by default.")
     parser.add_argument("--no-map-overlay", dest="map_overlay",
                         action="store_false",
                         help="Disable the MAP overlay on the corner plot.")
@@ -1492,10 +1521,15 @@ def main(argv=None):
             "--no-quadratic-warp and --add-quadratic-warp are mutually "
             "exclusive.")
 
+    dataset = apply_dataset(master_cfg, args.dataset)
+    if args.data_root is None:
+        args.data_root = maser_data_root(dataset)
+
     galaxies = master_cfg["model"]["galaxies"]
     if args.galaxy not in galaxies:
         raise SystemExit(
             f"Unknown galaxy {args.galaxy!r}. Available: {list(galaxies)}")
+    gcfg_master = galaxies[args.galaxy]
     if args.match_reid:
         _apply_reid_physics_constants()
 
@@ -1527,12 +1561,24 @@ def main(argv=None):
     n_inner = (
         args.n_inner if args.n_inner is not None
         else _required_inference(inf_cfg, "n_inner"))
+    sample_n_inner = (
+        n_inner if args.n_inner is not None
+        else gcfg_master.get(
+            "mcmc_sample_n_inner", inf_cfg.get("sample_n_inner", n_inner)))
+    transport_systemic_phi = (
+        bool(args.transport_systemic_phi)
+        if args.transport_systemic_phi is not None else bool(
+            gcfg_master.get(
+                "mcmc_transport_systemic_phi",
+                inf_cfg.get("transport_systemic_phi", False))))
     target_accept_r = (
         args.target_accept_r if args.target_accept_r is not None
         else _required_inference(inf_cfg, "target_accept_r"))
     target_accept_theta = (
         args.target_accept_theta if args.target_accept_theta is not None
-        else _required_inference(inf_cfg, "target_accept_theta"))
+        else gcfg_master.get(
+            "mcmc_target_accept_theta",
+            _required_inference(inf_cfg, "target_accept_theta")))
     phi_step_size = (
         args.phi_step_size if args.phi_step_size is not None
         else _required_inference(inf_cfg, "phi_step_size"))
@@ -1556,7 +1602,6 @@ def main(argv=None):
             "config/reid (theta is held fixed during burn-in).")
         latent_burnin = 0
 
-    gcfg_master = galaxies[args.galaxy]
     fsection(f"Loading {args.galaxy} data")
     data = load_megamaser_spots(
         args.data_root, args.galaxy, v_sys_obs=gcfg_master["v_sys_obs"])
@@ -1653,9 +1698,11 @@ def main(argv=None):
     fprint(f"JAX backend: {backend}; precision: {precision}")
     fprint(f"spots={model.n_spots}; chains={num_chains}; warmup={num_warmup}; "
            f"samples={num_samples}; n_inner={n_inner}; "
+           f"sample_n_inner={sample_n_inner}; "
            f"latent_burnin={latent_burnin}")
     fprint(f"target_accept_theta={target_accept_theta}; "
            f"target_accept_latent={target_accept_r}")
+    fprint(f"transport_systemic_phi={transport_systemic_phi}")
     fprint(f"global kernel: NUTS; max_tree_depth={max_tree_depth}")
     fprint(f"phi_step_size={phi_step_size}; reflect_prob={reflect_prob}")
     fprint("phi: sampled explicitly")
@@ -1678,6 +1725,8 @@ def main(argv=None):
         reflect_prob=reflect_prob,
         max_num_doublings=max_tree_depth,
         num_latent_burnin=latent_burnin,
+        sample_n_inner=sample_n_inner,
+        transport_systemic_phi=transport_systemic_phi,
         progress_bar=True,
         jit_steps=True,
     )
@@ -1706,6 +1755,8 @@ def main(argv=None):
         "init_strategy": str(init_strategy),
         "chain_method": "sequential" if num_chains > 1 else "single",
         "n_inner": int(n_inner),
+        "sample_n_inner": int(sample_n_inner),
+        "transport_systemic_phi": bool(transport_systemic_phi),
         "latent_burnin": int(latent_burnin),
         "target_accept_r": float(target_accept_r),
         "initial_step_size": float(initial_step_size),
@@ -1713,6 +1764,7 @@ def main(argv=None):
         "phi_parameterization": "explicit_wrapped",
         "mass_parameterization": model.mass_parameterization,
         "D_c_prior": "uniform_D_A",
+        "dataset": str(dataset),
         "use_quadratic_warp": bool(model.use_quadratic_warp),
         "use_ecc": bool(model.use_ecc),
         "runtime_seconds": float(result.runtime_seconds),
@@ -1752,15 +1804,11 @@ def main(argv=None):
             args.galaxy, master_cfg, model, result, init_cfg, init_params,
             args.spot_batch, data_root=args.data_root,
             scatter_path=scatter_path, compare_reid_2x=args.compare_reid_2x))
-    else:
-        text = ("skipping Pesce/Reid fixed-global comparison "
-                "(pass --compare-reid to enable).")
-        fprint(text)
-        report_sections.append("\nMCMC/Pesce comparison\n  " + text + "\n")
     _write_run_summary(summary_path, report_sections)
     if args.compute_evidence:
         _run_evidence_subprocess(
-            args.galaxy, outpath, args.data_root, args.spot_batch)
+            args.galaxy, outpath, args.data_root, args.spot_batch,
+            dataset=dataset)
 
     corner_path = os.path.splitext(outpath)[0] + "_corner.png"
     corner_unsmoothed_path = (
@@ -1782,18 +1830,18 @@ def main(argv=None):
                 init_r_ang=np.asarray(de_r) if de_r is not None else None,
                 marginal=False, verbose=False)
             corner_map = map_res["point"]
-            # Compute the MAP chi^2 both ways: CANDEL and the original Reid
-            # Fortran (reidlik), at the same globals + optimised latents.
             chi2_line = f"MAP (DE globals): chi2_CANDEL={map_res['chi2']:.3f}"
-            ctx = _reid_loglik_context(args.galaxy, model.n_spots)
-            if ctx is not None:
-                reid_nh = _reid_neg_half_chi2(
-                    ctx, args.galaxy, map_res["point"], map_res["r_ang"],
-                    map_res["phi"], D_A=map_res.get("D_A"))
-                chi2_reid = float(-2.0 * np.asarray(reid_nh).sum())
-                rel = 100.0 * abs(map_res["chi2"] - chi2_reid) / chi2_reid
-                chi2_line += (f"  chi2_Reid_code={chi2_reid:.3f}  "
-                              f"(rel {rel:.2f}%)")
+            if args.compare_reid:
+                ctx = _reid_loglik_context(args.galaxy, model.n_spots)
+                if ctx is not None:
+                    reid_nh = _reid_neg_half_chi2(
+                        ctx, args.galaxy, map_res["point"], map_res["r_ang"],
+                        map_res["phi"], D_A=map_res.get("D_A"))
+                    chi2_reid = float(-2.0 * np.asarray(reid_nh).sum())
+                    rel = (100.0 * abs(map_res["chi2"] - chi2_reid)
+                           / chi2_reid)
+                    chi2_line += (f"  chi2_Reid_code={chi2_reid:.3f}  "
+                                  f"(rel {rel:.2f}%)")
             chi2_line += f"  chi2/dof={map_res['chi2_per_dof']:.3f}"
             fprint(chi2_line)
             # Append to the saved summary so the MCP server can read it back.
