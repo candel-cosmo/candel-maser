@@ -12,6 +12,8 @@ GALAXY=""
 SAMPLER="mcmc"
 MEM=""            # unset -> default memory request (computed post-parse)
 CPUS=""
+NUM_CHAINS=""
+CHAIN_WORKERS=""
 GPUTYPE=""
 GPU_MEM=""
 GPU_COUNT=""
@@ -57,7 +59,8 @@ Usage: $0 (--local | -q QUEUE) --galaxy GAL[,GAL,...]|all \\
 Required:
   --local                Run in the current terminal instead of submitting
                          to a batch backend.  Local runs are also tee'd to
-                         <root_output>/<gal>/logs/<gal>_<sampler><variant>_<stamp>.log
+                         <root_output>/<dataset>/<gal>/logs/
+                         <gal>_<sampler><variant>_<stamp>.log
                          (root_output from config_maser.toml [io], e.g.
                          results/Megamaser; full transcript incl. Reid/Pesce).
   -q, --queue QUEUE      Queue/partition for batch submission
@@ -118,7 +121,7 @@ Common options passed to run_maser.py:
                          selects matching distance files).
   --add-quadratic-warp   Also valid with --infer-H0 (applies to all galaxies;
                          selects matching distance files).
-  --f64                  Emergency/debug precision override.
+  --f64                  Force float64 for DE; MCMC already always uses it.
   --seed N               Random seed (all samplers; default: config
                          inference/seed). DE checkpoints are separated by seed.
   --fix-floors-pesce     Hold the five error floors fixed at the published
@@ -128,11 +131,13 @@ Common options passed to run_maser.py:
 MCMC/joint quick overrides passed to the Python runner:
   --num-warmup N
   --num-samples N
-  --num-chains N         Run N chains sequentially in one job. With the
-                         default config/reid init they all start from the
-                         same point with independent per-chain seeds and
-                         drift apart; --init-strategy median instead gives
-                         overdispersed starts.
+  --num-chains N         Run N chains in one job, concurrently up to the
+                         allocated CPU and worker limits. Every chain count
+                         defaults to the configured initial point.
+  --chain-workers N      Single-galaxy MCMC only. Run at most N chains
+                         concurrently (default: 8). Without --cpus, requests
+                         min(chains, workers) CPUs; --cpus overrides only that
+                         scheduler request.
   --output PATH
   --max-tree-depth N     NUTS max tree depth (default: config inference).
   --target-accept-theta F
@@ -270,6 +275,7 @@ config_value() {
         current == section && $0 ~ "^[[:space:]]*"key"[[:space:]]*=" {
             line = $2
             sub(/[[:space:]]*(#.*)?$/, "", line)
+            sub(/^[[:space:]]*/, "", line)
             gsub(/^[[:space:]]*["'\'']|["'\''][[:space:]]*$/, "", line)
             print line
             exit
@@ -351,7 +357,13 @@ while [[ $# -gt 0 ]]; do
             JOINT_ARGS+=("$1" "$2"); shift 2 ;;
         --init-strategy)
             INIT_STRATEGY="$2"; SINGLE_ARGS+=("$1" "$2"); shift 2 ;;
-        --num-warmup|--num-samples|--num-chains|--output|\
+        --num-chains)
+            NUM_CHAINS="$2"
+            MCMC_JOINT_ARGS+=("$1" "$2"); shift 2 ;;
+        --chain-workers)
+            CHAIN_WORKERS="$2"
+            MCMC_ARGS+=("$1" "$2"); shift 2 ;;
+        --num-warmup|--num-samples|--output|\
             --max-tree-depth|--target-accept-theta)
             MCMC_JOINT_ARGS+=("$1" "$2"); shift 2 ;;
         --compare-reid|--match-reid|--compare-reid-2x|--compute-evidence)
@@ -395,8 +407,37 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -z "$NUM_CHAINS" || -z "$CHAIN_WORKERS" ]]; then
+    for ((i = 0; i < ${#PASSTHRU_ARGS[@]}; i++)); do
+        case "${PASSTHRU_ARGS[$i]}" in
+            --num-chains)
+                if [[ -z "$NUM_CHAINS" ]]; then
+                    j=$((i + 1)); NUM_CHAINS="${PASSTHRU_ARGS[$j]:-}"
+                fi ;;
+            --num-chains=*)
+                if [[ -z "$NUM_CHAINS" ]]; then
+                    NUM_CHAINS="${PASSTHRU_ARGS[$i]#*=}"
+                fi ;;
+            --chain-workers)
+                if [[ -z "$CHAIN_WORKERS" ]]; then
+                    j=$((i + 1)); CHAIN_WORKERS="${PASSTHRU_ARGS[$j]:-}"
+                fi ;;
+            --chain-workers=*)
+                if [[ -z "$CHAIN_WORKERS" ]]; then
+                    CHAIN_WORKERS="${PASSTHRU_ARGS[$i]#*=}"
+                fi ;;
+        esac
+    done
+fi
+
 if [[ -z "$GALAXY" ]]; then
     echo "[ERROR] --galaxy is required. Choices: $ALL_GALS"; exit 1
+fi
+[[ -z "$DATASET" ]] && DATASET="$(config_value io dataset)"
+[[ -z "$DATASET" ]] && DATASET="original_published"
+if [[ "$DATASET" != "original_published" && "$DATASET" != "fiducial" ]]; then
+    echo "[ERROR] --dataset must be original_published or fiducial"
+    exit 1
 fi
 if [[ "$SAMPLER" != "mcmc" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler must be mcmc or de"; exit 1
@@ -567,6 +608,28 @@ fi
 if [[ "$JOINT_H0_MODE" == true && -z "$CPUS" ]]; then
     CPUS=4
 fi
+if [[ "$EVIDENCE" == false && "$JOINT_H0_MODE" == false
+      && "$SAMPLER" == "mcmc" ]]; then
+    [[ -z "$NUM_CHAINS" ]] && \
+        NUM_CHAINS="$(config_value inference num_chains)"
+    [[ -z "$CHAIN_WORKERS" ]] && \
+        CHAIN_WORKERS="$(config_value inference chain_workers)"
+    if [[ ! "$NUM_CHAINS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] --num-chains must be a positive integer"
+        exit 1
+    fi
+    if [[ ! "$CHAIN_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] --chain-workers must be a positive integer"
+        exit 1
+    fi
+    if [[ -z "$CPUS" ]]; then
+        if (( NUM_CHAINS < CHAIN_WORKERS )); then
+            CPUS="$NUM_CHAINS"
+        else
+            CPUS="$CHAIN_WORKERS"
+        fi
+    fi
+fi
 
 # Default memory: 7 GB per CPU for every submitted job type. MEM is per-CPU
 # (matches addqueue -m / SLURM --mem-per-cpu); submit_job scales it to a total
@@ -596,11 +659,12 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
         exit 1
     fi
     gal_tag="$(printf '%s' "$GALAXY" | tr ', /' '___' | tr -cd '[:alnum:]_.-')"
+    ds_tag="${DATASET%%_*}"
     joint_label="joint H0"
     # Tag the job (hence the scheduler log filename) with selection and
     # reconstruction, matching the joint_H0 result-file convention; defaults
     # mirror run_joint_H0.py (redshift / none).
-    job_name="maser_jointh0_${gal_tag}_${SELECTION:-redshift}_${RECONSTRUCTION:-none}"
+    job_name="maser_jointh0_${ds_tag}_${gal_tag}_${SELECTION:-redshift}_${RECONSTRUCTION:-none}"
     [[ -n "$LOO_DROPPED" ]] && job_name="${job_name}_loo${LOO_DROPPED}"
     if [[ "$LOCAL" == true ]]; then
         echo "Running $joint_label ($GALAXY) locally"
@@ -632,13 +696,13 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
             pycmd="/usr/bin/env JAX_PLATFORMS=cpu $CANDEL_PYTHON -u $runner --galaxy $GALAXY"
         fi
         [[ ${#RUN_ARGS[@]} -gt 0 ]] && pycmd+=" ${RUN_ARGS[*]}"
-        # Joint output is a flat results/Megamaser/joint_H0_*.hdf5 (no per-galaxy
-        # dir), so copy the scheduler log into a shared <root_output>/logs.
+        # Joint output is flat within the dataset namespace (no per-galaxy
+        # directory), so keep its scheduler log in the same namespace.
         joint_root="$(config_value io root_output)"
         [[ -z "$joint_root" ]] && joint_root="results/Megamaser"
         submit_args=(--queue "$QUEUE" --mem "$MEM"
                      --name "$job_name"
-                     --logdir "$ROOT/$joint_root/logs")
+                     --logdir "$ROOT/$joint_root/$DATASET/logs")
         if [[ "$joint_gpu" == true ]]; then
             submit_args=(--gpu "${submit_args[@]}")
         fi
@@ -668,8 +732,6 @@ done
 GALAXY="${expanded_galaxies[*]}"
 
 RUNNER="$ROOT/scripts/megamaser/run_maser.py"
-[[ -z "$DATASET" ]] && DATASET="$(config_value io dataset)"
-[[ -z "$DATASET" ]] && DATASET="original_published"
 # Short tag so the same galaxy can run on both datasets concurrently without
 # colliding on job name or scheduler-log destination.
 ds_tag="${DATASET%%_*}"
@@ -683,8 +745,8 @@ esac
 # Local runs are tee'd to a per-run log under the galaxy's output subdir, so the
 # full transcript (sampler progress, the Reid/Pesce comparison table, JAX/XLA
 # warnings) is saved beside that galaxy's HDF5 outputs. run_maser.py writes to
-# <root_output>/<gal>/; derive root_output from config_maser.toml [io]
-# (defaults to results/Maser only when that key is absent) so it can't drift.
+# <root_output>/<dataset>/<gal>/; derive root_output from config_maser.toml [io]
+# (defaults to results/Megamaser only when that key is absent) so it can't drift.
 # root_results resolves to the repo root (local_config.toml).
 maser_root_output="$(
     awk -F'=' '
@@ -694,7 +756,7 @@ maser_root_output="$(
         }
     ' "$ROOT/scripts/megamaser/config_maser.toml" 2>/dev/null || true
 )"
-[[ -z "$maser_root_output" ]] && maser_root_output="results/Maser"
+[[ -z "$maser_root_output" ]] && maser_root_output="results/Megamaser"
 # run_maser.py/run_de_map.py namespace root_output by dataset, so mirror that
 # here or the chain and log paths below point at the wrong dataset.
 MASER_OUT="$ROOT/$maser_root_output/$DATASET"
@@ -786,8 +848,15 @@ for gal in $GALAXY; do
             mkdir -p "$logdir"
             logfile="$logdir/${gal}_${SAMPLER}${variant_tag}_${stamp}.log"
             echo "[submit] tee-ing output to: $logfile"
+            term_columns="$(tput cols 2>/dev/null || true)"
+            term_lines="$(tput lines 2>/dev/null || true)"
+            term_env=()
+            if [[ "$term_columns" =~ ^[1-9][0-9]*$ \
+                  && "$term_lines" =~ ^[1-9][0-9]*$ ]]; then
+                term_env=(COLUMNS="$term_columns" LINES="$term_lines")
+            fi
             # pipefail (set at top) propagates the runner's exit status here.
-            "${cmd[@]}" 2>&1 | tee "$logfile"
+            /usr/bin/env "${term_env[@]}" "${cmd[@]}" 2>&1 | tee "$logfile"
         fi
         continue
     fi
@@ -810,9 +879,9 @@ for gal in $GALAXY; do
             submit_args+=(--gpu-count "$GPU_COUNT")
         fi
     fi
-    # MCMC CPU job: a single threaded JAX process, not MPI. --cpus (in
-    # extra_flags) requests N shared cores on one node (addqueue -s -n N); the
-    # -s -n 1xN node-form grabs a whole node on glamdring.
+    # MCMC CPU job: one process with bounded chain threads, not MPI. --cpus
+    # requests N shared cores on one node (addqueue -s -n N); the -s -n 1xN
+    # node-form grabs a whole node on glamdring.
     if [[ ${#extra_flags[@]} -gt 0 ]]; then
         submit_args+=("${extra_flags[@]}")
     fi

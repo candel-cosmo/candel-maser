@@ -220,7 +220,7 @@ scripts and `check_reid/prepare_reid_data.py`):
 They differ for NGC5765b, NGC6264, NGC6323 and UGC3789 (spots removed in MCP
 vetting, NGC6323 augmented, NGC6264 acceleration uncertainties replaced).
 CGCG074-064 and NGC4258 are byte-identical in both. Full provenance is in
-`data/Megamaser/README`.
+`docs/notes/megamaser_p20_clipping_audit.md`.
 
 Layout, both namespaced by dataset so nothing can be mixed silently:
 
@@ -233,9 +233,8 @@ results/Megamaser/<dataset>/    chains, DE checkpoints, joint-H0 outputs
 directory separately on every machine before running; the fiducial tables came
 from the MCP `fiducial_tables.zip` response and are not part of this checkout.
 
-`reid_mcmc/`, `convergence/` and `logs/` stay directly under
-`results/Megamaser/` — they are Reid-side and numerics artefacts, not
-dataset-specific.
+`reid_mcmc/` and `convergence/` stay directly under `results/Megamaser/`;
+sampler and scheduler logs follow the corresponding dataset namespace.
 
 The per-galaxy DE MAP best points (`[model.galaxies.<G>.init*]`) and the warp
 pivots (`r_ang_ref_*`) live in `init_original_published.toml` and
@@ -384,7 +383,7 @@ bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu \
     --galaxies NGC4258 --sobol-candidates 0 --no-config-point \
     --no-pesce-point \
     --checkpoint-candidate \
-    results/Megamaser/de_checkpoints/NGC4258/de_ckpt_rmap_peakpartition_seed44_lshade_nopesce.npz \
+    results/Megamaser/original_published/de_checkpoints/NGC4258/de_ckpt_rmap_peakpartition_seed44_lshade_nopesce.npz \
     --allow-checkpoint-policy-mismatch
 ```
 
@@ -517,6 +516,17 @@ phi_sys_ranges_deg = [[-180, 180]]
 MCMC samples non-centred log-radius residuals,
 `z_r = log(r_ang / r_hat(theta))`. Per-spot `r_ang`/`phi` samples are not
 written by default; pass `--save-latents` to keep them in the HDF5 output.
+Multiple chains use fixed, phase-specific progress rows for latent burn-in,
+MCMC warmup, and sampling. They run concurrently, capped at the allocated or
+available CPU count and `[inference].chain_workers` (8 by default).
+Both single-galaxy and joint-H0 MCMC enable JAX float64 before constructing
+their models; `--f64` remains only as a compatible no-op for MCMC.
+`--chain-workers N` overrides the cap; unless `--cpus` is set, `submit.sh`
+requests `min(num_chains, chain_workers)` CPUs.
+Every chain count defaults to the configured initial point. Multi-chain runs
+remain independent throughout warmup and sampling, so ordinary R-hat and ESS
+diagnostics retain their usual meaning.
+
 The optional global `sample_n_inner` setting controls saved-sample Gibbs
 sweeps, while per-galaxy `mcmc_target_accept_theta` and
 `mcmc_sample_n_inner` values can override global NUTS and Gibbs settings.
@@ -543,7 +553,8 @@ control generated with `make_candel_globals.py --dataset fiducial` and
 python scripts/megamaser/check_reid/reid_profile.py \
     --init reid_ngc4258_best.toml \
     --galaxy NGC4258 \
-    --data data/Megamaser/N4258_disk_data_MarkReid.final \
+    --dataset original_published \
+    --data data/Megamaser/original_published/N4258_disk_data_MarkReid.final \
     --set H0=63.0 \
     --json-out /tmp/reid_query.json
 ```

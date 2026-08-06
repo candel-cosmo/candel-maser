@@ -25,34 +25,13 @@ with open(CONFIG_PATH, "rb") as f:
     MASTER_CFG = tomli.load(f)
 
 
-def _preparse_galaxies(argv):
-    galaxies = None
-    f64 = "--f64" in argv
-    for i, arg in enumerate(argv):
-        if arg == "--galaxy" and i + 1 < len(argv):
-            galaxies = argv[i + 1]
-        elif arg.startswith("--galaxy="):
-            galaxies = arg.split("=", 1)[1]
-    if galaxies is None:
-        galaxies = "NGC6264,NGC6323"
-    if galaxies == "all":
-        names = MCP_GALAXIES
-    else:
-        names = tuple(g.strip() for g in galaxies.split(",") if g.strip())
-    force_f64 = any(MASTER_CFG["model"]["galaxies"].get(g, {}).get(
-        "force_f64", False) for g in names)
-    return names, f64 or force_f64
-
-
-_PRE_GALAXIES, _ENABLE_F64 = _preparse_galaxies(sys.argv[1:])
-if _ENABLE_F64:
-    from jax import config as _jax_config
-    _jax_config.update("jax_enable_x64", True)
-
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault(
     "MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "candel-mpl"))
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+
+from jax import config as _jax_config  # noqa: E402
+_jax_config.update("jax_enable_x64", True)
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
@@ -1003,7 +982,8 @@ def main(argv=None):
     parser.add_argument("--max-tree-depth", type=int, default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--f64", action="store_true",
-                        help="Enable float64 before JAX initialises.")
+                        help="Accepted for compatibility; MCMC always uses "
+                             "float64.")
     parser.add_argument("--add-ecc", action="store_true",
                         help="Select the eccentric stage-1 chains.")
     parser.add_argument("--add-quadratic-warp", action="store_true",

@@ -308,6 +308,7 @@ def main(argv=None):
                     help="Init variant to select from --init when it is a "
                          "merged multi-galaxy TOML or a config fragment.")
     ap.add_argument("--galaxy", default="NGC4258")
+    rr.add_dataset_arg(ap)
     ap.add_argument("--data", required=True)
     ap.add_argument("--vcor", type=float, default=0.0)
     ap.add_argument(
@@ -337,8 +338,10 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     init_toml = rr.resolve_init_toml(args.init)
+    dataset = rr.resolve_dataset(rr.load_toml(rr.DEFAULT_CONFIG), args.dataset)
     reid_init = rr.load_toml_init(
-        init_toml, args.galaxy, args.vcor, variant=args.variant)
+        init_toml, args.galaxy, args.vcor, variant=args.variant,
+        dataset=dataset)
     d = build_data(args.data)
     r_ref = reid_init.values.get("_reid_r_ref") or reid_r_ref(
         d, reid_init.values["x0_mas"], reid_init.values["y0_mas"])

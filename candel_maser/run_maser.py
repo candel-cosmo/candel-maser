@@ -58,13 +58,21 @@ with open(_CONFIG_PATH, "rb") as f:
     master_cfg = tomli.load(f)
 
 
-# Force float64 for galaxies whose config sets ``force_f64`` (e.g. NGC4258).
-# Its extreme geometry (D ~ 7.6 Mpc, ~6 mas radii, ultra-sharp position
-# likelihood) makes float32 silently fail: the NUTS warmup step size collapses,
-# the dense mass matrix never adapts, and the frozen chain misreports
-# near-perfect ESS.  The target galaxy is read from argv before any JAX array
-# is created so x64 can be enabled in time.
+def _select_sampler(argv):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--sampler", choices=("mcmc", "de"),
+                        default="mcmc")
+    args, _ = parser.parse_known_args(argv)
+    return args.sampler, argv
+
+
+# MCMC always uses float64. DE retains the explicit/per-galaxy precision
+# policy, including forced float64 for NGC4258's extreme geometry.
 def _f64_reason_from_argv(argv):
+    sampler, _ = _select_sampler(argv)
+    if sampler == "mcmc":
+        return "MCMC default"
     if "--f64" in argv:
         return "--f64"
     galaxies = master_cfg["model"]["galaxies"]
@@ -183,15 +191,6 @@ def _D_A_from_D_c(model, D_c):
     h = _h_ref(model)
     z_cosmo = model.distance2redshift(jnp.atleast_1d(D_c), h=h).squeeze()
     return D_c / (1.0 + z_cosmo)
-
-
-def _select_sampler(argv):
-    argv = list(sys.argv[1:] if argv is None else argv)
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--sampler", choices=("mcmc", "de"),
-                        default="mcmc")
-    args, _ = parser.parse_known_args(argv)
-    return args.sampler, argv
 
 
 def _strip_sampler_arg(argv):
@@ -1056,11 +1055,18 @@ def _reid_loglik_context(galaxy, n_spots, dataset=None):
         return None
 
     rp.setup_numbers()
-    inp = os.path.join(tempfile.gettempdir(), f"{galaxy}_reid_scatter.inp")
-    # Without forwarding the dataset this regenerates the .inp from whichever
-    # one the config defaults to, silently scoring against the wrong table.
-    prepare_reid_data.main([galaxy, "--out", inp, "--dataset", dataset])
-    d = rp.build_data(inp)
+    tmp = tempfile.NamedTemporaryFile(
+        suffix="_reid_scatter.inp", delete=False)
+    inp = tmp.name
+    tmp.close()
+    try:
+        # Without forwarding the dataset this regenerates the .inp from
+        # whichever one the config defaults to, silently scoring against the
+        # wrong table.
+        prepare_reid_data.main([galaxy, "--out", inp, "--dataset", dataset])
+        d = rp.build_data(inp)
+    finally:
+        os.unlink(inp)
     if d["N"] != int(n_spots):
         fprint(f"skipping Reid scatter: spot count mismatch "
                f"(Reid {d['N']} vs CANDEL {n_spots}).")
@@ -1384,9 +1390,8 @@ def _run_evidence_subprocess(galaxy, chain_path, data_root, spot_batch,
                              dataset=None):
     """Compute the finite-support marginal-objective diagnostic.
 
-    Spawned as a separate process so the float64 reference grid (a global JAX
-    flag) is genuinely double precision even when the chain was sampled in
-    float32.  Best-effort: a failure here never aborts the sampling run.
+    Spawned as a separate process so the float64 reference grid is isolated
+    from sampler state. Best-effort: a failure here never aborts sampling.
     """
     import subprocess
 
@@ -1429,16 +1434,19 @@ def main(argv=None):
     parser.add_argument("--num-warmup", type=int, default=None)
     parser.add_argument("--num-samples", type=int, default=None)
     parser.add_argument("--num-chains", type=int, default=None,
-                        help="Number of independent chains to run "
-                             "sequentially in this job.")
+                        help="Number of chains to run "
+                             "concurrently, capped by available CPUs.")
+    parser.add_argument("--chain-workers", type=int, default=None,
+                        help="Maximum chains to run concurrently. Default: "
+                             "[inference].chain_workers (8).")
     parser.add_argument("--init-strategy",
                         choices=("median", "config", "reid"),
                         default=None,
                         help="Initial global point strategy. Default: "
-                             "config inference/init_strategy. 'reid' uses "
+                             "inference/init_strategy for any chain count. "
+                             "'reid' uses "
                              "reported Pesce/Reid globals; for NGC4258 it "
-                             "reads reid_ngc4258_best.toml. Multi-chain jobs "
-                             "require median.")
+                             "reads reid_ngc4258_best.toml.")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-inner", type=int, default=None)
     parser.add_argument("--latent-burnin", type=int, default=None,
@@ -1473,7 +1481,9 @@ def main(argv=None):
                         choices=("eta", "log_mbh"), default=None,
                         help="Global mass coordinate for the sampler. "
                              "Default: config value, eta in config_maser.")
-    parser.add_argument("--f64", action="store_true", default=_ENABLE_F64)
+    parser.add_argument(
+        "--f64", action="store_true", default=_ENABLE_F64,
+        help="Accepted for compatibility; MCMC always uses float64.")
     parser.add_argument("--fix-floors-pesce", action="store_true",
                         help="Hold the five error floors (sigma_x_floor, "
                              "sigma_y_floor, sigma_v_sys, sigma_v_hv, "
@@ -1550,8 +1560,13 @@ def main(argv=None):
     num_chains = int(
         args.num_chains if args.num_chains is not None
         else _required_inference(inf_cfg, "num_chains"))
+    chain_workers = int(
+        args.chain_workers if args.chain_workers is not None
+        else _required_inference(inf_cfg, "chain_workers"))
     if num_chains < 1:
         raise SystemExit("--num-chains must be >= 1.")
+    if chain_workers < 1:
+        raise SystemExit("--chain-workers must be >= 1.")
     initial_step_size = (
         args.initial_step_size if args.initial_step_size is not None
         else _required_inference(inf_cfg, "blackjax_initial_step_size"))
@@ -1585,13 +1600,14 @@ def main(argv=None):
     reflect_prob = (
         args.reflect_prob if args.reflect_prob is not None
         else _required_inference(inf_cfg, "reflect_prob"))
-    init_strategy = str(args.init_strategy or _required_inference(
-        inf_cfg, "init_strategy")).lower()
+    init_strategy = str(
+        args.init_strategy if args.init_strategy is not None
+        else _required_inference(inf_cfg, "init_strategy")).lower()
     if num_chains > 1 and init_strategy != "median":
         fprint(
             f"--num-chains {num_chains} with init_strategy '{init_strategy}': "
-            "all chains start from the same point with independent per-chain "
-            "seeds (use --init-strategy median for overdispersed starts).")
+            "all chains start from the same initial point with independent "
+            "per-chain seeds.")
     init_num_samples = int(_required_inference(inf_cfg, "init_num_samples"))
     latent_burnin = int(
         args.latent_burnin if args.latent_burnin is not None
@@ -1696,7 +1712,8 @@ def main(argv=None):
     backend = jax.default_backend()
     precision = "float64" if jax.config.jax_enable_x64 else "float32"
     fprint(f"JAX backend: {backend}; precision: {precision}")
-    fprint(f"spots={model.n_spots}; chains={num_chains}; warmup={num_warmup}; "
+    fprint(f"spots={model.n_spots}; chains={num_chains}; "
+           f"chain_workers<={chain_workers}; warmup={num_warmup}; "
            f"samples={num_samples}; n_inner={n_inner}; "
            f"sample_n_inner={sample_n_inner}; "
            f"latent_burnin={latent_burnin}")
@@ -1717,6 +1734,7 @@ def main(argv=None):
         num_warmup=num_warmup,
         num_samples=num_samples,
         num_chains=num_chains,
+        chain_workers=chain_workers,
         n_inner=n_inner,
         target_accept_theta=target_accept_theta,
         target_accept_latent=target_accept_r,
@@ -1730,6 +1748,8 @@ def main(argv=None):
         progress_bar=True,
         jit_steps=True,
     )
+    fprint(f"chain execution: {result.chain_method}; "
+           f"workers={result.chain_workers}")
     fprint(f"total runner wall time: {time.time() - t0:.1f}s")
 
     outdir = os.path.join(
@@ -1753,7 +1773,9 @@ def main(argv=None):
         "num_samples": int(num_samples),
         "num_chains": int(num_chains),
         "init_strategy": str(init_strategy),
-        "chain_method": "sequential" if num_chains > 1 else "single",
+        "chain_method": result.chain_method,
+        "chain_workers": int(result.chain_workers),
+        "chain_worker_limit": int(chain_workers),
         "n_inner": int(n_inner),
         "sample_n_inner": int(sample_n_inner),
         "transport_systemic_phi": bool(transport_systemic_phi),

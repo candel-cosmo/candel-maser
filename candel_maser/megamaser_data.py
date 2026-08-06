@@ -23,7 +23,7 @@ from ..util import SPEED_OF_LIGHT, data_path, fprint
 
 # Spot-table datasets. "original_published" is the literature tables as
 # published; "fiducial" is the tables Pesce+2020 actually fitted, released with
-# their erratum. See data/Megamaser/README for provenance.
+# their erratum. See docs/notes/megamaser_p20_clipping_audit.md for provenance.
 MASER_DATASETS = ("original_published", "fiducial")
 DEFAULT_MASER_DATASET = "original_published"
 

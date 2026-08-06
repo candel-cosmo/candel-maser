@@ -32,11 +32,13 @@ jax.config.update("jax_enable_x64", True)
 import h5py  # noqa: E402
 import numpy as np  # noqa: E402
 import run_map as rm  # noqa: E402
+from maser_config import apply_dataset  # noqa: E402
 from scipy.stats import gaussian_kde, multivariate_normal, norm  # noqa: E402
 
 from candel.model.maser_map import evaluate_at_globals  # noqa: E402
 
 GALAXIES = ["CGCG074-064", "NGC5765b", "UGC3789", "NGC6264", "NGC6323"]
+DATASET = "original_published"
 QW_COEFS = ("d2i_dr2", "d2Omega_dr2")
 
 
@@ -56,7 +58,7 @@ def _gof(gal, use_qw, tag):
     """Reduced chi^2 at the posterior-median globals (latents profiled)."""
     gcfg = rm._MASTER_CFG["model"]["galaxies"][gal]
     gcfg["use_quadratic_warp"] = use_qw
-    _, target, _ = rm._build_target(gal, gcfg, None)
+    _, target, _ = rm._build_target(gal, gcfg, None, DATASET)
     med = _median_globals(gal, target, tag)
     res = evaluate_at_globals(target, med, init_r_ang=None,
                               marginal=False, verbose=False)
@@ -88,6 +90,7 @@ def _savage_dickey(gal, tag):
 
 
 def main():
+    apply_dataset(rm._MASTER_CFG, DATASET)
     prior0 = _prior_density_at_zero()
     rows = []
     for gal in GALAXIES:

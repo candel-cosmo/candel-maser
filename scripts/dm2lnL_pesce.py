@@ -31,11 +31,13 @@ import h5py  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import run_map as rm  # noqa: E402
+from maser_config import apply_dataset  # noqa: E402
 
 from candel.model.maser_map import _make_perspot_eval  # noqa: E402
 from candel.model.maser_map import evaluate_at_globals  # noqa: E402
 
 GALAXIES = ["CGCG074-064", "NGC5765b", "UGC3789", "NGC6264", "NGC6323"]
+DATASET = "original_published"
 
 
 def _median_globals(gal, target):
@@ -59,10 +61,11 @@ def _eval(target, perspot, gdict):
 
 
 def main():
+    apply_dataset(rm._MASTER_CFG, DATASET)
     rows = []
     for gal in GALAXIES:
         gcfg = rm._MASTER_CFG["model"]["galaxies"][gal]
-        _, target, _ = rm._build_target(gal, gcfg, None)
+        _, target, _ = rm._build_target(gal, gcfg, None, DATASET)
         perspot = _make_perspot_eval(target)
         ours = _eval(target, perspot, _median_globals(gal, target))
         p20 = _eval(target, perspot, rm._pesce_globals(target, gal))

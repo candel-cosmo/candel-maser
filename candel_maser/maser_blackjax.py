@@ -37,7 +37,9 @@ The sampler targets the megamaser disk likelihood:
 The module does not import BlackJAX at import time.  This keeps the rest of the
 package usable while BlackJAX is an optional dependency.
 """
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, Dict, NamedTuple, Tuple
@@ -74,7 +76,7 @@ def _require_blackjax():
     return blackjax, window_adaptation
 
 
-def _step_bar(total, enabled, desc):
+def _step_bar(total, enabled, desc, position=None):
     """tqdm bar counting MCMC steps, or None when disabled/unavailable.
 
     Steps run in chunks (see ``_chunk_bounds``), but the bar advances by each
@@ -86,23 +88,15 @@ def _step_bar(total, enabled, desc):
         from tqdm.auto import tqdm
     except Exception:
         return None
-    return tqdm(total=total, desc=desc)
+    return tqdm(total=total, desc=desc, position=position, dynamic_ncols=True)
 
 
 def _update_mcmc_progress_postfix(progress, info, theta_scale):
-    """Show experimental MCMC diagnostics in a tqdm progress bar."""
+    """Show the global step scale without overflowing fixed progress rows."""
     if not hasattr(progress, "set_postfix"):
         return
-    t_acc = float(np.asarray(info["theta_acceptance_rate"]))
-    l_acc = float(np.asarray(info["latent_accept_mean"]))
-    refl = float(np.asarray(info["reflect_accept_mean"]))
     theta_scale = float(np.mean(np.asarray(theta_scale)))
-    progress.set_postfix({
-        "theta_scale": f"{theta_scale:.2e}",
-        "theta_acc": f"{t_acc:.3f}",
-        "latent_acc": f"{l_acc:.3f}",
-        "refl_acc": f"{refl:.3f}",
-    })
+    progress.set_postfix({"theta": f"{theta_scale:.2e}"}, refresh=False)
 
 
 def _scan_fn(body, jit_steps):
@@ -384,7 +378,7 @@ def _stack_dicts(rows):
     }
 
 
-def _stack_chain_results(results):
+def _stack_chain_results(results, runtime_seconds, chain_workers):
     """Stack single-chain results into one chain-first result."""
     if not results:
         raise ValueError("at least one chain result is required")
@@ -402,7 +396,34 @@ def _stack_chain_results(results):
         warmup_info=_stack_dicts([r.warmup_info for r in results]),
         parameters=_stack_dicts([r.parameters for r in results]),
         theta_sites=theta_sites,
-        runtime_seconds=float(sum(r.runtime_seconds for r in results)))
+        runtime_seconds=float(runtime_seconds),
+        chain_method="parallel" if chain_workers > 1 else "sequential",
+        chain_workers=int(chain_workers))
+
+
+def _chain_worker_count(num_chains, chain_workers=8):
+    """Number of chains that fit under the requested and CPU limits."""
+    num_chains = int(num_chains)
+    chain_workers = int(chain_workers)
+    if num_chains < 1 or chain_workers < 1:
+        raise ValueError("num_chains and chain_workers must be >= 1.")
+    limits = [num_chains, chain_workers]
+    for key in ("SLURM_CPUS_PER_TASK", "PBS_NP", "NSLOTS"):
+        try:
+            value = int(os.environ.get(key, ""))
+        except ValueError:
+            continue
+        if value > 0:
+            limits.append(value)
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            affinity = len(os.sched_getaffinity(0))
+            if affinity > 0:
+                limits.append(affinity)
+        except OSError:
+            pass
+    limits.append(os.cpu_count() or 1)
+    return min(limits)
 
 
 def estimate_radial_eps(model, theta, h, delta=0.02,
@@ -936,6 +957,8 @@ class MaserBlackJaxResult:
     parameters: Dict[str, np.ndarray]
     theta_sites: Tuple[str, ...]
     runtime_seconds: float
+    chain_method: str = "single"
+    chain_workers: int = 1
 
 
 def _mcmc_info(theta_info, latent_accept, reflect_try, reflect_accept,
@@ -1214,7 +1237,7 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
                            sample_n_inner=None,
                            transport_systemic_phi=False,
                            progress_bar=True, jit_steps=True,
-                           progress_prefix=""):
+                           progress_label="1/1", progress_positions=None):
     """Run one explicit-phi NUTS-within-adaptive-Metropolis chain."""
     if num_warmup < 0 or num_samples < 1:
         raise ValueError(
@@ -1281,6 +1304,8 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
     warmup_scan = _scan_fn(warmup_body, jit_steps)
 
     t0 = time.time()
+    if progress_positions is None:
+        progress_positions = (None, None, None)
     # Optional latent-only burn-in at FIXED theta: migrate z/phi to their
     # conditional typical set and seed the per-side covariance before theta
     # NUTS / step-size adaptation begins. The migrated state and accumulated
@@ -1295,7 +1320,8 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         burnin_idx = jnp.arange(int(num_latent_burnin))
         burnin_bar = _step_bar(
             int(num_latent_burnin), progress_bar,
-            f"{progress_prefix}latent burn-in")
+            f"Compiling latent burn-in {progress_label}",
+            position=progress_positions[0])
         bcarry = (state, cov_state, rng_key)
         for c0, c1 in _chunk_bounds(int(num_latent_burnin), progress_bar):
             bcarry, binfo = burnin_scan(bcarry, burnin_idx[c0:c1])
@@ -1303,8 +1329,12 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
             if burnin_bar is not None:
                 lat = float(np.asarray(binfo["latent_accept_mean"])[-1])
                 refl = float(np.asarray(binfo["reflect_accept_mean"])[-1])
+                burnin_bar.set_description(
+                    f"Latent burn-in {progress_label}", refresh=False)
                 burnin_bar.set_postfix(
-                    {"latent_acc": f"{lat:.3f}", "refl_acc": f"{refl:.3f}"})
+                    {"latent_acc": f"{lat:.3f}",
+                     "refl_acc": f"{refl:.3f}"},
+                    refresh=False)
                 burnin_bar.update(c1 - c0)
         if burnin_bar is not None:
             burnin_bar.close()
@@ -1313,13 +1343,20 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
     carry = (state, adaptation_state, cov_state, rng_key)
     step_idx = jnp.arange(int(num_warmup))
     warmup_rows = []
-    warmup_bar = _step_bar(
-        int(num_warmup), progress_bar, f"{progress_prefix}mcmc warmup")
+    warmup_bar = (
+        _step_bar(
+            int(num_warmup), progress_bar,
+            f"Compiling MCMC warmup {progress_label}",
+            position=progress_positions[1])
+        if int(num_warmup) > 0 else None)
     for c0, c1 in _chunk_bounds(int(num_warmup), progress_bar):
         carry, info_chunk = warmup_scan(
             carry, (schedule[c0:c1], step_idx[c0:c1]))
         info_chunk = jax.device_get(info_chunk)
         warmup_rows.append(info_chunk)
+        if warmup_bar is not None:
+            warmup_bar.set_description(
+                f"MCMC warmup {progress_label}", refresh=False)
         _update_chunk_postfix(
             warmup_bar, info_chunk, jax.device_get(carry[0].theta_scale))
         if warmup_bar is not None:
@@ -1350,7 +1387,9 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
     log_density_rows = []
     info_rows = []
     sample_bar = _step_bar(
-        int(num_samples), progress_bar, f"{progress_prefix}mcmc sample")
+        int(num_samples), progress_bar,
+        f"Compiling sampling {progress_label}",
+        position=progress_positions[2])
     for c0, c1 in _chunk_bounds(int(num_samples), progress_bar):
         state, (sample, log_density, info) = sample_scan(
             state, sample_keys[c0:c1])
@@ -1358,6 +1397,9 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         log_density_rows.append(jax.device_get(log_density))
         info_host = jax.device_get(info)
         info_rows.append(info_host)
+        if sample_bar is not None:
+            sample_bar.set_description(
+                f"Sampling {progress_label}", refresh=False)
         _update_chunk_postfix(
             sample_bar, info_host, jax.device_get(state.theta_scale))
         if sample_bar is not None:
@@ -1366,6 +1408,7 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         sample_bar.close()
     runtime = time.time() - t0
 
+    warmup_info = _concat_dicts(warmup_rows)
     parameters = {
         "step_size": np.asarray(jax.device_get(step_size)),
         "inverse_mass_matrix": np.asarray(jax.device_get(
@@ -1382,7 +1425,7 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         log_density=(np.concatenate(log_density_rows, axis=0)
                      if log_density_rows else np.zeros((0,))),
         info=_concat_dicts(info_rows),
-        warmup_info=_concat_dicts(warmup_rows),
+        warmup_info=warmup_info,
         parameters=parameters,
         theta_sites=target.names,
         runtime_seconds=runtime)
@@ -1390,6 +1433,7 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
 
 def run_blackjax_mcmc(model, init_params, rng_key, *,
                       num_warmup=1000, num_samples=1000, num_chains=1,
+                      chain_workers=8,
                       h=None, n_inner=20, target_accept_theta=0.9,
                       target_accept_latent=0.35, theta_step_init=0.01,
                       phi_step_init=0.05, eps_init=None, eps_z_min=1e-3,
@@ -1399,11 +1443,13 @@ def run_blackjax_mcmc(model, init_params, rng_key, *,
                       sample_n_inner=None,
                       transport_systemic_phi=False,
                       progress_bar=True, jit_steps=True):
-    """Run one or more sequential explicit-phi BlackJAX NUTS/MH chains."""
+    """Run explicit-phi chains with bounded CPU parallelism."""
     num_chains = int(num_chains)
+    chain_workers = int(chain_workers)
     if num_chains < 1:
         raise ValueError("num_chains must be >= 1.")
-
+    if chain_workers < 1:
+        raise ValueError("chain_workers must be >= 1.")
     kwargs = dict(
         num_warmup=num_warmup,
         num_samples=num_samples,
@@ -1441,10 +1487,30 @@ def run_blackjax_mcmc(model, init_params, rng_key, *,
             model, chain_init_params[0], rng_key, **kwargs)
 
     chain_keys = jax.random.split(rng_key, num_chains)
-    results = []
-    for i, chain_key in enumerate(chain_keys):
-        prefix = f"chain {i + 1}/{num_chains} "
-        results.append(_run_blackjax_mcmc_one(
-            model, chain_init_params[i], chain_key, progress_prefix=prefix,
-            **kwargs))
-    return _stack_chain_results(results)
+    worker_count = _chain_worker_count(num_chains, chain_workers)
+
+    def run_chain(item):
+        i, chain_key = item
+        # Keep each phase in its own row block, with one blank row between.
+        positions = []
+        block = 0
+        for steps in (num_latent_burnin, num_warmup, num_samples):
+            if int(steps) > 0:
+                positions.append(block * (num_chains + 1) + i)
+                block += 1
+            else:
+                positions.append(None)
+        return _run_blackjax_mcmc_one(
+            model, chain_init_params[i], chain_key,
+            progress_label=f"{i + 1}/{num_chains}",
+            progress_positions=tuple(positions), **kwargs)
+
+    t0 = time.time()
+    items = enumerate(chain_keys)
+    if worker_count == 1:
+        results = [run_chain(item) for item in items]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            results = list(pool.map(run_chain, items))
+    return _stack_chain_results(
+        results, time.time() - t0, worker_count)

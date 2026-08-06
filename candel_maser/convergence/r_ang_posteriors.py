@@ -1,6 +1,6 @@
 """
 Per-spot 1D posterior on r_ang after marginalising phi, with all global
-parameters pinned to the `init` block in config_maser.toml. No sampling
+parameters pinned to the selected dataset's `init` block. No sampling
 — a diagnostic pass through the fixed-r phi marginal at a single point
 in global-parameter space.
 

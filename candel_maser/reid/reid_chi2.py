@@ -44,10 +44,15 @@ def loglik_context(galaxy, n_spots, dataset):
         print(f"reid_chi2: reidlik unavailable ({exc})")
         return None
     rp.setup_numbers()
-    inp = os.path.join(tempfile.gettempdir(),
-                       f"{galaxy}_{dataset}_reid_chi2.inp")
-    prepare_reid_data.main([galaxy, "--out", inp, "--dataset", dataset])
-    d = rp.build_data(inp)
+    tmp = tempfile.NamedTemporaryFile(
+        suffix="_reid_chi2.inp", delete=False)
+    inp = tmp.name
+    tmp.close()
+    try:
+        prepare_reid_data.main([galaxy, "--out", inp, "--dataset", dataset])
+        d = rp.build_data(inp)
+    finally:
+        os.unlink(inp)
     if d["N"] != int(n_spots):
         print(f"reid_chi2: spot count mismatch (Reid {d['N']} vs {n_spots}).")
         return None

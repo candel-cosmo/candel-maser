@@ -19,7 +19,6 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-import tomli
 from convergence_utils import (add_dataset_arg, build_model, cast_floats,
                                load_master_config, resolve_grid_for_galaxy)
 from jax.scipy.special import logsumexp

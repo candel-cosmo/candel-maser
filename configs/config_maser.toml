@@ -3,11 +3,12 @@ seed = 44
 num_warmup = 2500
 num_samples = 2000
 num_chains = 1
+chain_workers = 8
 init_strategy = "config"
 init_num_samples = 1
 n_inner = 30
 latent_burnin = 1000        # latent burn-in steps: stage-1 per-galaxy (run_maser.py, config/reid init only) and stage-2 joint-H0 (run_joint_H0.py)
-max_tree_depth = 11
+max_tree_depth = 10
 target_accept_theta = 0.99
 target_accept_r = 0.35
 blackjax_initial_step_size = 0.005
@@ -393,8 +394,7 @@ num_samples = 5000          # per chain
 # posterior is smooth, so 0.9 cuts leapfrog steps per iteration with
 # negligible ESS loss.
 target_accept_theta = 0.9
-# One doubling below the stage-1 single-disc 11: the smooth toy posterior needs
-# fewer leapfrog steps; single-disc runs keep [inference].max_tree_depth = 11.
+# The smooth toy posterior uses the same depth-10 limit as stage-1.
 max_tree_depth = 10
 
 [io]
