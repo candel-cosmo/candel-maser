@@ -118,9 +118,9 @@ def check_init_block(init_cfg, model):
         raise SystemExit(
             f"No init block for galaxy '{galaxy}' in dataset '{dataset}'. "
             f"Add [model.galaxies.{galaxy}.init] to "
-            f"scripts/megamaser/init_{dataset}.toml (run run_de_map.py "
-            f"--dataset {dataset} --galaxy {galaxy} to produce it), or pick "
-            f"--init-strategy median.")
+            f"scripts/megamaser/init_{dataset}.toml (run run_maser.py "
+            f"{galaxy} --sampler de --dataset {dataset} to produce it). Fresh "
+            f"DE searches bootstrap without this block.")
 
     r_ang = init_cfg.get("r_ang")
     n_spots = getattr(model, "n_spots", None)

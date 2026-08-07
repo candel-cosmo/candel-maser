@@ -387,7 +387,15 @@ def _make_init(model, init_cfg, strategy, num_samples, rng_key):
                 model, rng_key, num_samples, h=h))
     if strategy == "config":
         return _clean_init(model, init_cfg)
-    raise ValueError("DE init_strategy must be 'median' or 'config'.")
+    raise ValueError(
+        "Fixed-global init_strategy must be 'median' or 'config'.")
+
+
+def _resolve_de_init_strategy(requested, configured, fix_globals=False):
+    """Ignore point-initialisation settings for every real DE search."""
+    if not fix_globals:
+        return "median"
+    return str(requested or configured).lower()
 
 
 def _layout(target, sobol_n_sigma, fixed=()):
@@ -2028,13 +2036,12 @@ def main(argv=None):
                         choices=("eta", "log_mbh"), default=None,
                         help="Global mass coordinate for the optimiser. "
                              "Default: config value, eta in config_maser.")
-    parser.add_argument("--init-strategy",
-                        choices=("median", "config"), default=None,
-                        help="Fixed-global source for --fix-globals, and "
-                             "target initial check otherwise. DE never uses "
-                             "the Pesce/Reid point for initialisation; "
-                             "--fix-globals-pesce scores that reference "
-                             "without running DE.")
+    parser.add_argument(
+        "--init-strategy", default=None,
+        help="Only used by --fix-globals (median or config). Real DE "
+             "searches ignore this option and always build their initial "
+             "population from the data-derived ridge and scrambled Sobol "
+             "candidates.")
     parser.add_argument("--spot-batch", type=int, default=None)
     parser.add_argument(
         "--phi-integration", choices=("fixed-grid", "peak-partition"),
@@ -2225,15 +2232,23 @@ def main(argv=None):
                 "NGC4258 base-model DE seeding requires [model.galaxies."
                 "NGC4258.init].") from exc
 
-    init_strategy = str(args.init_strategy or _required_inference(
-        inf_cfg, "init_strategy")).lower()
-    if init_strategy == "reid":
+    configured_init_strategy = (
+        _required_inference(inf_cfg, "init_strategy")
+        if args.fix_globals else None)
+    init_strategy = _resolve_de_init_strategy(
+        args.init_strategy, configured_init_strategy,
+        fix_globals=args.fix_globals)
+    if args.fix_globals and init_strategy not in ("median", "config"):
         raise SystemExit(
-            "DE initialisation never uses the Pesce/Reid point. Choose "
-            "--init-strategy median or config; use --fix-globals-pesce only "
-            "to score the Pesce/Reid reference.")
+            "--fix-globals accepts --init-strategy median or config; use "
+            "--fix-globals-pesce to score the Pesce/Reid reference.")
+    if args.init_strategy is not None and not args.fix_globals:
+        fprint(f"--init-strategy {args.init_strategy!r} ignored: DE always "
+               "uses data-derived ridge and scrambled Sobol candidates.")
     init_params = _make_init(
-        model, _init_block(config["model"]["galaxies"][args.galaxy], model),
+        model,
+        (_init_block(config["model"]["galaxies"][args.galaxy], model)
+         if args.fix_globals else {}),
         init_strategy,
         int(_required_inference(inf_cfg, "init_num_samples")),
         jax.random.PRNGKey(seed))

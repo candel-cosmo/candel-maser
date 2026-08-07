@@ -5,9 +5,9 @@
 # PENDING DE: NGC5765b, NGC6264, NGC6323 and UGC3789 have no init block here
 # yet — their fiducial spot tables differ from the published ones, so the
 # original_published best points do not apply (the r_ang array length alone
-# would be wrong). Run run_de_map.py --dataset fiducial for each and paste the
-# emitted block below. Until then, --init-strategy config fails loudly for
-# them.
+# would be wrong). Run run_maser.py <galaxy> --sampler de --dataset fiducial
+# for each and paste the emitted block below. Fresh DE runs for these galaxies
+# bootstrap from the data-derived ridge and scrambled Sobol without one.
 #
 # CGCG074-064 and NGC4258 have byte-identical tables in both datasets, so
 # their init blocks are copied verbatim from init_original_published.toml.

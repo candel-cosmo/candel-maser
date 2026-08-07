@@ -75,8 +75,8 @@ starts (one exact anchor plus 499 variations), 500 data-driven ridge starts
 whose mass-to-distance coordinate is fixed to the linear fit, and 1,000
 screened Sobol starts.  Scrambled Sobol points retain global coverage; pass
 `--skip-base-model-seed` to omit the lifted point and its variations explicitly.
-The Pesce/Reid point is never inserted, including through the DE initialisation
-strategy.  Its exact all-spot
+DE ignores every point-initialisation strategy and always constructs this
+ridge/Sobol population. The Pesce/Reid point is never inserted. Its exact all-spot
 unnormalised log posterior density is still printed as an independent
 reference and is scored through the same compiled DE objective rather than a
 separate startup executable.  (A single point has zero probability mass in a
@@ -174,7 +174,7 @@ bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --infer-H0 
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --infer-H0 --selection redshift --distance-prior volume
 ```
 
-Common forwarded options are `--seed`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. DE accepts `--init-strategy median|config`; MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit the single-galaxy finite-support marginal-objective diagnostic with `submit.sh --evidence` after the chain exists; it is not a rigorous absolute evidence because the saved explicit-latent chain and finite-radius marginal objective do not define exactly the same posterior measure. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) requires matching saved per-galaxy `samples/D_A` chains with a recorded `uniform_D_A` stage-1 prior, uses them as KDE distance likelihoods, and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
+Common forwarded options are `--seed`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. `--init-strategy` controls MCMC/evidence initial points; real DE searches ignore both that option and `[inference].init_strategy` and always construct the data-derived ridge plus scrambled-Sobol population. Only `--fix-globals`, which skips DE, uses `median|config`. MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit the single-galaxy finite-support marginal-objective diagnostic with `submit.sh --evidence` after the chain exists; it is not a rigorous absolute evidence because the saved explicit-latent chain and finite-radius marginal objective do not define exactly the same posterior measure. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) requires matching saved per-galaxy `samples/D_A` chains with a recorded `uniform_D_A` stage-1 prior, uses them as KDE distance likelihoods, and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
 
 Automatic retries use the watcher wrapper. The `--max-retries` shortcut
 launches the watcher in a detached `screen`/`tmux` session and prints the
@@ -250,9 +250,11 @@ fiducial config initialisations are pending; select fiducial explicitly with
 
 `init_fiducial.toml` has no init block for NGC5765b, NGC6264, NGC6323 or
 UGC3789 yet: their spot tables changed, so the published best points do not
-apply. `--init-strategy config` fails loudly for them until DE reruns land;
-use `--init-strategy median` to bootstrap. `validate_megamaser_config` reports
-them as `pending_de` rather than as errors.
+apply. Fresh DE searches bootstrap them directly from the data-derived ridge
+and scrambled Sobol candidates without reading an init block. Config-started
+MCMC and `--fix-globals --init-strategy config` remain unavailable until those
+DE reruns land; `validate_megamaser_config` reports them as `pending_de` rather
+than as errors.
 
 The all-galaxy validated DE default is `phi_integration = "peak-partition"`.
 The legacy dense fixed grid remains available for controlled comparisons:

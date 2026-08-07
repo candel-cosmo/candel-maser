@@ -35,11 +35,13 @@ ADD_ECC=false
 ADD_QW=false
 MATCH_REID=false
 FIX_FLOORS_PESCE=false
+FIX_GLOBALS=false
 LOO_DROPPED=""
 
 DATASET=""
 ALWAYS_ARGS=()
 SINGLE_ARGS=()
+INIT_ARGS=()
 VARIANT_ARGS=()       # --add-ecc/--add-quadratic-warp: valid for single + joint
 MCMC_JOINT_ARGS=()
 MCMC_ARGS=()
@@ -110,9 +112,10 @@ Joint H0 options (with --infer-H0), passed to run_joint_H0.py:
 
 Common options passed to run_maser.py:
   --init-strategy median|config|reid
-                         median/config apply to all samplers. reid is MCMC and
-                         evidence only; DE never initialises from Pesce/Reid
-                         (but reports its exact reference logP).
+                         MCMC/evidence initial point. Real DE searches ignore
+                         it and always use their ridge/Sobol population;
+                         median/config only select the separate --fix-globals
+                         diagnostic point.
   --spot-batch N         Maser spots evaluated together per pass (DE, mcmc and
                          --evidence). Default: all at once (auto-shrunk only if
                          one candidate's spots overflow VRAM); lower to cut
@@ -356,7 +359,7 @@ while [[ $# -gt 0 ]]; do
         --distance-prior|--field-config)
             JOINT_ARGS+=("$1" "$2"); shift 2 ;;
         --init-strategy)
-            INIT_STRATEGY="$2"; SINGLE_ARGS+=("$1" "$2"); shift 2 ;;
+            INIT_STRATEGY="$2"; INIT_ARGS+=("$1" "$2"); shift 2 ;;
         --num-chains)
             NUM_CHAINS="$2"
             MCMC_JOINT_ARGS+=("$1" "$2"); shift 2 ;;
@@ -386,6 +389,7 @@ while [[ $# -gt 0 ]]; do
             esac
             VARIANT_ARGS+=("$1"); shift ;;
         --resume|--fix-globals|--skip-base-model-seed)
+            [[ "$1" == "--fix-globals" ]] && FIX_GLOBALS=true
             DE_ARGS+=("$1"); shift ;;
         --fix-globals-pesce|--fix-floors-pesce)
             case "$1" in
@@ -469,12 +473,6 @@ fi
 if [[ "$EVIDENCE" == true && "$SAMPLER_EXPLICIT" == true ]]; then
     echo "[ERROR] --sampler is not valid with --evidence"; exit 1
 fi
-if [[ "$EVIDENCE" == false && "$JOINT_H0_MODE" == false
-      && "$SAMPLER" == "de" && "$(chain_init_strategy)" == "reid" ]]; then
-    echo "[ERROR] DE never initialises from Pesce/Reid."
-    echo "        Use --init-strategy median or config; Pesce logP is reported separately."
-    exit 1
-fi
 if [[ "$COMPUTE_EVIDENCE" == true ]]; then
     echo "[ERROR] --compute-evidence is no longer submitted inline;"
     echo "        use --evidence after the chain finishes"
@@ -533,6 +531,7 @@ elif [[ "$JOINT_H0_MODE" == true ]]; then
     # Joint H0 modes are always one joint NUTS chain; --sampler is ignored.
     bad_args=()
     [[ ${#SINGLE_ARGS[@]} -gt 0 ]] && bad_args+=("${SINGLE_ARGS[@]}")
+    [[ ${#INIT_ARGS[@]} -gt 0 ]] && bad_args+=("${INIT_ARGS[@]}")
     [[ ${#MCMC_ARGS[@]} -gt 0 ]] && bad_args+=("${MCMC_ARGS[@]}")
     [[ ${#DE_ARGS[@]} -gt 0 ]] && bad_args+=("${DE_ARGS[@]}")
     [[ ${#bad_args[@]} -gt 0 ]] && fail_if_args "--infer-H0" "${bad_args[@]}"
@@ -547,6 +546,7 @@ elif [[ "$SAMPLER" == "mcmc" ]]; then
     [[ ${#DE_ARGS[@]} -gt 0 ]] && bad_args+=("${DE_ARGS[@]}")
     [[ ${#bad_args[@]} -gt 0 ]] && fail_if_args "--sampler mcmc" "${bad_args[@]}"
     [[ ${#ALWAYS_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${ALWAYS_ARGS[@]}")
+    [[ ${#INIT_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${INIT_ARGS[@]}")
     [[ ${#SINGLE_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${SINGLE_ARGS[@]}")
     [[ ${#VARIANT_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${VARIANT_ARGS[@]}")
     [[ ${#MCMC_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${MCMC_ARGS[@]}")
@@ -559,6 +559,9 @@ else
     [[ ${#MCMC_JOINT_ARGS[@]} -gt 0 ]] && bad_args+=("${MCMC_JOINT_ARGS[@]}")
     [[ ${#bad_args[@]} -gt 0 ]] && fail_if_args "--sampler de" "${bad_args[@]}"
     [[ ${#ALWAYS_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${ALWAYS_ARGS[@]}")
+    if [[ "$FIX_GLOBALS" == true && ${#INIT_ARGS[@]} -gt 0 ]]; then
+        RUN_ARGS+=("${INIT_ARGS[@]}")
+    fi
     [[ ${#SINGLE_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${SINGLE_ARGS[@]}")
     [[ ${#VARIANT_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${VARIANT_ARGS[@]}")
     [[ ${#DE_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${DE_ARGS[@]}")
