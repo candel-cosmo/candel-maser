@@ -401,7 +401,7 @@ max_tree_depth = 10
 root_output = "results/Megamaser"
 # Spot-table dataset: "original_published" | "fiducial". Selects both the
 # tables under data/Megamaser/<dataset>/ and the matching init_<dataset>.toml
-# best points, and namespaces root_output. Override with --dataset. Keep the
-# complete original-published init set as the default until the four pending
-# fiducial DE MAP runs have landed in init_fiducial.toml.
-dataset = "original_published"
+# best points, and namespaces root_output. Override with --dataset. The
+# fiducial linear DE MAP init set is complete, so the erratum tables are the
+# default.
+dataset = "fiducial"
