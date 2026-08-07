@@ -120,7 +120,8 @@ def check_init_block(init_cfg, model):
             f"Add [model.galaxies.{galaxy}.init] to "
             f"scripts/megamaser/init_{dataset}.toml (run run_maser.py "
             f"{galaxy} --sampler de --dataset {dataset} to produce it). Fresh "
-            f"DE searches bootstrap without this block.")
+            f"linear and eccentric-only DE searches bootstrap without this "
+            f"block; quadratic-warp DE searches require the linear [init].")
 
     r_ang = init_cfg.get("r_ang")
     n_spots = getattr(model, "n_spots", None)

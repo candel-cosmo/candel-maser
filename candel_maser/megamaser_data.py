@@ -25,7 +25,7 @@ from ..util import SPEED_OF_LIGHT, data_path, fprint
 # published; "fiducial" is the tables Pesce+2020 actually fitted, released with
 # their erratum. See docs/notes/megamaser_p20_clipping_audit.md for provenance.
 MASER_DATASETS = ("original_published", "fiducial")
-DEFAULT_MASER_DATASET = "original_published"
+DEFAULT_MASER_DATASET = "fiducial"
 
 # Galaxies whose fiducial table is a Pesce+2020 erratum "p20" file; the other
 # two galaxies' tables are identical between datasets.

@@ -54,8 +54,8 @@ diagnostics for existing HDF5 chains; they are not rigorous absolute evidence.
   --num-warmup N     Forwarded to submit.sh (default 10000).
   --num-samples N    Forwarded to submit.sh (default 20000).
   --num-chains N     Forwarded to submit.sh (default 10). Chains run
-                     sequentially in each job; with config/reid init they share
-                     a start point (independent seeds) and drift apart.
+                     concurrently up to the configured worker and allocated
+                     CPU limits.
   --evidence         Submit marginal-objective diagnostics instead of MCMC.
   --skip-done        Forward submit.sh --skip-done; skip existing MCMC HDF5s.
   --gpu-mem GB       Forwarded to submit.sh --evidence.

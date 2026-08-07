@@ -71,7 +71,7 @@ Required:
                          arc: short|medium|long).
   --dataset original_published|fiducial
                          Spot-table dataset. Default: [io].dataset from
-                         config_maser.toml (original_published). Selects the tables,
+                         config_maser.toml (currently fiducial). Selects the tables,
                          the init_<dataset>.toml best points, and the
                          <root_output>/<dataset>/ results namespace.
   --galaxy GAL[,GAL,...]|all
@@ -113,7 +113,7 @@ Joint H0 options (with --infer-H0), passed to run_joint_H0.py:
 Common options passed to run_maser.py:
   --init-strategy median|config|reid
                          MCMC/evidence initial point. Real DE searches ignore
-                         it and always use their ridge/Sobol population;
+                         it and use their model-specific seed policy;
                          median/config only select the separate --fix-globals
                          diagnostic point.
   --spot-batch N         Maser spots evaluated together per pass (DE, mcmc and
@@ -161,13 +161,13 @@ Experimental MCMC options passed to run_maser.py --sampler mcmc:
 
 DE optimiser options passed to run_maser.py --sampler de:
   DE always uses L-SHADE. The initial population normally uses a data ridge
-                         plus Sobol points. Expanded NGC4258 models use the exact
+                         plus Sobol points. Quadratic-warp models use the exact
                          lifted base-model point, an expansion-only cloud, a
                          ridge anchored to the linear-fit mass, and Sobol.
                          Pesce/Reid is never seeded.
                          Population reduction follows DE fitness evaluations,
                          independently of the generation ceiling.
-  --skip-base-model-seed Explicitly omit that NGC4258 point and seed cloud.
+  --skip-base-model-seed Explicitly omit that quadratic base-model seed cloud.
   --resume               Resume from the DE checkpoint if present.
   --fix-globals          Skip the DE search; score logP and the conditional
                          r_ang MAP at the config [init] globals.
@@ -438,7 +438,7 @@ if [[ -z "$GALAXY" ]]; then
     echo "[ERROR] --galaxy is required. Choices: $ALL_GALS"; exit 1
 fi
 [[ -z "$DATASET" ]] && DATASET="$(config_value io dataset)"
-[[ -z "$DATASET" ]] && DATASET="original_published"
+[[ -z "$DATASET" ]] && DATASET="fiducial"
 if [[ "$DATASET" != "original_published" && "$DATASET" != "fiducial" ]]; then
     echo "[ERROR] --dataset must be original_published or fiducial"
     exit 1

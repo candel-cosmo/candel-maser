@@ -175,6 +175,16 @@ def _clean_init(model, init_cfg):
     return init_params
 
 
+def _lift_base_model_init(model, gal_cfg):
+    """Lift the configured linear-model point into an expanded model."""
+    base_init = dict(gal_cfg["init"])
+    for key in (
+            "e_x", "e_y", "ecc", "periapsis", "periapsis_rad",
+            "dperiapsis_dr", "d2i_dr2", "d2Omega_dr2"):
+        base_init.pop(key, None)
+    return _clean_init(model, base_init)
+
+
 def _principal_angle_deg(x, y):
     """Sky position angle (deg) of the dominant axis of the spot cloud.
 
@@ -436,6 +446,8 @@ def _normalise_theta_point(theta, names, lo, hi):
 _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
 _DE_BASE_MODEL_SEED_POLICY = (
+    "linear_expansion_ridge_sobol_base_config_v6")
+_DE_LEGACY_BASE_MODEL_SEED_POLICY = (
     "vanilla_expansion_ridge_sobol_ngc4258_base_config_v5")
 _DE_POPULATION_SCHEDULE = "nfe_linear"
 _DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v3"
@@ -464,6 +476,10 @@ def _initial_de_seed_points(data_seeds, base_model_seed=None):
     if data_seeds is not None:
         seeds.append(np.atleast_2d(np.asarray(data_seeds, dtype=float)))
     return np.vstack(seeds) if seeds else None
+
+
+def _quadratic_de_requires_base_model_seed(model, fixed_globals=False):
+    return bool(model.use_quadratic_warp and not fixed_globals)
 
 
 def _de_spot_batch_policy(galaxy, use_f64, requested, configured, planned):
@@ -523,6 +539,18 @@ def _logp_2d_terms(target, theta):
         remat=False, scan_cache=scan_cache)
     lp = _global_logprior(target, theta, ll.dtype)
     return lp, ll, phys_args, phys_kw
+
+
+def _marginal_loglik_per_spot(target, theta):
+    """Per-spot joint ``(r_ang, phi)`` marginal at fixed globals."""
+    theta = target.complete_params(theta)
+    model = target.model
+    phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
+    groups = model._build_conditional_r_grids(
+        phys_args[2], phys_args[3], phys_args[4], phys_args[16],
+        phys_args[8], phys_args[15], phys_args, phys_kw)
+    return model._eval_phi_marginal(
+        groups, phys_args, phys_kw, spot_batch=target.spot_batch)
 
 
 def _make_logp(target, names, fixed=None):
@@ -1298,6 +1326,50 @@ def _save_de_progress_plot(checkpoint_path, generation, logp, D_A):
     return plot_path
 
 
+def _save_spot_loglik_plot(path, velocity, loglik, accel_measured):
+    """Plot individual and distributed per-spot marginal log-likelihoods."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    velocity = np.asarray(velocity, dtype=float)
+    loglik = np.asarray(loglik, dtype=float)
+    accel_measured = np.asarray(accel_measured, dtype=bool)
+    if not (velocity.shape == loglik.shape == accel_measured.shape):
+        raise ValueError("Per-spot plot arrays must have matching shapes.")
+    finite = np.isfinite(velocity) & np.isfinite(loglik)
+    if not np.any(finite):
+        raise ValueError("Per-spot marginal log-likelihoods are all non-finite.")
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp.png"
+    figure = Figure(figsize=(9.0, 4.8), constrained_layout=True)
+    FigureCanvasAgg(figure)
+    axes = figure.subplots(
+        1, 2, sharey=True, gridspec_kw={"width_ratios": [3.2, 1.0]})
+    bins = np.histogram_bin_edges(
+        loglik[finite], bins=min(40, max(10, int(np.sqrt(finite.sum())))))
+    for measured, label, color in (
+            (False, "no measured acceleration", "tab:blue"),
+            (True, "measured acceleration", "tab:orange")):
+        use = finite & (accel_measured == measured)
+        if not np.any(use):
+            continue
+        axes[0].scatter(
+            velocity[use], loglik[use], s=16, alpha=0.75,
+            color=color, edgecolor="none", label=label)
+        axes[1].hist(
+            loglik[use], bins=bins, orientation="horizontal",
+            histtype="step", lw=1.2, color=color)
+    axes[0].set_xlabel(r"Observed velocity [km s$^{-1}$]")
+    axes[0].set_ylabel(
+        r"Per-spot $\log p(d_i\mid\hat{\theta})$, marginalised over $(r,\phi)$")
+    axes[1].set_xlabel("Count")
+    axes[0].legend(loc="best", fontsize=8)
+    figure.savefig(tmp, dpi=220)
+    os.replace(tmp, path)
+    return path
+
+
 def _load_de_history(checkpoint, generation, logp, D_A):
     if checkpoint is None:
         return [generation], [logp], [D_A]
@@ -1390,10 +1462,17 @@ def _validate_de_checkpoint_policy(
                 "compatible with this run.")
         fprint("Legacy *_nopesce checkpoint establishes the unseeded "
                "Pesce/Reid policy.")
-    elif saved_seed_policy != seed_policy:
+    legacy_base_seed = (
+        seed_policy == _DE_BASE_MODEL_SEED_POLICY
+        and saved_seed_policy == _DE_LEGACY_BASE_MODEL_SEED_POLICY)
+    if saved_seed_policy is not None and not (
+            saved_seed_policy == seed_policy or legacy_base_seed):
         raise ValueError(
             f"Checkpoint seed policy is {saved_seed_policy!r}, requested "
             f"{seed_policy!r}.")
+    if legacy_base_seed:
+        fprint("Accepted legacy NGC4258 base-model seed policy; the "
+               "quadratic seed population is unchanged.")
     if optimizer_seed is not None:
         if "optimizer_seed" not in checkpoint.files:
             raise ValueError("L-SHADE checkpoint is missing optimizer_seed.")
@@ -1515,9 +1594,8 @@ def _print_required_de_seeds(names, seed_points, fitness,
     fitness = np.asarray(fitness)
     fixed = dict(fixed) if fixed else {}
     for i, point in enumerate(points[:required_seed_points]):
-        fsection("Required NGC4258 base-model seed (injected)")
-        fprint("source: [model.galaxies.NGC4258.init], lifted into the "
-               "active expanded model")
+        fsection("Required base-model seed (injected)")
+        fprint("source: active galaxy [init], lifted into the expanded model")
         fprint("scoring: exact all-spot joint (r_ang, phi) marginal + "
                "global priors, identical to every DE candidate")
         fprint("note: added normalised priors can shift absolute logP from "
@@ -1543,6 +1621,46 @@ _PESCE_FLOOR_UNITS = (("sigma_x_floor", "uas"), ("sigma_y_floor", "uas"),
                       ("sigma_a_floor", "km/s/yr"))
 _PESCE_FLOOR_NAMES = tuple(name for name, _ in _PESCE_FLOOR_UNITS)
 _FLOOR_UNIT = dict(_PESCE_FLOOR_UNITS)
+_DISTANCE_SLICE_FRACTIONS = np.asarray(
+    (0.001, 0.003, 0.01, 0.03, 0.1, 0.2))
+
+
+def _estimate_distance_gaussian(exact_eval, best_solution, best_fitness,
+                                distance_idx, lo, hi):
+    """Finite-difference conditional Gaussian scale in physical units."""
+    point = np.asarray(best_solution, dtype=float)
+    room = min(point[distance_idx], 1.0 - point[distance_idx])
+    steps = _DISTANCE_SLICE_FRACTIONS[
+        _DISTANCE_SLICE_FRACTIONS < 0.95 * room]
+    if not steps.size:
+        return None
+
+    points = np.repeat(point[None, :], 2 * len(steps), axis=0)
+    points[0::2, distance_idx] -= steps
+    points[1::2, distance_idx] += steps
+    values = np.asarray(exact_eval(points))
+    f_minus, f_plus = values[0::2], values[1::2]
+    h = steps * (float(hi[distance_idx]) - float(lo[distance_idx]))
+    f0 = float(best_fitness)
+    rise = 0.5 * (f_plus + f_minus) - f0
+    precision = (f_plus - 2.0 * f0 + f_minus) / h**2
+    logp_gradient = -(f_plus - f_minus) / (2.0 * h)
+    resolution = (32.0 * np.finfo(values.dtype).eps
+                  * max(1.0, abs(f0)))
+    valid = (np.isfinite(precision) & np.isfinite(logp_gradient)
+             & (precision > 0.0) & (rise > resolution))
+    if not np.any(valid):
+        return None
+    candidates = np.flatnonzero(valid)
+    chosen = candidates[np.argmin(np.abs(np.log(rise[candidates] / 0.5)))]
+    return {
+        "sigma": float(1.0 / np.sqrt(precision[chosen])),
+        "gradient": float(logp_gradient[chosen]),
+        "precision": float(precision[chosen]),
+        "step": float(h[chosen]),
+        "rise": float(rise[chosen]),
+        "mode_offset": float(logp_gradient[chosen] / precision[chosen]),
+    }
 
 
 def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
@@ -1603,7 +1721,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     fprint("population-reduction horizon only; candidate evaluations are not "
            "capped and do not terminate the optimiser")
     if seed_policy == _DE_BASE_MODEL_SEED_POLICY:
-        fprint("seed policy: NGC4258 exact vanilla config point + "
+        fprint("seed policy: exact linear-model config point + "
                "expansion-only variation cloud + linear-mass ridge + Sobol; "
                "Pesce/Reid is never inserted")
     else:
@@ -1931,6 +2049,11 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         phase_timing["checkpoint"] += time.perf_counter() - phase_start
     report_timing("final timing")
 
+    distance_gaussian = None
+    if distance_name == "D_A":
+        distance_gaussian = _estimate_distance_gaussian(
+            exact_eval, best_solution, best_fitness, distance_idx, lo, hi)
+
     x_best = np.asarray(lo + jnp.asarray(best_solution) * scale)
     params_best = _flat_to_theta(jnp.asarray(x_best), names)
     params_best.update(fixed)
@@ -1948,6 +2071,7 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     return output, best_logp, {
         "generations": final_gen,
         "reference_logp": reference_logp,
+        "distance_gaussian": distance_gaussian,
     }
 
 
@@ -2030,7 +2154,7 @@ def main(argv=None):
     parser.add_argument(
         "--skip-base-model-seed", action="store_true",
         help="Do not include the config [init] no-eccentricity, "
-             "no-quadratic-warp NGC4258 point in an expanded-model DE "
+             "no-quadratic-warp point in a quadratic-warp DE "
              "initial population. By default that point is required.")
     parser.add_argument("--mass-parameterization",
                         choices=("eta", "log_mbh"), default=None,
@@ -2041,7 +2165,8 @@ def main(argv=None):
         help="Only used by --fix-globals (median or config). Real DE "
              "searches ignore this option and always build their initial "
              "population from the data-derived ridge and scrambled Sobol "
-             "candidates.")
+             "candidates, plus the linear-model anchor for quadratic-warp "
+             "models.")
     parser.add_argument("--spot-batch", type=int, default=None)
     parser.add_argument(
         "--phi-integration", choices=("fixed-grid", "peak-partition"),
@@ -2211,26 +2336,20 @@ def main(argv=None):
     finally:
         os.unlink(tmp.name)
 
-    expanded_ngc4258 = (
-        args.galaxy == "NGC4258"
-        and (model.use_ecc or model.use_quadratic_warp))
-    if args.skip_base_model_seed and not expanded_ngc4258:
+    fixed_globals = args.fix_globals or args.fix_globals_pesce
+    quadratic_de = _quadratic_de_requires_base_model_seed(
+        model, fixed_globals=fixed_globals)
+    if args.skip_base_model_seed and not quadratic_de:
         raise SystemExit(
-            "--skip-base-model-seed requires an eccentric and/or quadratic-"
-            "warp NGC4258 DE run.")
+            "--skip-base-model-seed requires a quadratic-warp DE run.")
     base_model_params = None
-    if expanded_ngc4258 and not args.skip_base_model_seed:
+    if quadratic_de and not args.skip_base_model_seed:
         try:
-            base_model_init = dict(gal_blk["init"])
-            for key in (
-                    "e_x", "e_y", "ecc", "periapsis", "periapsis_rad",
-                    "dperiapsis_dr", "d2i_dr2", "d2Omega_dr2"):
-                base_model_init.pop(key, None)
-            base_model_params = _clean_init(model, base_model_init)
+            base_model_params = _lift_base_model_init(model, gal_blk)
         except KeyError as exc:
             raise SystemExit(
-                "NGC4258 base-model DE seeding requires [model.galaxies."
-                "NGC4258.init].") from exc
+                f"{args.galaxy} quadratic-warp DE seeding requires "
+                f"[model.galaxies.{args.galaxy}.init].") from exc
 
     configured_init_strategy = (
         _required_inference(inf_cfg, "init_strategy")
@@ -2273,7 +2392,6 @@ def main(argv=None):
     pesce_params = None
     pesce_status = ()
     fixed_floors = None
-    fixed_globals = args.fix_globals or args.fix_globals_pesce
     if args.fix_globals_pesce:
         try:
             init_params, pesce_status = _pesce_init(target, args.galaxy,
@@ -2384,10 +2502,10 @@ def main(argv=None):
         seed_points = _initial_de_seed_points(
             data_seeds, base_model_seed=base_model_seed)
         if base_model_seed is not None:
-            fprint("NGC4258 base-model config point is required in the "
+            fprint(f"{args.galaxy} base-model config point is required in the "
                    "initial DE population.")
         elif args.skip_base_model_seed:
-            fprint("NGC4258 base-model config point skipped explicitly "
+            fprint(f"{args.galaxy} base-model config point skipped explicitly "
                    "(--skip-base-model-seed).")
         fprint("Pesce/Reid reference is not part of the DE initial "
                "population.")
@@ -2450,11 +2568,47 @@ def main(argv=None):
             required_seed_points=int(base_model_seed is not None))
         pesce_logp = run_info["reference_logp"]
         run_summary = f"generations = {run_info['generations']}"
+        try:
+            theta = {
+                name: jnp.asarray(init_params[name]) for name in target.names}
+            spot_loglik = jax.jit(
+                lambda point: _marginal_loglik_per_spot(target, point))(theta)
+            spot_loglik = np.asarray(jax.device_get(spot_loglik))
+            spot_plot_path = (
+                os.path.splitext(ckpt_path)[0] + "_spot_loglik.png")
+            _save_spot_loglik_plot(
+                spot_plot_path, data["velocity"], spot_loglik,
+                data["accel_measured"])
+        except Exception as error:
+            fprint("WARNING: per-spot marginal log-likelihood plot failed: "
+                   f"{error}")
+        else:
+            fprint("saved per-spot marginal log-likelihood plot to "
+                   f"{spot_plot_path}")
     dt = time.time() - t0
 
     fsection(f"MAP results ({args.galaxy}, {dt:.0f}s)")
     label = "logL" if args.fix_globals_pesce else "logP"
     fprint(f"best {label} = {best_logp:.2f}; {run_summary}")
+    if not fixed_globals:
+        fsection("Local D_A Gaussian approximation")
+        distance_gaussian = run_info["distance_gaussian"]
+        if distance_gaussian is None:
+            fprint("unavailable: the symmetric finite-difference slice was "
+                   "not locally convex above numerical resolution")
+        else:
+            fprint(
+                "conditional on all other MAP coordinates: "
+                f"sigma(D_A) = {distance_gaussian['sigma']:.4g} Mpc")
+            fprint(
+                f"dlogP/dD_A = {distance_gaussian['gradient']:.4g} "
+                f"Mpc^-1; -d2logP/dD_A2 = "
+                f"{distance_gaussian['precision']:.4g} Mpc^-2")
+            fprint(
+                f"finite-difference step = {distance_gaussian['step']:.4g} "
+                f"Mpc; mean Delta(-logP) = "
+                f"{distance_gaussian['rise']:.4g}; local mode offset = "
+                f"{distance_gaussian['mode_offset']:.4g} Mpc")
     if pesce_logp is not None and not fixed_globals:
         delta = best_logp - pesce_logp
         fprint(f"DE - Pesce/Reid baseline = {delta:.2f}")
