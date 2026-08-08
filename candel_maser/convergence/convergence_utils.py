@@ -20,14 +20,31 @@ axis so the intermediate fits on a 12 GB GPU.
 """
 
 from functools import partial
+import os
+import sys
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import tomli
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
 from candel.util import get_nested
+
+MASER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if MASER_DIR not in sys.path:
+    sys.path.insert(0, MASER_DIR)
+
+from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
+
+
+def load_master_config(path, dataset=None):
+    """Load the base megamaser config and apply its selected dataset."""
+    with open(path, "rb") as f:
+        cfg = tomli.load(f)
+    apply_dataset(cfg, dataset)
+    return cfg
 
 
 def cast_floats(x, dtype):
@@ -112,7 +129,7 @@ def _padded_group_chunks(idx, values, batch):
 
 def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
                                  n_phi, spot_batch, log_w_r=None,
-                                 partition_support=False):
+                                 partition_support=False, spot_indices=None):
     """Per-spot dense phi reference on fixed radial nodes.
 
     ``r_ang`` is either ``(n_spots,)`` for the fixed-radius profile or
@@ -122,6 +139,8 @@ def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
     The default retains the older full-2pi leakage diagnostic;
     ``partition_support=True`` instead uses the exact half-plane support of
     peak-partition for an apples-to-apples integrator comparison.
+    ``spot_indices`` limits diagnostic work while retaining the full-size
+    output; unselected entries are ``-inf``.
     """
     r_ang = np.asarray(r_ang)
     if r_ang.shape[0] != model.n_spots:
@@ -135,11 +154,20 @@ def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
         raise ValueError("fixed-r r_ang must be one-dimensional.")
 
     dtype = jnp.asarray(phys_args[2]).dtype
-    out = np.empty(model.n_spots, dtype=np.float64)
+    selected = None
+    if spot_indices is not None:
+        selected = np.asarray(spot_indices, dtype=np.int32)
+        if (selected.ndim != 1 or not len(selected)
+                or len(np.unique(selected)) != len(selected)
+                or np.any((selected < 0) | (selected >= model.n_spots))):
+            raise ValueError("spot_indices must be unique valid spot indices.")
+    out = np.full(model.n_spots, -np.inf, dtype=np.float64)
 
     for type_key, idx in (("sys", model._idx_sys),
                           ("red", model._idx_red),
                           ("blue", model._idx_blue)):
+        if selected is not None:
+            idx = np.asarray(idx)[np.isin(np.asarray(idx), selected)]
         if not int(idx.shape[0]):
             continue
         values = [r_ang]
@@ -184,12 +212,13 @@ def dense_phi_reference_per_spot(model, phys_args, phys_kw, r_ang,
 
 def dense_r_phi_reference_per_spot(model, phys_args, phys_kw, n_r, n_phi,
                                    r_chunk, spot_batch,
-                                   partition_support=True):
+                                   partition_support=True, spot_indices=None):
     """Per-spot float64 reference on a full-support log-r x phi grid."""
     n_r, n_phi = int(n_r), int(n_phi)
     r_chunk = int(r_chunk)
     if n_r < 3 or n_phi < 3 or r_chunk < 1:
-        raise ValueError("n_r and n_phi must be >= 3; r_chunk must be positive.")
+        raise ValueError(
+            "n_r and n_phi must be >= 3; r_chunk must be positive.")
 
     dtype = jnp.asarray(phys_args[2]).dtype
     if dtype != jnp.float64:
@@ -209,7 +238,8 @@ def dense_r_phi_reference_per_spot(model, phys_args, phys_kw, n_r, n_phi,
             np.asarray(log_w_r[start:stop]), shape)
         partial = dense_phi_reference_per_spot(
             model, phys_args, phys_kw, r_values, n_phi, spot_batch,
-            log_w_r=log_weights, partition_support=partition_support)
+            log_w_r=log_weights, partition_support=partition_support,
+            spot_indices=spot_indices)
         total = np.logaddexp(total, partial)
     return total
 
@@ -256,7 +286,8 @@ def build_model(galaxy, master_cfg, dtype=None, **overrides):
 
     import tomli_w
 
-    from candel.pvdata.megamaser_data import load_megamaser_spots
+    from candel.pvdata.megamaser_data import (load_megamaser_spots,
+                                              maser_data_root)
 
     cfg = {k: (v.copy() if isinstance(v, dict) else v)
            for k, v in master_cfg.items()}
@@ -277,7 +308,7 @@ def build_model(galaxy, master_cfg, dtype=None, **overrides):
         cfg["model"][k] = v
 
     data = load_megamaser_spots(
-        master_cfg["io"]["maser_data"]["root"], galaxy=galaxy,
+        maser_data_root(master_cfg["io"]["dataset"]), galaxy=galaxy,
         v_sys_obs=master_cfg["model"]["galaxies"][galaxy]["v_sys_obs"])
     for key in ("D_lo", "D_hi"):
         if key in master_cfg["model"]["galaxies"][galaxy]:
@@ -330,11 +361,10 @@ def resolve_grid_for_galaxy(master_cfg, galaxy, profile):
 # AD-friendly kernels for the summed-gradient convergence tests.
 # -----------------------------------------------------------------------
 
-# Parameters differentiated by the gradient convergence checks. Galaxies
-# with use_quadratic_warp or use_ecc extend this list via
-# ``extend_grad_params``.
+# Geometry/nuisance parameters differentiated by the gradient checks. The
+# active distance and mass coordinates are prepended by ``extend_grad_params``.
 GRAD_PARAMS_BASE = (
-    "H0", "D_c", "log_MBH", "x0", "y0", "dv_sys",
+    "x0", "y0", "dv_sys",
     "i0", "di_dr", "Omega0", "dOmega_dr",
     "sigma_x_floor", "sigma_y_floor",
     "sigma_v_sys", "sigma_v_hv", "sigma_a_floor",
@@ -342,9 +372,18 @@ GRAD_PARAMS_BASE = (
 
 
 def extend_grad_params(model, sample):
-    """Return GRAD_PARAMS_BASE extended with the optional-feature
-    parameters present in ``sample`` (quadratic warp, eccentricity)."""
-    keys = list(GRAD_PARAMS_BASE)
+    """Return the active sampled coordinates for gradient checks."""
+    keys = []
+    if "D_A" in sample:
+        keys.append("D_A")
+    else:
+        if "H0" in sample:
+            keys.append("H0")
+        keys.append("D_c")
+    keys.append(
+        "eta" if getattr(model, "mass_parameterization", "eta") == "eta"
+        else "log_MBH")
+    keys.extend(GRAD_PARAMS_BASE)
     if model.use_quadratic_warp:
         for k in ("d2i_dr2", "d2Omega_dr2"):
             if k in sample:
@@ -365,23 +404,50 @@ def _sample_dtype(sample):
 
 
 def ensure_grad_sample(model, init_block, dtype=None):
-    """Populate a jnp-typed sample dict with every parameter used by
-    the grad check, filling absent entries with sensible defaults so
-    ``jax.grad`` produces a meaningful partial for every key.
-
-    ``H0`` defaults to ``model/H0_ref`` (matches ``jax_phys_from_sample``
-    and ``phys_from_sample``); other missing entries default to 0.0,
-    which is a valid neighbourhood for the remaining parameters
-    (Cartesian offsets, warp rates, noise floors — all small).
-    """
+    """Build the current scalar D_A/eta sample used by gradient checks."""
     dtype = dtype or (jnp.float64 if jax.config.jax_enable_x64
                       else jnp.float32)
-    sample = {k: jnp.asarray(float(v), dtype=dtype)
-              for k, v in init_block.items()}
+    sample = {
+        k: jnp.asarray(float(value), dtype=dtype)
+        for k, value in init_block.items()
+        if np.asarray(value).ndim == 0
+    }
     H0_ref = float(get_nested(model.config, "model/H0_ref", 73.0))
-    defaults = {"H0": H0_ref}
+    h = H0_ref / 100.0
+    if getattr(model, "_D_A_uniform", True):
+        if "D_A" not in sample:
+            D_c = sample.pop("D_c")
+            z = model.distance2redshift(jnp.atleast_1d(D_c), h=h).squeeze()
+            sample["D_A"] = D_c / (1.0 + z)
+        sample.pop("D_c", None)
+        sample.pop("H0", None)
+
+    mass_param = getattr(model, "mass_parameterization", "eta")
+    if mass_param == "eta":
+        if "eta" not in sample:
+            if "D_A" in sample:
+                D_A = sample["D_A"]
+            else:
+                D_c = sample["D_c"]
+                z = model.distance2redshift(
+                    jnp.atleast_1d(D_c), h=h).squeeze()
+                D_A = D_c / (1.0 + z)
+            sample["eta"] = sample["log_MBH"] - jnp.log10(D_A)
+        sample.pop("log_MBH", None)
+    else:
+        if "log_MBH" not in sample:
+            if "D_A" in sample:
+                D_A = sample["D_A"]
+            else:
+                D_c = sample["D_c"]
+                z = model.distance2redshift(
+                    jnp.atleast_1d(D_c), h=h).squeeze()
+                D_A = D_c / (1.0 + z)
+            sample["log_MBH"] = sample["eta"] + jnp.log10(D_A)
+        sample.pop("eta", None)
+
     for k in GRAD_PARAMS_BASE:
-        sample.setdefault(k, jnp.asarray(defaults.get(k, 0.0), dtype=dtype))
+        sample.setdefault(k, jnp.asarray(0.0, dtype=dtype))
     if model.use_quadratic_warp:
         for k in ("d2i_dr2", "d2Omega_dr2"):
             sample.setdefault(k, jnp.asarray(0.0, dtype=dtype))
@@ -411,13 +477,20 @@ def jax_phys_from_sample(model, sample):
             return jnp.asarray(default, dtype=dtype)
         raise KeyError(f"missing '{key}' in sample")
 
-    H0_ref = float(get_nested(model.config, "model/H0_ref", 73.0))
-    h = g("H0", H0_ref) / 100.0
-    D_c = g("D_c")
-    z_cosmo = model.distance2redshift(
-        jnp.atleast_1d(D_c), h=h).squeeze()
-    D_A = D_c / (1.0 + z_cosmo)
-    M_BH = 10.0 ** (g("log_MBH") - 7.0)
+    if "D_A" in sample:
+        D_A = g("D_A")
+    else:
+        H0_ref = float(get_nested(model.config, "model/H0_ref", 73.0))
+        h = g("H0", H0_ref) / 100.0
+        D_c = g("D_c")
+        z_cosmo = model.distance2redshift(
+            jnp.atleast_1d(D_c), h=h).squeeze()
+        D_A = D_c / (1.0 + z_cosmo)
+    log_MBH = (
+        g("eta") + jnp.log10(D_A)
+        if getattr(model, "mass_parameterization", "eta") == "eta"
+        else g("log_MBH"))
+    M_BH = 10.0 ** (log_MBH - 7.0)
     v_sys = model.v_sys_obs + g("dv_sys", 0.0)
 
     phys_args = (
@@ -436,7 +509,7 @@ def jax_phys_from_sample(model, sample):
         g("sigma_v_hv") ** 2,
         g("sigma_a_floor") ** 2,
     )
-    phys_kw = {}
+    phys_kw = {"dv_sys": g("dv_sys", 0.0)}
     if model.use_quadratic_warp:
         phys_kw["d2i_dr2"] = jnp.deg2rad(g("d2i_dr2", 0.0))
         phys_kw["d2Omega_dr2"] = jnp.deg2rad(g("d2Omega_dr2", 0.0))

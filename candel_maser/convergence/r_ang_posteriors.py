@@ -1,6 +1,6 @@
 """
 Per-spot 1D posterior on r_ang after marginalising phi, with all global
-parameters pinned to the `init` block in config_maser.toml. No sampling
+parameters pinned to the selected dataset's `init` block. No sampling
 — a diagnostic pass through the fixed-r phi marginal at a single point
 in global-parameter space.
 
@@ -20,8 +20,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-import tomli
-from convergence_utils import build_model
+from convergence_utils import add_dataset_arg, build_model, load_master_config
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
@@ -269,16 +268,15 @@ def main():
         help="RNG seed for the spot selection.")
     parser.add_argument(
         "--out", type=str,
-        default=("/mnt/users/rstiskalek/CANDEL/results/Megamaser/"
-                 "convergence/r_ang_posteriors.png"))
+        default="results/Megamaser/convergence/r_ang_posteriors.png")
+    add_dataset_arg(parser)
     args = parser.parse_args()
 
     jax.config.update("jax_enable_x64", True)
     print(f"JAX platform: {jax.default_backend()}, precision: float64",
           flush=True)
 
-    with open(CONFIG_PATH, "rb") as f:
-        master_cfg = tomli.load(f)
+    master_cfg = load_master_config(CONFIG_PATH, args.dataset)
 
     if args.f_grid != 1.0:
         print(f"f-grid={args.f_grid:g}", flush=True)

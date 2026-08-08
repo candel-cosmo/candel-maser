@@ -18,13 +18,16 @@ The sampler targets the megamaser disk likelihood:
 
 * global disk parameters are sampled by BlackJAX NUTS in unconstrained
   Euclidean coordinates;
-* the distance/mass block is sampled either as ``D_c`` or direct ``D_A``, and
-  either ``log_MBH`` or ``eta = log_MBH - log10(D_A)``;
+* the production distance/mass block samples direct ``D_A`` and either
+  ``log_MBH`` or ``eta = log_MBH - log10(D_A)``;
 * ``r_ang`` is represented by non-centred log-radius residuals,
   ``z_r = log(r_ang / r_hat(theta))``, and updated jointly with ``phi`` by a
   vectorised per-spot adaptive random-walk Metropolis (correlated ``(z_r,
   phi)`` block, plus a reflection move that hops the two ``phi`` modes of
   high-velocity spots);
+* an optional unit-Jacobian translation carries systemic ``phi`` with the
+  astrometric centre during the global update, without changing the physical
+  coordinates used by the latent sweep or saved samples;
 * warmup adapts the global NUTS step size and inverse mass matrix using the
   BlackJAX window-adaptation primitives, and adapts the latent block by an
   adaptive-Metropolis scheme (per-spot empirical covariance for the proposal
@@ -34,7 +37,9 @@ The sampler targets the megamaser disk likelihood:
 The module does not import BlackJAX at import time.  This keeps the rest of the
 package usable while BlackJAX is an optional dependency.
 """
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, Dict, NamedTuple, Tuple
@@ -46,10 +51,12 @@ from numpyro.distributions import Delta, Uniform
 from numpyro.distributions.transforms import biject_to
 
 from ..util import get_nested
-from .maser_physics import C_a, C_v
+from . import maser_physics
 
 # phys_args positional indices.
-_I_DA, _I_MBH, _I_VSYS, _I_I0, _I_VARVHV, _I_SAF2 = 2, 3, 4, 8, 15, 16
+(_I_X0, _I_Y0, _I_DA, _I_MBH, _I_VSYS, _I_RREF_I, _I_RREF_OMEGA,
+ _I_I0, _I_DI, _I_OMEGA0, _I_DOMEGA, _I_SXF2, _I_SYF2, _I_VARVHV,
+ _I_SAF2) = (0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 15, 16)
 
 
 def _require_blackjax():
@@ -69,7 +76,7 @@ def _require_blackjax():
     return blackjax, window_adaptation
 
 
-def _step_bar(total, enabled, desc):
+def _step_bar(total, enabled, desc, position=None):
     """tqdm bar counting MCMC steps, or None when disabled/unavailable.
 
     Steps run in chunks (see ``_chunk_bounds``), but the bar advances by each
@@ -81,23 +88,15 @@ def _step_bar(total, enabled, desc):
         from tqdm.auto import tqdm
     except Exception:
         return None
-    return tqdm(total=total, desc=desc)
+    return tqdm(total=total, desc=desc, position=position, dynamic_ncols=True)
 
 
 def _update_mcmc_progress_postfix(progress, info, theta_scale):
-    """Show experimental MCMC diagnostics in a tqdm progress bar."""
+    """Show the global step scale without overflowing fixed progress rows."""
     if not hasattr(progress, "set_postfix"):
         return
-    t_acc = float(np.asarray(info["theta_acceptance_rate"]))
-    l_acc = float(np.asarray(info["latent_accept_mean"]))
-    refl = float(np.asarray(info["reflect_accept_mean"]))
     theta_scale = float(np.mean(np.asarray(theta_scale)))
-    progress.set_postfix({
-        "theta_scale": f"{theta_scale:.2e}",
-        "theta_acc": f"{t_acc:.3f}",
-        "latent_acc": f"{l_acc:.3f}",
-        "refl_acc": f"{refl:.3f}",
-    })
+    progress.set_postfix({"theta": f"{theta_scale:.2e}"}, refresh=False)
 
 
 def _scan_fn(body, jit_steps):
@@ -163,13 +162,14 @@ def _seeds(model, phys_args):
     dv2_safe = jnp.where(
         is_hv, dv * dv + jnp.asarray(1e-6, dtype=dtype),
         jnp.asarray(1.0, dtype=dtype))
-    r_vel = M_BH * (C_v * sin_i) ** 2 / (D_A * dv2_safe)
+    r_vel = M_BH * (maser_physics.C_v * sin_i) ** 2 / (D_A * dv2_safe)
 
     use_accel = (~is_hv) & has_accel
     a_safe = jnp.where(
         use_accel, jnp.abs(model._all_a) + jnp.asarray(1e-6, dtype=dtype),
         jnp.asarray(1.0, dtype=dtype))
-    r_acc_arg = C_a * M_BH * sin_i / (D_A ** 2 * a_safe)
+    r_acc_arg = (
+        maser_physics.C_a * M_BH * sin_i / (D_A ** 2 * a_safe))
     r_acc = jnp.sqrt(jnp.maximum(r_acc_arg, jnp.asarray(1e-30, dtype=dtype)))
 
     r_hat = jnp.where(is_hv, r_vel, r_acc)
@@ -378,7 +378,7 @@ def _stack_dicts(rows):
     }
 
 
-def _stack_chain_results(results):
+def _stack_chain_results(results, runtime_seconds, chain_workers):
     """Stack single-chain results into one chain-first result."""
     if not results:
         raise ValueError("at least one chain result is required")
@@ -396,7 +396,34 @@ def _stack_chain_results(results):
         warmup_info=_stack_dicts([r.warmup_info for r in results]),
         parameters=_stack_dicts([r.parameters for r in results]),
         theta_sites=theta_sites,
-        runtime_seconds=float(sum(r.runtime_seconds for r in results)))
+        runtime_seconds=float(runtime_seconds),
+        chain_method="parallel" if chain_workers > 1 else "sequential",
+        chain_workers=int(chain_workers))
+
+
+def _chain_worker_count(num_chains, chain_workers=8):
+    """Number of chains that fit under the requested and CPU limits."""
+    num_chains = int(num_chains)
+    chain_workers = int(chain_workers)
+    if num_chains < 1 or chain_workers < 1:
+        raise ValueError("num_chains and chain_workers must be >= 1.")
+    limits = [num_chains, chain_workers]
+    for key in ("SLURM_CPUS_PER_TASK", "PBS_NP", "NSLOTS"):
+        try:
+            value = int(os.environ.get(key, ""))
+        except ValueError:
+            continue
+        if value > 0:
+            limits.append(value)
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            affinity = len(os.sched_getaffinity(0))
+            if affinity > 0:
+                limits.append(affinity)
+        except OSError:
+            pass
+    limits.append(os.cpu_count() or 1)
+    return min(limits)
 
 
 def estimate_radial_eps(model, theta, h, delta=0.02,
@@ -427,6 +454,26 @@ def _r_ang_from_z(model, theta, h, z_r):
     phys_args, phys_kw = model.phys_from_params_jax(theta, h)
     r_hat, r_min, r_max = _seeds(model, phys_args)
     return r_hat * jnp.exp(z_r), r_hat, r_min, r_max, phys_args, phys_kw
+
+
+def _systemic_phi_xy_coefficients(model, r_ang, phys_args, phys_kw):
+    """Fixed linear response of systemic phi to the astrometric centre."""
+    _, Omega_r = maser_physics.warp_geometry(
+        r_ang, phys_args[_I_RREF_I], phys_args[_I_RREF_OMEGA],
+        phys_args[_I_I0], phys_args[_I_DI],
+        phys_args[_I_OMEGA0], phys_args[_I_DOMEGA],
+        phys_kw.get("d2i_dr2", 0.0), phys_kw.get("d2Omega_dr2", 0.0))
+    sin_O, cos_O = jnp.sin(Omega_r), jnp.cos(Omega_r)
+    radius_uas = 1e3 * r_ang
+    dx_dphi = radius_uas * sin_O
+    dy_dphi = radius_uas * cos_O
+    var_x = model._all_sigma_x2 + phys_args[_I_SXF2]
+    var_y = model._all_sigma_y2 + phys_args[_I_SYF2]
+    denom = dx_dphi**2 / var_x + dy_dphi**2 / var_y
+    denom = jnp.maximum(denom, jnp.finfo(r_ang.dtype).tiny)
+    active = ~model.is_highvel
+    return (jnp.where(active, dx_dphi / var_x / denom, 0.0),
+            jnp.where(active, dy_dphi / var_y / denom, 0.0))
 
 
 def _ll_fixed_phi_per_spot(model, r_spots, phi, phys_args, phys_kw):
@@ -690,7 +737,8 @@ def latent_z_phi_rw_sweep(model, theta, z_r, phi, latent_scale, rng_key, h,
 class MaserBlackJaxTarget:
     """Unconstrained global-parameter target for BlackJAX."""
 
-    def __init__(self, model, h, init_params, spot_batch=None):
+    def __init__(self, model, h, init_params, spot_batch=None,
+                 transport_systemic_phi=False):
         if model.use_selection:
             raise RuntimeError(
                 "The BlackJAX megamaser sampler currently supports only "
@@ -705,6 +753,14 @@ class MaserBlackJaxTarget:
             biject_to(prior.support) for _, _, prior in self.sites)
         self.names = tuple(site for site, _, _ in self.sites)
         self._check_init(init_params)
+        self._phi_transport_xy = None
+        if transport_systemic_phi:
+            u_theta, z_r = self.initial_state(init_params)
+            theta, _ = self.constrain(u_theta)
+            r_ang, _, _, _, phys_args, phys_kw = _r_ang_from_z(
+                self.model, theta, self.h, z_r)
+            self._phi_transport_xy = _systemic_phi_xy_coefficients(
+                self.model, r_ang, phys_args, phys_kw)
 
     def _check_init(self, init_params):
         missing = []
@@ -780,6 +836,40 @@ class MaserBlackJaxTarget:
         theta, log_det = self.constrain(u_theta)
         lp = self.constrained_logdensity_z_phi(theta, z_r, phi)
         return lp + jnp.where(jnp.isfinite(lp), log_det, 0.0)
+
+    def phi_transport_residual(self, theta, phi):
+        """Systemic phi residual transported with the astrometric centre."""
+        phys_args, _ = self.model.phys_from_params_jax(theta, self.h)
+        kx, ky = self._phi_transport_xy
+        centre = -(kx * phys_args[_I_X0] + ky * phys_args[_I_Y0])
+        lo, hi, _ = _phi_support_arrays(self.model, phi.dtype)
+        shifted = _wrap_interval(phi - centre, lo, hi)
+        return jnp.where(self.model.is_highvel, phi, shifted)
+
+    def phi_from_transport_residual(self, theta, phi_residual):
+        """Physical phi corresponding to an astrometric-centre residual."""
+        phys_args, _ = self.model.phys_from_params_jax(theta, self.h)
+        kx, ky = self._phi_transport_xy
+        centre = -(kx * phys_args[_I_X0] + ky * phys_args[_I_Y0])
+        lo, hi, _ = _phi_support_arrays(self.model, phi_residual.dtype)
+        shifted = _wrap_interval(phi_residual + centre, lo, hi)
+        return jnp.where(self.model.is_highvel, phi_residual, shifted)
+
+    def logdensity_explicit_transported(self, u_theta, z_r, phi_residual):
+        """Explicit target with systemic phi held in transported coordinates."""
+        theta, log_det_theta = self.constrain(u_theta)
+        r_ang, _, r_min, r_max, phys_args, phys_kw = _r_ang_from_z(
+            self.model, theta, self.h, z_r)
+        kx, ky = self._phi_transport_xy
+        centre = -(kx * phys_args[_I_X0] + ky * phys_args[_I_Y0])
+        lo, hi, _ = _phi_support_arrays(self.model, z_r.dtype)
+        shifted = _wrap_interval(phi_residual + centre, lo, hi)
+        phi = jnp.where(self.model.is_highvel, phi_residual, shifted)
+        lp = self.constrained_logdensity_r_ang_phi(
+            theta, r_ang, phi, r_min=r_min, r_max=r_max,
+            phys_args=phys_args, phys_kw=phys_kw)
+        lp = lp + jnp.where(jnp.isfinite(lp), jnp.sum(jnp.log(r_ang)), 0.0)
+        return lp + jnp.where(jnp.isfinite(lp), log_det_theta, 0.0)
 
     def constrained_logdensity_z_phi(self, theta, z_r, phi):
         """Log posterior in constrained globals, z radii, and fixed phi."""
@@ -867,6 +957,8 @@ class MaserBlackJaxResult:
     parameters: Dict[str, np.ndarray]
     theta_sites: Tuple[str, ...]
     runtime_seconds: float
+    chain_method: str = "single"
+    chain_workers: int = 1
 
 
 def _mcmc_info(theta_info, latent_accept, reflect_try, reflect_accept,
@@ -1006,7 +1098,7 @@ def _make_mcmc_latent_burnin_step(target, cov_init, is_hv, phi_centre, *,
 def _make_mcmc_warmup_step(blackjax, target, adapt_step, cov_init, is_hv,
                            phi_centre, *, n_inner, target_accept_latent,
                            adapt_rate, reflect_prob, max_num_doublings,
-                           cov_start):
+                           cov_start, transport_systemic_phi):
     """Scan body ``(carry, xs) -> (carry, info)`` for one warmup step.
 
     carry = (state, theta_adaptation_state, welford_state, key);
@@ -1026,8 +1118,16 @@ def _make_mcmc_warmup_step(blackjax, target, adapt_step, cov_init, is_hv,
             n_inner=n_inner, reflect_prob=reflect_prob,
             latent_mean=state.latent_mean, latent_cov=state.cov)
 
-        def logdensity_theta(u_theta):
-            return target.logdensity_explicit(u_theta, z_r, phi)
+        if transport_systemic_phi:
+            phi_nuts = target.phi_transport_residual(
+                theta_params, phi)
+
+            def logdensity_theta(u_theta):
+                return target.logdensity_explicit_transported(
+                    u_theta, z_r, phi_nuts)
+        else:
+            def logdensity_theta(u_theta):
+                return target.logdensity_explicit(u_theta, z_r, phi)
 
         theta_state = blackjax.nuts.init(
             state.theta.position, logdensity_theta)
@@ -1036,6 +1136,10 @@ def _make_mcmc_warmup_step(blackjax, target, adapt_step, cov_init, is_hv,
             adaptation_state.step_size,
             adaptation_state.inverse_mass_matrix,
             max_num_doublings=max_num_doublings)
+        if transport_systemic_phi:
+            theta_params, _ = target.constrain(theta_state.position)
+            phi = target.phi_from_transport_residual(
+                theta_params, phi_nuts)
         adaptation_state = adapt_step(
             adaptation_state, sched_row, theta_state.position,
             theta_info.acceptance_rate)
@@ -1066,7 +1170,7 @@ def _make_mcmc_warmup_step(blackjax, target, adapt_step, cov_init, is_hv,
 
 
 def _make_mcmc_sample_step(blackjax, target, sample_parameters, *,
-                           n_inner, reflect_prob):
+                           n_inner, reflect_prob, transport_systemic_phi):
     """Scan body ``(state, key) -> (state, (sample, log_density, info))``."""
     nuts_step = blackjax.nuts.build_kernel()
     step_size = sample_parameters["step_size"]
@@ -1082,8 +1186,16 @@ def _make_mcmc_sample_step(blackjax, target, sample_parameters, *,
             n_inner=n_inner, reflect_prob=reflect_prob,
             latent_mean=state.latent_mean, latent_cov=state.cov)
 
-        def logdensity_theta(u_theta):
-            return target.logdensity_explicit(u_theta, z_r, phi)
+        if transport_systemic_phi:
+            phi_nuts = target.phi_transport_residual(
+                theta_params, phi)
+
+            def logdensity_theta(u_theta):
+                return target.logdensity_explicit_transported(
+                    u_theta, z_r, phi_nuts)
+        else:
+            def logdensity_theta(u_theta):
+                return target.logdensity_explicit(u_theta, z_r, phi)
 
         theta_state = blackjax.nuts.init(
             state.theta.position, logdensity_theta)
@@ -1091,6 +1203,10 @@ def _make_mcmc_sample_step(blackjax, target, sample_parameters, *,
             key_theta, theta_state, logdensity_theta,
             step_size, inverse_mass_matrix,
             max_num_doublings=max_num_doublings)
+        if transport_systemic_phi:
+            theta_params, _ = target.constrain(theta_state.position)
+            phi = target.phi_from_transport_residual(
+                theta_params, phi_nuts)
         sample = target.sample_dict_explicit(theta_state.position, z_r, phi)
         _, log_det_theta = target.constrain(theta_state.position)
         log_density = (
@@ -1118,8 +1234,10 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
                            eps_phi_min=1e-4, eps_phi_max=1.0,
                            adapt_rate=0.10, reflect_prob=0.25,
                            max_num_doublings=10, num_latent_burnin=0,
+                           sample_n_inner=None,
+                           transport_systemic_phi=False,
                            progress_bar=True, jit_steps=True,
-                           progress_prefix=""):
+                           progress_label="1/1", progress_positions=None):
     """Run one explicit-phi NUTS-within-adaptive-Metropolis chain."""
     if num_warmup < 0 or num_samples < 1:
         raise ValueError(
@@ -1129,7 +1247,15 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
     if h is None:
         h = float(get_nested(model.config, "model/H0_ref", 73.0)) / 100.0
 
-    target = MaserBlackJaxTarget(model, h, init_params)
+    target = MaserBlackJaxTarget(
+        model, h, init_params,
+        transport_systemic_phi=transport_systemic_phi)
+    if transport_systemic_phi:
+        sys_ranges = model._phi_subranges["sys"]
+        width = float(sys_ranges[-1][1] - sys_ranges[0][0])
+        if not np.isclose(width, 2.0 * np.pi, rtol=0.0, atol=1e-12):
+            raise ValueError(
+                "systemic phi transport requires full 2pi support.")
     u_theta, z_r, phi = target.initial_state_explicit(init_params)
     theta0, _ = target.constrain(u_theta)
     dtype = u_theta.dtype
@@ -1173,10 +1299,13 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         n_inner=n_inner, target_accept_latent=target_accept_latent,
         adapt_rate=adapt_rate, reflect_prob=reflect_prob,
         max_num_doublings=max_num_doublings,
-        cov_start=cov_start)
+        cov_start=cov_start,
+        transport_systemic_phi=transport_systemic_phi)
     warmup_scan = _scan_fn(warmup_body, jit_steps)
 
     t0 = time.time()
+    if progress_positions is None:
+        progress_positions = (None, None, None)
     # Optional latent-only burn-in at FIXED theta: migrate z/phi to their
     # conditional typical set and seed the per-side covariance before theta
     # NUTS / step-size adaptation begins. The migrated state and accumulated
@@ -1191,7 +1320,8 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         burnin_idx = jnp.arange(int(num_latent_burnin))
         burnin_bar = _step_bar(
             int(num_latent_burnin), progress_bar,
-            f"{progress_prefix}latent burn-in")
+            f"Compiling latent burn-in {progress_label}",
+            position=progress_positions[0])
         bcarry = (state, cov_state, rng_key)
         for c0, c1 in _chunk_bounds(int(num_latent_burnin), progress_bar):
             bcarry, binfo = burnin_scan(bcarry, burnin_idx[c0:c1])
@@ -1199,8 +1329,12 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
             if burnin_bar is not None:
                 lat = float(np.asarray(binfo["latent_accept_mean"])[-1])
                 refl = float(np.asarray(binfo["reflect_accept_mean"])[-1])
+                burnin_bar.set_description(
+                    f"Latent burn-in {progress_label}", refresh=False)
                 burnin_bar.set_postfix(
-                    {"latent_acc": f"{lat:.3f}", "refl_acc": f"{refl:.3f}"})
+                    {"latent_acc": f"{lat:.3f}",
+                     "refl_acc": f"{refl:.3f}"},
+                    refresh=False)
                 burnin_bar.update(c1 - c0)
         if burnin_bar is not None:
             burnin_bar.close()
@@ -1209,13 +1343,20 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
     carry = (state, adaptation_state, cov_state, rng_key)
     step_idx = jnp.arange(int(num_warmup))
     warmup_rows = []
-    warmup_bar = _step_bar(
-        int(num_warmup), progress_bar, f"{progress_prefix}mcmc warmup")
+    warmup_bar = (
+        _step_bar(
+            int(num_warmup), progress_bar,
+            f"Compiling MCMC warmup {progress_label}",
+            position=progress_positions[1])
+        if int(num_warmup) > 0 else None)
     for c0, c1 in _chunk_bounds(int(num_warmup), progress_bar):
         carry, info_chunk = warmup_scan(
             carry, (schedule[c0:c1], step_idx[c0:c1]))
         info_chunk = jax.device_get(info_chunk)
         warmup_rows.append(info_chunk)
+        if warmup_bar is not None:
+            warmup_bar.set_description(
+                f"MCMC warmup {progress_label}", refresh=False)
         _update_chunk_postfix(
             warmup_bar, info_chunk, jax.device_get(carry[0].theta_scale))
         if warmup_bar is not None:
@@ -1232,9 +1373,12 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         "inverse_mass_matrix": inverse_mass_matrix,
         "max_num_doublings": max_num_doublings,
     }
+    if sample_n_inner is None:
+        sample_n_inner = n_inner
     sample_body = _make_mcmc_sample_step(
         blackjax, target, sample_parameters,
-        n_inner=n_inner, reflect_prob=reflect_prob)
+        n_inner=sample_n_inner, reflect_prob=reflect_prob,
+        transport_systemic_phi=transport_systemic_phi)
     sample_scan = _scan_fn(sample_body, jit_steps)
 
     key, sample_master = jax.random.split(key)
@@ -1243,7 +1387,9 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
     log_density_rows = []
     info_rows = []
     sample_bar = _step_bar(
-        int(num_samples), progress_bar, f"{progress_prefix}mcmc sample")
+        int(num_samples), progress_bar,
+        f"Compiling sampling {progress_label}",
+        position=progress_positions[2])
     for c0, c1 in _chunk_bounds(int(num_samples), progress_bar):
         state, (sample, log_density, info) = sample_scan(
             state, sample_keys[c0:c1])
@@ -1251,6 +1397,9 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         log_density_rows.append(jax.device_get(log_density))
         info_host = jax.device_get(info)
         info_rows.append(info_host)
+        if sample_bar is not None:
+            sample_bar.set_description(
+                f"Sampling {progress_label}", refresh=False)
         _update_chunk_postfix(
             sample_bar, info_host, jax.device_get(state.theta_scale))
         if sample_bar is not None:
@@ -1259,6 +1408,7 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         sample_bar.close()
     runtime = time.time() - t0
 
+    warmup_info = _concat_dicts(warmup_rows)
     parameters = {
         "step_size": np.asarray(jax.device_get(step_size)),
         "inverse_mass_matrix": np.asarray(jax.device_get(
@@ -1267,13 +1417,15 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         "latent_covariance": np.asarray(jax.device_get(state.cov)),
         "log_s": np.asarray(jax.device_get(state.log_s)),
         "reflect_prob": np.asarray(reflect_prob),
+        "sample_n_inner": np.asarray(sample_n_inner),
+        "transport_systemic_phi": np.asarray(transport_systemic_phi),
     }
     return MaserBlackJaxResult(
         samples=_concat_dicts(sample_rows),
         log_density=(np.concatenate(log_density_rows, axis=0)
                      if log_density_rows else np.zeros((0,))),
         info=_concat_dicts(info_rows),
-        warmup_info=_concat_dicts(warmup_rows),
+        warmup_info=warmup_info,
         parameters=parameters,
         theta_sites=target.names,
         runtime_seconds=runtime)
@@ -1281,18 +1433,23 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
 
 def run_blackjax_mcmc(model, init_params, rng_key, *,
                       num_warmup=1000, num_samples=1000, num_chains=1,
+                      chain_workers=8,
                       h=None, n_inner=20, target_accept_theta=0.9,
                       target_accept_latent=0.35, theta_step_init=0.01,
                       phi_step_init=0.05, eps_init=None, eps_z_min=1e-3,
                       eps_z_max=0.5, eps_phi_min=1e-4, eps_phi_max=1.0,
                       adapt_rate=0.10, reflect_prob=0.25,
                       max_num_doublings=10, num_latent_burnin=0,
+                      sample_n_inner=None,
+                      transport_systemic_phi=False,
                       progress_bar=True, jit_steps=True):
-    """Run one or more sequential explicit-phi BlackJAX NUTS/MH chains."""
+    """Run explicit-phi chains with bounded CPU parallelism."""
     num_chains = int(num_chains)
+    chain_workers = int(chain_workers)
     if num_chains < 1:
         raise ValueError("num_chains must be >= 1.")
-
+    if chain_workers < 1:
+        raise ValueError("chain_workers must be >= 1.")
     kwargs = dict(
         num_warmup=num_warmup,
         num_samples=num_samples,
@@ -1311,6 +1468,8 @@ def run_blackjax_mcmc(model, init_params, rng_key, *,
         reflect_prob=reflect_prob,
         max_num_doublings=max_num_doublings,
         num_latent_burnin=num_latent_burnin,
+        sample_n_inner=sample_n_inner,
+        transport_systemic_phi=transport_systemic_phi,
         progress_bar=progress_bar,
         jit_steps=jit_steps,
     )
@@ -1328,10 +1487,30 @@ def run_blackjax_mcmc(model, init_params, rng_key, *,
             model, chain_init_params[0], rng_key, **kwargs)
 
     chain_keys = jax.random.split(rng_key, num_chains)
-    results = []
-    for i, chain_key in enumerate(chain_keys):
-        prefix = f"chain {i + 1}/{num_chains} "
-        results.append(_run_blackjax_mcmc_one(
-            model, chain_init_params[i], chain_key, progress_prefix=prefix,
-            **kwargs))
-    return _stack_chain_results(results)
+    worker_count = _chain_worker_count(num_chains, chain_workers)
+
+    def run_chain(item):
+        i, chain_key = item
+        # Keep each phase in its own row block, with one blank row between.
+        positions = []
+        block = 0
+        for steps in (num_latent_burnin, num_warmup, num_samples):
+            if int(steps) > 0:
+                positions.append(block * (num_chains + 1) + i)
+                block += 1
+            else:
+                positions.append(None)
+        return _run_blackjax_mcmc_one(
+            model, chain_init_params[i], chain_key,
+            progress_label=f"{i + 1}/{num_chains}",
+            progress_positions=tuple(positions), **kwargs)
+
+    t0 = time.time()
+    items = enumerate(chain_keys)
+    if worker_count == 1:
+        results = [run_chain(item) for item in items]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            results = list(pool.map(run_chain, items))
+    return _stack_chain_results(
+        results, time.time() - t0, worker_count)

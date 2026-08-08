@@ -1,7 +1,9 @@
-"""Regression tests for Reid fort.7 chain parsing."""
+"""Regression tests for the Reid bridge and fort.7 chain parsing."""
 import math
 import os
 import sys
+
+import pytest
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -9,7 +11,9 @@ REID_DIR = os.path.join(REPO_ROOT, "scripts", "megamaser", "check_reid")
 if REID_DIR not in sys.path:
     sys.path.insert(0, REID_DIR)
 
-from run_reid_mcmc import FORT7_WIDTHS, load_chain  # noqa: E402
+from run_reid_mcmc import (  # noqa: E402
+    FORT7_WIDTHS, config_D_A_from_D_c, load_chain, load_config_init, reid_H0,
+    shift_warp_pivots)
 
 
 VALUES = [
@@ -34,6 +38,97 @@ VALUES = [
     3.0,
     0.3,
 ]
+
+
+@pytest.mark.parametrize(
+    ("mass_parameterization", "expected_log_mbh"),
+    [("eta", 6.8041 + math.log10(8.1421)), ("log_mbh", 7.5)],
+)
+def test_config_init_uses_active_distance_mass_and_quadratic_pivot(
+        tmp_path, mass_parameterization, expected_log_mbh):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f"""
+[model]
+mass_parameterization = "{mass_parameterization}"
+
+[model.galaxies.NGC4258]
+v_sys_obs = 667.0
+r_ang_ref_i = 5.1
+r_ang_ref_Omega = 5.1
+r_ang_ref_periapsis = 5.1
+
+[model.galaxies.NGC4258.init_qw]
+D_A = 8.1421
+eta = 6.8041
+log_MBH = 7.5
+dv_sys = -259.7458
+i0 = 94.2829
+di_dr = 0.3154
+d2i_dr2 = 0.4053
+Omega0 = 85.9489
+dOmega_dr = 2.5803
+d2Omega_dr2 = -0.3628
+"""
+    )
+
+    init = load_config_init(
+        config, "NGC4258", 0.0, variant="init_qw").values
+    assert init["H0"] == pytest.approx(
+        reid_H0(init["Vsys_km_s"], 8.1421), rel=1e-14)
+    assert init["Mbh_1e7Msun"] == pytest.approx(
+        10.0 ** (expected_log_mbh - 7.0), rel=1e-14)
+
+    reid_r_ref = 6.276756628362692
+    shifted = shift_warp_pivots(init, reid_r_ref)
+    for r in (1.8, 5.1, reid_r_ref, 8.9):
+        dr_candel = r - 5.1
+        dr_reid = r - reid_r_ref
+        i_candel = 94.2829 + 0.3154 * dr_candel + 0.4053 * dr_candel**2
+        pa_candel = 85.9489 + 2.5803 * dr_candel - 0.3628 * dr_candel**2
+        i_reid = (
+            shifted["i0_deg"]
+            + shifted["di_dr_deg_mas"] * dr_reid
+            + shifted["d2i_dr2_deg_mas2"] * dr_reid**2
+        )
+        pa_reid = (
+            shifted["PA_deg"]
+            + shifted["dPA_dr_deg_mas"] * dr_reid
+            + shifted["d2PA_dr2_deg_mas2"] * dr_reid**2
+        )
+        assert i_reid == pytest.approx(180.0 - i_candel, abs=2e-14)
+        assert pa_reid == pytest.approx(pa_candel, abs=2e-14)
+
+
+def test_config_init_converts_comoving_distance_before_reid_mapping(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[model]
+Om = 0.315
+H0_ref = 73.0
+mass_parameterization = "eta"
+
+[model.galaxies.NGC6264]
+v_sys_obs = 10189.26
+
+[model.galaxies.NGC6264.init]
+D_c = 154.1456
+eta = 5.4261
+dv_sys = 22.037
+"""
+    )
+
+    init = load_config_init(config, "NGC6264", 0.0).values
+    expected_D_A = config_D_A_from_D_c(
+        {"model": {"Om": 0.315, "H0_ref": 73.0}}, 154.1456)
+    assert expected_D_A == pytest.approx(148.520244706049, rel=1e-13)
+    assert init["_D_c"] == 154.1456
+    assert init["_D_A"] == pytest.approx(expected_D_A, rel=1e-14)
+    assert init["H0"] == pytest.approx(
+        reid_H0(init["Vsys_km_s"], expected_D_A), rel=1e-14)
+    assert init["Mbh_1e7Msun"] == pytest.approx(
+        10.0 ** (5.4261 + math.log10(expected_D_A) - 7.0), rel=1e-14)
 
 
 def _make_row(iter_=100, walker=1, values=VALUES, lnp=-1234.56789):

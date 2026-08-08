@@ -17,11 +17,11 @@ and convergence checks use).
 """
 import argparse
 import concurrent.futures
+import csv
 import hashlib
 import json
 import os
 import re
-import sqlite3
 import sys
 import tempfile
 import time
@@ -43,6 +43,10 @@ if needed:
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
 with open(_CONFIG_PATH, "rb") as f:
@@ -90,13 +94,16 @@ from tqdm import trange  # noqa: E402
 
 from candel.inference.optimise import _prior_bounds  # noqa: E402
 from candel.inference.optimise import _select_distinct  # noqa: E402
+from candel.model import maser_physics  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
-from candel.model.maser_physics import C_v  # noqa: E402
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
-from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
-from candel.util import (data_path, fprint, fsection, get_nested,  # noqa: E402
+from candel.pvdata.megamaser_data import (  # noqa: E402
+    load_megamaser_spots, maser_data_root)
+from candel.util import (fprint, fsection, get_nested,  # noqa: E402
                          results_path)
+from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
+                          check_init_block)
 
 if _F64_ENABLED_HERE:
     print(f"float64 enabled ({_F64_REASON})", flush=True)
@@ -121,6 +128,7 @@ def _distance_bounds(gcfg):
 
 
 def _clean_init(model, init_cfg):
+    check_init_block(init_cfg, model)
     init_params = {key: jnp.asarray(value) for key, value in init_cfg.items()}
     init_params.pop("M_BH", None)
     if model._D_A_uniform:
@@ -168,6 +176,16 @@ def _clean_init(model, init_cfg):
     return init_params
 
 
+def _lift_base_model_init(model, gal_cfg):
+    """Lift the configured linear-model point into an expanded model."""
+    base_init = dict(gal_cfg["init"])
+    for key in (
+            "e_x", "e_y", "ecc", "periapsis", "periapsis_rad",
+            "dperiapsis_dr", "d2i_dr2", "d2Omega_dr2"):
+        base_init.pop(key, None)
+    return _clean_init(model, base_init)
+
+
 def _principal_angle_deg(x, y):
     """Sky position angle (deg) of the dominant axis of the spot cloud.
 
@@ -182,22 +200,23 @@ def _principal_angle_deg(x, y):
     return float(np.rad2deg(np.arctan2(vx, vy)) % 360.0)
 
 
-def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
-                      sobol_n_sigma=5):
+def _data_driven_seed(model, target, base_init, n_seed, seed,
+                      sobol_n_sigma=5, eta_anchor=None):
     """Random DE seed points sliding along the distance-mass degeneracy.
 
-    The masers fix ``eta = log10(M_BH/D_A)`` (distance-free, from the angular
-    Keplerian envelope) but barely constrain distance; the maser likelihood is
-    near-flat along the ``M_BH ∝ D_A`` ridge.  So instead of one seed, draw
-    ``n_seed`` points with random distance spanning the prior box at *fixed*
-    ``eta`` — in the eta parameterisation that is literally sliding along the
-    ridge, with ``log M_BH`` tracking ``D_A`` automatically.  Geometry
-    (centre/PA/inclination/``dv_sys``) is jittered around its data seeds, with
-    the ±180° PA ambiguity flipped on a random half.  Every other dimension
-    (error floors, ecc/warp) is drawn Sobol-random within the DE box
-    (``sobol_n_sigma``) so the ridge seeds are not identical there.  Returns
-    ``(seed_points (n_seed, D) in target.names order, info)`` or
-    ``(None, reason)``.
+    The high-velocity envelope tightly constrains
+    ``eta = log10(M_BH/D_A)``.  Systemic accelerations and disk geometry then
+    break that degeneracy and constrain distance, but the
+    ``M_BH ∝ D_A`` direction remains a useful broad initialisation path. Draw
+    ``n_seed`` points across the distance prior at fixed ``eta``; in the eta
+    parameterisation ``log M_BH`` then tracks ``D_A`` automatically.
+    ``eta_anchor`` can supply the coordinate from a fitted linear model;
+    otherwise it is estimated from the high-velocity envelope with a small
+    scatter. Geometry (centre/PA/inclination/``dv_sys``) is jittered around
+    data-derived seeds, with the ±180° PA ambiguity flipped on a random half.
+    Every other dimension (error floors, eccentricity/warp) is drawn
+    Sobol-random within the DE box, so the ridge seeds are not identical
+    there. Returns ``(seed_points, info)`` or ``(None, reason)``.
     """
     x = np.asarray(model._all_x)
     y = np.asarray(model._all_y)
@@ -226,25 +245,33 @@ def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
     # (sin phi≈1), so the median recovers M_BH/D_A within ~10% (validated vs
     # Pesce) and is robust to the noisy upper tail.
     v_sys = float(np.median(v[sel]))
-    theta = np.hypot(x[is_hv] - x0, y[is_hv] - y0) / 1e3
-    dv = v[is_hv] - v_sys
-    g = (theta > 0) & np.isfinite(dv)
-    s = float(np.median(theta[g] * dv[g] ** 2))
-    eta_seed = np.log10(s) - 2.0 * np.log10(C_v) + 7.0  # M_BH in Msun, +log1e7
+    if eta_anchor is None:
+        theta = np.hypot(x[is_hv] - x0, y[is_hv] - y0) / 1e3
+        dv = v[is_hv] - v_sys
+        g = (theta > 0) & np.isfinite(dv)
+        s = float(np.median(theta[g] * dv[g] ** 2))
+        eta_seed = (
+            np.log10(s) - 2.0 * np.log10(maser_physics.C_v)
+            + 7.0)  # M_BH in Msun, +log1e7
+        eta_source = "high-velocity envelope"
+    else:
+        eta_seed = float(eta_anchor)
+        eta_source = "linear-model MAP"
     dv_sys_seed = float(np.clip(v_sys - cz, -900.0, 900.0))
 
     rng = np.random.default_rng(seed)
     D_lo, D_hi = _prior_bounds(model.priors["D"])
     distance_name = "D_A" if model._D_A_uniform else "D_c"
     D = rng.uniform(D_lo, D_hi, n_seed)                # slide along the ridge
-    eta = eta_seed + rng.normal(0.0, 0.02, n_seed)     # tight: on the ridge
+    eta = (np.full(n_seed, eta_seed) if eta_anchor is not None
+           else eta_seed + rng.normal(0.0, 0.02, n_seed))
     i0 = np.clip(90.0 + rng.normal(0.0, 3.0, n_seed), 65.0, 115.0)
     flip = np.where(rng.random(n_seed) < 0.5, 180.0, 0.0)
     Omega = (Omega0 + flip + rng.normal(0.0, 5.0, n_seed)) % 360.0
     x0s = np.clip(x0 + rng.normal(0.0, 20.0, n_seed), -750.0, 750.0)
     y0s = np.clip(y0 + rng.normal(0.0, 20.0, n_seed), -750.0, 750.0)
-    # dv_sys seed is the CMB↔LSR/bary frame offset; kept wide so the DE still
-    # explores it rather than trusting the systemic centroid.
+    # dv_sys is the native systemic velocity minus the fixed residual
+    # reference v_sys_obs; keep it wide rather than trusting the centroid.
     dvs = dv_sys_seed + rng.normal(0.0, 100.0, n_seed)
 
     names = target.names
@@ -285,10 +312,80 @@ def _data_driven_seed(model, target, base_init, h0_ref, n_seed, seed,
 
     info = (f"{n_seed} seed candidates along the {distance_name} degeneracy "
             f"ridge: {distance_name}~U({D_lo:.0f},{D_hi:.0f}) Mpc, other "
-            f"globals fixed at eta_seed={eta_seed:.3f} (BH-mass coordinate), "
-            f"dv_sys={dv_sys_seed:.0f} km/s (systemic velocity), disc centre "
+            f"globals fixed at eta_seed={eta_seed:.3f} from {eta_source} "
+            "(BH-mass coordinate), "
+            f"dv_sys={dv_sys_seed:.0f} km/s (relative to v_sys_obs), "
+            "disc centre "
             f"x0={x0:.1f}, y0={y0:.1f} uas, PA Omega0={Omega0:.1f} deg; "
             f"{n_hv} high-velocity spots")
+    return seeds, info
+
+
+def _base_model_variation_seeds(model, target, base_init, n_seed, seed,
+                                sobol_n_sigma=5):
+    """Hold a base-model MAP fixed and vary only added model coordinates."""
+    n_seed = int(n_seed)
+    if n_seed < 1:
+        return None, f"n_seed={n_seed} < 1"
+
+    names = target.names
+    centre = _theta_to_flat(base_init, names)
+    priors = {site: prior for site, _, prior in target.sites}
+    bounds = np.array([
+        _prior_bounds(priors[name], sobol_n_sigma=sobol_n_sigma)
+        for name in names
+    ], dtype=float)
+    rng = np.random.default_rng(seed)
+    seeds = np.repeat(centre[None, :], n_seed, axis=0)
+    added = [name for name in
+             ("e_x", "e_y", "dperiapsis_dr", "d2i_dr2", "d2Omega_dr2")
+             if name in names]
+    r_ang = np.asarray(base_init["r_ang"], dtype=float)
+    scale_info = []
+
+    for name in ("e_x", "e_y"):
+        if name not in names:
+            continue
+        i = names.index(name)
+        prior_sigma = (
+            bounds[i, 1] - bounds[i, 0]) / (2.0 * sobol_n_sigma)
+        sigma = 10.0 ** rng.uniform(
+            np.log10(prior_sigma * 1e-3), np.log10(prior_sigma), n_seed)
+        seeds[:, i] = rng.normal(0.0, sigma)
+        scale_info.append(
+            f"{name} sigma log-U({prior_sigma * 1e-3:.3g},"
+            f"{prior_sigma:.3g})")
+
+    radial_scales = {
+        "dperiapsis_dr": (
+            model._r_ang_ref_periapsis, 0.1, 180.0, "deg"),
+        "d2i_dr2": (model._r_ang_ref_i, 0.01, 10.0, "deg"),
+        "d2Omega_dr2": (model._r_ang_ref_Omega, 0.01, 10.0, "deg"),
+    }
+    for name, (pivot, effect_lo, effect_hi, unit) in radial_scales.items():
+        if name not in names:
+            continue
+        power = 1 if name == "dperiapsis_dr" else 2
+        lever = np.max(np.abs(r_ang - pivot) ** power)
+        sigma_lo, sigma_hi = effect_lo / lever, effect_hi / lever
+        sigma = 10.0 ** rng.uniform(
+            np.log10(sigma_lo), np.log10(sigma_hi), n_seed)
+        i = names.index(name)
+        seeds[:, i] = rng.normal(0.0, sigma)
+        scale_info.append(
+            f"{name} gives {effect_lo:g}-{effect_hi:g} {unit} sigma "
+            "at the furthest linear-MAP radius")
+
+    for name in added:
+        i = names.index(name)
+        if np.all(np.isfinite(bounds[i])):
+            seeds[:, i] = np.clip(
+                seeds[:, i], bounds[i, 0], bounds[i, 1])
+    info = (
+        f"{n_seed} expansion-only variations of the vanilla [init] MAP; "
+        "all fitted linear-model coordinates are copied exactly; added "
+        f"coordinates centred at zero: {', '.join(added)}; "
+        + "; ".join(scale_info))
     return seeds, info
 
 
@@ -301,7 +398,15 @@ def _make_init(model, init_cfg, strategy, num_samples, rng_key):
                 model, rng_key, num_samples, h=h))
     if strategy == "config":
         return _clean_init(model, init_cfg)
-    raise ValueError("DE init_strategy must be 'median' or 'config'.")
+    raise ValueError(
+        "Fixed-global init_strategy must be 'median' or 'config'.")
+
+
+def _resolve_de_init_strategy(requested, configured, fix_globals=False):
+    """Ignore point-initialisation settings for every real DE search."""
+    if not fix_globals:
+        return "median"
+    return str(requested or configured).lower()
 
 
 def _layout(target, sobol_n_sigma, fixed=()):
@@ -341,9 +446,13 @@ def _normalise_theta_point(theta, names, lo, hi):
 
 _DE_ALGORITHM = "lshade"
 _DE_SEED_POLICY = "data_sobol_only"
+_DE_BASE_MODEL_SEED_POLICY = (
+    "linear_expansion_ridge_sobol_base_config_v6")
+_DE_LEGACY_BASE_MODEL_SEED_POLICY = (
+    "vanilla_expansion_ridge_sobol_ngc4258_base_config_v5")
 _DE_POPULATION_SCHEDULE = "nfe_linear"
-_DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v2"
-_DE_PEAK_PARTITION_POLICY = "peak_partition_v6"
+_DE_OBJECTIVE_POLICY = "scan_marginal_reuse_v3"
+_DE_PEAK_PARTITION_POLICY = "peak_partition_v7"
 _CANDIDATES_PER_GPU_WAVE = 1
 _PEAK_PARTITION_CANDIDATES_PER_GPU_WAVE = 8
 _F32_ALL_SPOT_GALAXIES = frozenset((
@@ -360,11 +469,18 @@ def _de_candidates_per_wave(model, peak_override=None):
     return _CANDIDATES_PER_GPU_WAVE
 
 
-def _initial_de_seed_points(data_seeds):
-    """Return only data-derived seeds; reference solutions are never seeded."""
-    if data_seeds is None:
-        return None
-    return np.asarray(data_seeds, dtype=float).copy()
+def _initial_de_seed_points(data_seeds, base_model_seed=None):
+    """Put the optional required base-model point before data-derived seeds."""
+    seeds = []
+    if base_model_seed is not None:
+        seeds.append(np.atleast_2d(np.asarray(base_model_seed, dtype=float)))
+    if data_seeds is not None:
+        seeds.append(np.atleast_2d(np.asarray(data_seeds, dtype=float)))
+    return np.vstack(seeds) if seeds else None
+
+
+def _quadratic_de_requires_base_model_seed(model, fixed_globals=False):
+    return bool(model.use_quadratic_warp and not fixed_globals)
 
 
 def _de_spot_batch_policy(galaxy, use_f64, requested, configured, planned):
@@ -424,6 +540,86 @@ def _logp_2d_terms(target, theta):
         remat=False, scan_cache=scan_cache)
     lp = _global_logprior(target, theta, ll.dtype)
     return lp, ll, phys_args, phys_kw
+
+
+def _grid_outlier_probability_group(
+        model, type_key, idx, r_ang, log_w_r, phys_args, phys_kw,
+        sigma=3.0):
+    """Conditional latent-posterior exceedance mass on the fixed grids."""
+    pc = model._phi_concat[type_key]
+    has_any_accel = model._group_has_any_accel(type_key)
+    r_pre = model._r_precompute(
+        r_ang, idx, *phys_args, **phys_kw,
+        has_any_accel=has_any_accel)
+    nhc = model._phi_eval(
+        r_pre, pc["sin_phi"], pc["cos_phi"],
+        pc["sin2_phi"], pc["cos2_phi"], pc["sincos_phi"])
+    rpad = (slice(None),) * r_ang.ndim + (None,)
+    dpad = (slice(None),) + (None,) * r_ang.ndim
+    X, Y, V, A = model._predict_on_grid(
+        r_pre, pc["sin_phi"], pc["cos_phi"], rpad)
+    if has_any_accel:
+        z_a = jnp.where(
+            r_pre["has_a"][dpad] > 0,
+            (r_pre["all_a"][dpad] - A)
+            / jnp.sqrt(r_pre["var_a"])[dpad],
+            jnp.nan)
+    else:
+        z_a = jnp.full_like(X, jnp.nan)
+    z = jnp.stack((
+        (r_pre["all_x"][dpad] - X)
+        / jnp.sqrt(r_pre["var_x"])[dpad],
+        (r_pre["all_y"][dpad] - Y)
+        / jnp.sqrt(r_pre["var_y"])[dpad],
+        (r_pre["all_v_rel"][dpad] - V)
+        / jnp.sqrt(r_pre["var_v"])[dpad],
+        z_a,
+    ), axis=-1)
+    exceeded = jnp.abs(z) > sigma
+    log_weight = jax.lax.optimization_barrier(
+        nhc + log_w_r[..., None] + pc["log_w_phi"])
+    log_denominator = jax.scipy.special.logsumexp(
+        log_weight, axis=(-2, -1))
+
+    def masked_mass(event):
+        masked = jax.lax.optimization_barrier(
+            jnp.where(event, log_weight, -jnp.inf))
+        return jax.scipy.special.logsumexp(masked, axis=(-2, -1))
+
+    log_coordinate = jax.lax.map(
+        masked_mass, jnp.moveaxis(exceeded, -1, 0)).T
+    log_any = jax.scipy.special.logsumexp(
+        jax.lax.optimization_barrier(jnp.where(
+            jnp.any(exceeded, axis=-1), log_weight, -jnp.inf)),
+        axis=(-2, -1))
+    return (jnp.exp(log_coordinate - log_denominator[:, None]),
+            jnp.exp(log_any - log_denominator))
+
+
+def _conditional_latent_outlier_probabilities(
+        target, theta, sigma=3.0):
+    """Per-spot outlier probability conditional on fixed global parameters."""
+    theta = target.complete_params(theta)
+    model = target.model
+    phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
+    groups = model._build_conditional_r_grids(
+        phys_args[2], phys_args[3], phys_args[4], phys_args[16],
+        phys_args[8], phys_args[15], phys_args, phys_kw)
+    coordinate = jnp.zeros((4, model.n_spots), dtype=phys_args[2].dtype)
+    any_coordinate = jnp.zeros(model.n_spots, dtype=phys_args[2].dtype)
+    for type_key, idx, r_ang, log_w_r in groups:
+        def one_spot(values):
+            idx_i, r_i, log_w_i = values
+            p_coordinate, p_any = _grid_outlier_probability_group(
+                model, type_key, idx_i[None], r_i[None, :],
+                log_w_i[None, :], phys_args, phys_kw, sigma)
+            return p_coordinate[0], p_any[0]
+
+        p_coordinate, p_any = jax.lax.map(
+            one_spot, (idx, r_ang, log_w_r))
+        coordinate = coordinate.at[:, idx].set(p_coordinate.T)
+        any_coordinate = any_coordinate.at[idx].set(p_any)
+    return coordinate, any_coordinate
 
 
 def _make_logp(target, names, fixed=None):
@@ -571,8 +767,7 @@ def _make_batched_fitness(fitness_one, n_dev, devices,
     shapes. Homogeneous multi-GPU jobs compile one shared ``pmap`` executable;
     heterogeneous devices retain concurrent device-local JITs and weighted
     round-robin assignment. Output is restored to input order on the host.
-    Finite padding is excluded from the exact archive and algorithmic NFE
-    count.
+    Finite padding is discarded and excluded from the algorithmic NFE count.
     """
     candidates_per_wave = int(candidates_per_wave)
     if (candidates_per_wave < 1
@@ -600,8 +795,7 @@ def _make_batched_fitness(fitness_one, n_dev, devices,
     shared_runner = (jax.pmap(per_device, devices=devices)
                      if shared_pmap else None)
     runners = (() if shared_pmap else
-               tuple(jax.jit(per_device, device=device)
-                     for device in devices))
+               tuple(jax.jit(per_device) for _ in devices))
     state = {
         "assignment_weights": np.full(n_dev, 1.0 / n_dev),
         "profile_weights": np.full(n_dev, 1.0 / n_dev),
@@ -742,214 +936,6 @@ def _make_batched_fitness(fitness_one, n_dev, devices,
     batch_eval.device_profile = device_profile
 
     return batch_eval
-
-
-_ARCHIVE_FINGERPRINT_VERSION = "blake2b64-v1"
-_ARCHIVE_FINGERPRINT_BATCH = 10_000
-# Buffered exact-value rows are flushed to SQLite in one commit at each
-# checkpoint. The cap bounds RAM during the one-off Sobol screen.
-_ARCHIVE_WRITE_BUFFER_ROWS = 65_536
-
-
-class _ExactArchive:
-    """Persistent exact-value cache for one optimiser checkpoint."""
-
-    def __init__(self, path, dimension, resume=False, objective_policy=None):
-        archive_exists = path != ":memory:" and os.path.exists(path)
-        if archive_exists and not resume:
-            os.unlink(path)
-            archive_exists = False
-        self.connection = sqlite3.connect(path)
-        self.connection.execute(
-            "CREATE TABLE IF NOT EXISTS evaluations "
-            "(point BLOB PRIMARY KEY, fitness REAL NOT NULL) WITHOUT ROWID")
-        self.connection.execute(
-            "CREATE TABLE IF NOT EXISTS metadata "
-            "(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID")
-        self.connection.execute(
-            "CREATE TABLE IF NOT EXISTS evaluation_fingerprints "
-            "(fingerprint INTEGER PRIMARY KEY)")
-        row = self.connection.execute(
-            "SELECT value FROM metadata WHERE key='dimension'").fetchone()
-        if row is not None and int(row[0]) != dimension:
-            raise ValueError("Exact-evaluation archive dimension mismatch.")
-        self.connection.execute(
-            "INSERT OR REPLACE INTO metadata VALUES ('dimension', ?)",
-            (str(dimension),))
-        if objective_policy is not None:
-            row = self.connection.execute(
-                "SELECT value FROM metadata "
-                "WHERE key='objective_policy'").fetchone()
-            if archive_exists and (row is None or row[0] != objective_policy):
-                self.connection.close()
-                raise ValueError(
-                    "Exact-evaluation archive objective policy is "
-                    f"{row[0] if row else 'legacy'!r}, requested "
-                    f"{objective_policy!r}; start a fresh run.")
-            self.connection.execute(
-                "INSERT OR REPLACE INTO metadata VALUES "
-                "('objective_policy', ?)", (objective_policy,))
-        self.connection.commit()
-
-        backfill_start = time.perf_counter()
-        row = self.connection.execute(
-            "SELECT value FROM metadata "
-            "WHERE key='fingerprint_version'").fetchone()
-        if row is None or row[0] != _ARCHIVE_FINGERPRINT_VERSION:
-            self.connection.execute("DELETE FROM evaluation_fingerprints")
-            last_point = None
-            while True:
-                if last_point is None:
-                    rows = self.connection.execute(
-                        "SELECT point FROM evaluations ORDER BY point "
-                        "LIMIT ?", (_ARCHIVE_FINGERPRINT_BATCH,)).fetchall()
-                else:
-                    rows = self.connection.execute(
-                        "SELECT point FROM evaluations WHERE point > ? "
-                        "ORDER BY point LIMIT ?",
-                        (last_point,
-                         _ARCHIVE_FINGERPRINT_BATCH)).fetchall()
-                if not rows:
-                    break
-                self.connection.executemany(
-                    "INSERT OR IGNORE INTO evaluation_fingerprints VALUES "
-                    "(?)",
-                    [(self._fingerprint(point),) for point, in rows])
-                self.connection.commit()
-                last_point = rows[-1][0]
-            self.connection.execute(
-                "INSERT OR REPLACE INTO metadata VALUES "
-                "('fingerprint_version', ?)",
-                (_ARCHIVE_FINGERPRINT_VERSION,))
-            self.connection.commit()
-        self.index_backfill_seconds = time.perf_counter() - backfill_start
-
-        t0 = time.perf_counter()
-        # Only deterministic 64-bit fingerprints are loaded from NFS.  A
-        # collision causes a redundant exact BLOB lookup, never a false cache
-        # hit, because the evaluations table remains authoritative.
-        self._known_fingerprints = {
-            int(row[0]) for row in self.connection.execute(
-                "SELECT fingerprint FROM evaluation_fingerprints")}
-        self.index_load_seconds = time.perf_counter() - t0
-        self.hits = 0
-        self.evaluations = 0
-        # Buffered (key -> fitness) rows and their fingerprints, committed on
-        # flush(). Lookups consult this buffer before touching SQL.
-        self._pending = {}
-        self._pending_fingerprints = []
-        self.reset_timing()
-
-    @staticmethod
-    def _key(point):
-        return np.ascontiguousarray(point, dtype=np.float64).tobytes()
-
-    @staticmethod
-    def _fingerprint(key):
-        digest = hashlib.blake2b(
-            key, digest_size=8, person=b"CANDEL-DE-v1").digest()
-        return int.from_bytes(digest, "little", signed=True)
-
-    def __call__(self, batch_eval, points, desc=None):
-        lookup_start = time.perf_counter()
-        x = np.asarray(points)
-        out = np.empty(x.shape[0], dtype=float)
-        pending = {}
-        for i, point in enumerate(x):
-            key = self._key(point)
-            if key in pending:
-                pending[key].append(i)
-                self.hits += 1
-                continue
-            pending[key] = [i]
-
-        # A fingerprint hit may reference a buffered, not-yet-written row, so
-        # the RAM buffer is consulted before issuing any SQL SELECT.
-        possible_hits = [
-            key for key in pending
-            if self._fingerprint(key) in self._known_fingerprints]
-        cached = {}
-        sql_hits = []
-        for key in possible_hits:
-            if key in self._pending:
-                cached[key] = self._pending[key]
-            else:
-                sql_hits.append(key)
-        for start in range(0, len(sql_hits), 512):
-            keys = sql_hits[start:start + 512]
-            placeholders = ",".join("?" for _ in keys)
-            rows = self.connection.execute(
-                "SELECT point, fitness FROM evaluations WHERE point IN ("
-                + placeholders + ")", keys)
-            cached.update(rows)
-        missing_keys = []
-        missing = []
-        for key, indices in pending.items():
-            if key in cached:
-                out[indices] = cached[key]
-                self.hits += 1
-            else:
-                missing_keys.append(key)
-                missing.append(indices[0])
-        self.lookup_seconds += time.perf_counter() - lookup_start
-        self.lookup_keys += len(pending)
-        self.lookup_queries += ((len(sql_hits) + 511) // 512)
-
-        if missing:
-            evaluation_start = time.perf_counter()
-            values = np.asarray(batch_eval(
-                jnp.asarray(x[missing]), desc=desc), dtype=float)
-            self.evaluation_seconds += (
-                time.perf_counter() - evaluation_start)
-            values = np.where(np.isnan(values), np.inf, values)
-            for key, value in zip(missing_keys, values):
-                indices = pending[key]
-                out[indices] = value
-            write_start = time.perf_counter()
-            new_fingerprints = [
-                self._fingerprint(key) for key in missing_keys]
-            for key, value in zip(missing_keys, values):
-                self._pending[key] = float(value)
-            self._pending_fingerprints.extend(new_fingerprints)
-            self._known_fingerprints.update(new_fingerprints)
-            self.write_seconds += time.perf_counter() - write_start
-            self.evaluations += len(missing)
-            if len(self._pending) > _ARCHIVE_WRITE_BUFFER_ROWS:
-                self.flush()
-        return out
-
-    def flush(self):
-        """Commit buffered rows in one transaction and clear the buffer."""
-        if not self._pending:
-            return
-        write_start = time.perf_counter()
-        self.connection.executemany(
-            "INSERT INTO evaluations VALUES (?, ?)",
-            list(self._pending.items()))
-        self.connection.executemany(
-            "INSERT OR IGNORE INTO evaluation_fingerprints VALUES (?)",
-            [(fingerprint,) for fingerprint in self._pending_fingerprints])
-        self.connection.commit()
-        self._pending.clear()
-        self._pending_fingerprints.clear()
-        self.write_seconds += time.perf_counter() - write_start
-
-    def reset_timing(self):
-        """Reset per-optimisation-phase timing without changing counters."""
-        self.lookup_seconds = 0.0
-        self.evaluation_seconds = 0.0
-        self.write_seconds = 0.0
-        self.lookup_keys = 0
-        self.lookup_queries = 0
-
-    def count(self):
-        self.flush()
-        return int(self.connection.execute(
-            "SELECT COUNT(*) FROM evaluations").fetchone()[0])
-
-    def close(self):
-        self.flush()
-        self.connection.close()
 
 
 def _lshade_draw_indices(order, n_pbest, n, n_union, rng):
@@ -1254,27 +1240,119 @@ def _phi_integration_suffix(model):
             if model.phi_integration == "peak-partition" else "")
 
 
-def _objective_policy(model):
+def _de_checkpoint_filename(model, seed, fix_floors_pesce=False):
+    floor_suffix = "_pescefloors" if fix_floors_pesce else ""
+    return (
+        f"de_ckpt_rmap{_variant_suffix(model)}"
+        f"{_phi_integration_suffix(model)}{floor_suffix}"
+        f"_seed{int(seed)}_lshade_nopesce.npz")
+
+
+def _objective_data_digest(model):
+    """Digest the observed arrays and spot partition used by the objective."""
+    digest = hashlib.sha256()
+    found = False
+    for name in (
+            "_all_x", "_all_y", "_all_sigma_x2", "_all_sigma_y2",
+            "_all_v_rel", "_all_a", "_all_sigma_a2", "_all_sigma_v2",
+            "_all_has_accel", "_idx_sys", "_idx_red", "_idx_blue"):
+        if not hasattr(model, name):
+            continue
+        value = np.ascontiguousarray(np.asarray(getattr(model, name)))
+        digest.update(name.encode())
+        digest.update(value.dtype.str.encode())
+        digest.update(np.asarray(value.shape, dtype=np.int64).tobytes())
+        digest.update(value.tobytes())
+        found = True
+    if hasattr(model, "v_sys_obs"):
+        digest.update(np.float64(model.v_sys_obs).tobytes())
+        found = True
+    return digest.hexdigest()[:16] if found else "none"
+
+
+def _objective_prior_digest(model):
+    """Digest effective prior families and parameters used by the objective."""
+    priors = getattr(model, "priors", None)
+    if not priors:
+        return "none"
+    digest = hashlib.sha256()
+    for name, prior in sorted(priors.items()):
+        digest.update(name.encode())
+        digest.update(
+            f"{type(prior).__module__}.{type(prior).__qualname__}".encode())
+        leaves, tree = jax.tree_util.tree_flatten(prior)
+        digest.update(str(tree).encode())
+        for leaf in leaves:
+            value = np.ascontiguousarray(np.asarray(leaf))
+            digest.update(value.dtype.str.encode())
+            digest.update(np.asarray(value.shape, dtype=np.int64).tobytes())
+            digest.update(value.tobytes())
+    return digest.hexdigest()[:16]
+
+
+def _objective_policy(model, fixed_params=None):
+    def attr(name, default):
+        return getattr(model, name, default)
+
+    kernel = ":ecc_hybrid_qf1" if getattr(model, "use_ecc", False) else ""
     radial = (
-        f"r{model._n_r_local}+{model._n_r_global}:"
-        f"K{model._K_sigma:g}:"
-        f"full{int(model._global_r_full_support)}:"
-        f"asym{int(model._asymmetric_r_local)}:"
-        f"width{model._scan_width_drop:g}")
+        f"r{attr('_n_r_local', 151)}+{attr('_n_r_global', 301)}:"
+        f"K{attr('_K_sigma', 5.0):g}:"
+        f"full{int(attr('_global_r_full_support', False))}:"
+        f"asym{int(attr('_asymmetric_r_local', False))}:"
+        f"width{attr('_scan_width_drop', 0.0):g}:"
+        f"R{attr('_R_phys_lo', 0.01):g}-{attr('_R_phys_hi', 2.0):g}:"
+        f"ref{int(attr('_refine_r_center', True))}x"
+        f"{attr('_n_refine_steps', 32)}")
+    geometry = (
+        f":piv{attr('_r_ang_ref_i', 0.0):g},"
+        f"{attr('_r_ang_ref_Omega', 0.0):g},"
+        f"{attr('_r_ang_ref_periapsis', 0.0):g}:"
+        f"data{_objective_data_digest(model)}:"
+        f"priors{_objective_prior_digest(model)}")
+    physics = (
+        f":phys{maser_physics.C_v:.17g},"
+        f"{maser_physics.C_a:.17g},"
+        f"{maser_physics.C_g:.17g},"
+        f"{maser_physics.SPEED_OF_LIGHT:.17g},"
+        f"{maser_physics.PC_PER_MAS_MPC:.17g},"
+        f"{maser_physics.LOG_2PI:.17g},"
+        f"{maser_physics.W_LOG_FLOOR:.17g},"
+        f"{maser_physics.R_EST_EPS:.17g},"
+        f"rg{int(maser_physics.REID_CIRCULAR_GAMMA)}")
+    fixed = ""
+    if fixed_params:
+        fixed = ":fixed=" + ",".join(
+            f"{name}={float(np.asarray(value)):.17g}"
+            for name, value in sorted(fixed_params.items()))
     if model.phi_integration == "peak-partition":
         refine_scope = (
-            ":rrhv" if (model._peak_r_refine_steps
-                         and model._peak_r_refine_hv_only) else "")
+            ":rrhv"
+            if (attr("_peak_r_refine_steps", 0)
+                and attr("_peak_r_refine_hv_only", False))
+            else "")
         return (
-            f"{_DE_PEAK_PARTITION_POLICY}:"
-            f"sys{model._n_phi_partition_sys}:"
-            f"hv{model._n_phi_partition_hv}:"
-            f"roots{model._phi_partition_root_capacity}:"
-            f"rr{model._peak_r_refine_steps}x"
-            f"{model._peak_r_refine_order}{refine_scope}:"
-            f"rw{model._peak_r_width_steps}:"
-            f"{radial}")
-    return f"{_DE_OBJECTIVE_POLICY}:{radial}"
+            f"{_DE_PEAK_PARTITION_POLICY}{kernel}:"
+            f"sys{attr('_n_phi_partition_sys', 129)}:"
+            f"hv{attr('_n_phi_partition_hv', 65)}:"
+            f"roots{attr('_phi_partition_root_capacity', 4)}:"
+            f"rr{attr('_peak_r_refine_steps', 0)}x"
+            f"{attr('_peak_r_refine_order', 7)}{refine_scope}:"
+            f"rw{attr('_peak_r_width_steps', 0)}:"
+            f"{radial}{geometry}{physics}{fixed}")
+    sys_ranges = ",".join(
+        f"{float(lo):g}_{float(hi):g}"
+        for lo, hi in attr(
+            "_phi_sys_ranges_deg", [[-45.0, 45.0], [135.0, 225.0]]))
+    phi = (
+        f":hv{attr('_phi_hv_inner_deg', 45.0):g}-"
+        f"{attr('_phi_hv_outer_deg', 90.0):g}:"
+        f"n{attr('_n_phi_hv_high', 401)}+"
+        f"{attr('_n_phi_hv_low', 101)}:"
+        f"sys{sys_ranges}x{attr('_n_phi_sys', 2001)}")
+    return (
+        f"{_DE_OBJECTIVE_POLICY}{kernel}:"
+        f"{radial}{phi}{geometry}{physics}{fixed}")
 
 
 def _init_block(gal_cfg, model):
@@ -1288,6 +1366,177 @@ def _init_block(gal_cfg, model):
             return gal_cfg[name]
         fprint(f"init block: [{name}] absent, falling back to [init]")
     return gal_cfg.get("init", {})
+
+
+_DE_HISTORY_KEYS = ("history_generation", "history_logp", "history_D_A")
+_OUTLIER_COORDINATES = ("x", "y", "velocity", "acceleration")
+
+
+def _save_de_progress_plot(checkpoint_path, generation, logp, D_A):
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    plot_path = os.path.splitext(checkpoint_path)[0] + "_progress.png"
+    tmp = plot_path + ".tmp.png"
+    figure = Figure(figsize=(9, 7))
+    FigureCanvasAgg(figure)
+    axes = figure.subplots(2, 2)
+    recent = slice(-100, None)
+    for axis, x, y, ylabel in (
+            (axes[0, 0], generation, logp, "Best logP"),
+            (axes[0, 1], generation, D_A, r"Best $D_A$ [Mpc]"),
+            (axes[1, 0], generation[recent], logp[recent], "Best logP"),
+            (axes[1, 1], generation[recent], D_A[recent],
+             r"Best $D_A$ [Mpc]")):
+        axis.plot(x, y)
+        axis.set(xlabel="Generation", ylabel=ylabel)
+    figure.tight_layout()
+    figure.savefig(tmp, dpi=300)
+    os.replace(tmp, plot_path)
+    return plot_path
+
+
+def _load_pesce_clipped_mask(root, galaxy, velocity):
+    path = os.path.join(root, "provenance.csv")
+    with open(path, newline="") as f:
+        rows = [row for row in csv.DictReader(f)
+                if row["galaxy"] == galaxy]
+    rows.sort(key=lambda row: int(row["spot_index"]))
+    indices = np.array([int(row["spot_index"]) for row in rows])
+    stored_velocity = np.array(
+        [float(row["velocity_km_s"]) for row in rows])
+    flags = [row["clipped_by_pesce"] for row in rows]
+    if (not np.array_equal(indices, np.arange(len(velocity)))
+            or not np.allclose(stored_velocity, velocity, rtol=0, atol=1e-6)
+            or any(flag not in ("True", "False") for flag in flags)):
+        raise ValueError(
+            f"Pesce clipping provenance does not match {galaxy} spot data.")
+    return np.array([flag == "True" for flag in flags])
+
+
+def _save_map_outlier_table(path, data, coordinate_probability,
+                            any_probability, sigma=3.0,
+                            flag_probability=0.95):
+    coordinate_probability = np.asarray(coordinate_probability, dtype=float)
+    any_probability = np.asarray(any_probability, dtype=float)
+    n_spots = any_probability.size
+    if coordinate_probability.shape != (4, n_spots):
+        raise ValueError("Coordinate outlier probabilities must be 4 x N.")
+    measured = np.asarray(data["accel_measured"], dtype=bool)
+
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow((
+            "spot_index", "velocity_km_s",
+            "x_microarcsec", "sigma_x_microarcsec",
+            "y_microarcsec", "sigma_y_microarcsec",
+            "acceleration_km_s_yr", "sigma_acceleration_km_s_yr",
+            "acceleration_measured",
+            *(f"probability_abs_z_{key}_gt_{sigma:g}"
+              for key in _OUTLIER_COORDINATES),
+            f"probability_any_abs_z_gt_{sigma:g}",
+            f"flag_probability_ge_{flag_probability:g}"))
+        for i in range(n_spots):
+            p = coordinate_probability[:, i].tolist()
+            if not measured[i]:
+                p[3] = None
+            writer.writerow((
+                i + 1, float(data["velocity"][i]),
+                float(data["x"][i]), float(data["sigma_x"][i]),
+                float(data["y"][i]), float(data["sigma_y"][i]),
+                float(data["a"][i]) if measured[i] else None,
+                float(data["sigma_a"][i]) if measured[i] else None,
+                bool(measured[i]), *p, float(any_probability[i]),
+                bool(any_probability[i] >= flag_probability)))
+    os.replace(tmp, path)
+    return path
+
+
+def _save_map_outlier_plot(path, data, probability, sigma=3.0,
+                           flag_probability=0.95):
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    velocity = np.asarray(data["velocity"], dtype=float)
+    measured = np.asarray(data["accel_measured"], dtype=bool)
+    probability = np.asarray(probability, dtype=float)
+    if not (velocity.shape == measured.shape == probability.shape):
+        raise ValueError("Per-spot outlier plot arrays must match.")
+
+    tmp = path + ".tmp.png"
+    figure = Figure(figsize=(8.0, 4.5), constrained_layout=True)
+    FigureCanvasAgg(figure)
+    axis = figure.subplots()
+    for has_accel, label, color in (
+            (False, "no measured acceleration", "tab:blue"),
+            (True, "measured acceleration", "tab:orange")):
+        use = measured == has_accel
+        if np.any(use):
+            axis.scatter(
+                velocity[use], probability[use], s=18, alpha=0.75,
+                color=color, edgecolor="none", label=label)
+    if data.get("dataset") == "unpruned":
+        clipped = np.asarray(data["clipped_by_pesce"], dtype=bool)
+        if clipped.shape != probability.shape:
+            raise ValueError("Pesce clipping mask must match plotted spots.")
+        if np.any(clipped):
+            axis.scatter(
+                velocity[clipped], probability[clipped], s=58, marker="D",
+                facecolors="none", edgecolors="black", linewidths=1.1,
+                label="clipped by Pesce", zorder=3)
+    axis.axhline(flag_probability, color="0.35", ls=":", lw=1.0,
+                 label=f"flag at {flag_probability:g}")
+    axis.axhline(0.68, color="0.55", ls="--", lw=1.0,
+                 label="reference at 0.68")
+    axis.set(
+        xlabel=r"Observed velocity [km s$^{-1}$]",
+        ylabel=rf"$P(\max_j |z_{{ij}}| > {sigma:g}\mid D,\hat{{\theta}})$")
+    axis.set_yscale("log")
+    axis.set_ylim(top=1.05)
+    axis.legend(loc="best", fontsize=8)
+    figure.savefig(tmp, dpi=220)
+    os.replace(tmp, path)
+    return path
+
+
+def _write_map_outlier_outputs(target, theta, data, output_base,
+                               sigma=3.0, flag_probability=0.95):
+    evaluate = jax.jit(lambda point:
+                       _conditional_latent_outlier_probabilities(
+                           target, point, sigma))
+    coordinate, any_probability = jax.device_get(evaluate(theta))
+    table_path = output_base + ".csv"
+    plot_path = output_base + ".png"
+    _save_map_outlier_table(
+        table_path, data, coordinate, any_probability, sigma,
+        flag_probability)
+    _save_map_outlier_plot(
+        plot_path, data, any_probability, sigma, flag_probability)
+    fprint(f"spots with P(max |z| > {sigma:g} | MAP globals) >= "
+           f"{flag_probability:g}: "
+           f"{np.sum(any_probability >= flag_probability)}/"
+           f"{target.model.n_spots}")
+    fprint(f"saved MAP latent-posterior outlier table to {table_path}")
+    fprint(f"saved MAP latent-posterior outlier plot to {plot_path}")
+    return table_path, plot_path
+
+
+def _load_de_history(checkpoint, generation, logp, D_A):
+    if checkpoint is None:
+        return [generation], [logp], [D_A]
+    present = [key in checkpoint.files for key in _DE_HISTORY_KEYS]
+    if not any(present):
+        return [generation], [logp], [D_A]
+    if not all(present):
+        raise ValueError("Checkpoint DE progress history is incomplete.")
+    history = [np.asarray(checkpoint[key]) for key in _DE_HISTORY_KEYS]
+    if not history[0].size or len({values.size for values in history}) != 1:
+        raise ValueError("Checkpoint DE progress history has invalid lengths.")
+    if int(history[0][-1]) != int(generation):
+        raise ValueError(
+            "Checkpoint DE progress history does not end at its generation.")
+    return tuple(values.tolist() for values in history)
 
 
 def _save_de_checkpoint(path, population, fitness, best_solution,
@@ -1312,6 +1561,15 @@ def _save_de_checkpoint(path, population, fitness, best_solution,
         data.update(extra)
     np.savez(tmp, **data)
     os.replace(tmp, path)
+    if extra and all(key in extra for key in _DE_HISTORY_KEYS):
+        try:
+            plot_path = _save_de_progress_plot(
+                path, *(extra[key] for key in _DE_HISTORY_KEYS))
+        except Exception as error:
+            fprint(f"WARNING: checkpoint saved but progress plot failed: "
+                   f"{error}")
+        else:
+            fprint(f"  progress plot: {plot_path}")
 
 
 def _load_de_checkpoint(path, lo, hi, names, sizes):
@@ -1335,7 +1593,8 @@ def _load_de_checkpoint(path, lo, hi, names, sizes):
 
 
 def _validate_de_checkpoint_policy(
-        checkpoint, path, objective_policy=_DE_OBJECTIVE_POLICY):
+        checkpoint, path, objective_policy=_DE_OBJECTIVE_POLICY,
+        seed_policy=_DE_SEED_POLICY, optimizer_seed=None):
     """Reject incompatible algorithm, objective, seed, or schedule state."""
     saved_algorithm = (
         str(np.asarray(checkpoint["algorithm"]).item())
@@ -1348,16 +1607,32 @@ def _validate_de_checkpoint_policy(
         str(np.asarray(checkpoint["seed_policy"]).item())
         if "seed_policy" in checkpoint.files else None)
     if saved_seed_policy is None:
-        if not os.path.basename(path).endswith("_nopesce.npz"):
+        if (seed_policy != _DE_SEED_POLICY
+                or not os.path.basename(path).endswith("_nopesce.npz")):
             raise ValueError(
-                "Legacy L-SHADE checkpoint has no seed-policy marker; only "
-                "a *_nopesce.npz checkpoint can be resumed.")
+                "Legacy L-SHADE checkpoint has no seed-policy marker "
+                "compatible with this run.")
         fprint("Legacy *_nopesce checkpoint establishes the unseeded "
                "Pesce/Reid policy.")
-    elif saved_seed_policy != _DE_SEED_POLICY:
+    legacy_base_seed = (
+        seed_policy == _DE_BASE_MODEL_SEED_POLICY
+        and saved_seed_policy == _DE_LEGACY_BASE_MODEL_SEED_POLICY)
+    if saved_seed_policy is not None and not (
+            saved_seed_policy == seed_policy or legacy_base_seed):
         raise ValueError(
             f"Checkpoint seed policy is {saved_seed_policy!r}, requested "
-            f"{_DE_SEED_POLICY!r}.")
+            f"{seed_policy!r}.")
+    if legacy_base_seed:
+        fprint("Accepted legacy NGC4258 base-model seed policy; the "
+               "quadratic seed population is unchanged.")
+    if optimizer_seed is not None:
+        if "optimizer_seed" not in checkpoint.files:
+            raise ValueError("L-SHADE checkpoint is missing optimizer_seed.")
+        saved_seed = int(checkpoint["optimizer_seed"])
+        if saved_seed != int(optimizer_seed):
+            raise ValueError(
+                f"Checkpoint optimizer seed is {saved_seed}, requested "
+                f"{int(optimizer_seed)}.")
     saved_schedule = (
         str(np.asarray(checkpoint["population_schedule"]).item())
         if "population_schedule" in checkpoint.files else None)
@@ -1379,8 +1654,8 @@ def _screen_eval(batch_eval, x, desc, chunk=512):
     """Evaluate ``x`` in slices with progress/ETA prints.
 
     Slicing only changes call granularity: the same points reach the same
-    per-candidate executable, so values, archive contents and NFE counts
-    are identical to a single call.
+    per-candidate executable, so values and NFE counts are identical to a
+    single call.
     """
     n = x.shape[0]
     if n <= chunk:
@@ -1398,7 +1673,7 @@ def _screen_eval(batch_eval, x, desc, chunk=512):
 
 def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
                                 N_sobol, min_dist_frac,
-                                seed_points=None):
+                                seed_points=None, required_seed_points=0):
     scale = hi - lo
     D = lo.size
 
@@ -1419,24 +1694,36 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
     seeds = np.empty((0, D))
     if seed_points is not None:
         seeds = np.atleast_2d(np.asarray(seed_points, dtype=float))
+        required_seed_points = int(required_seed_points)
+        if not 0 <= required_seed_points <= min(seeds.shape[0], pop_size):
+            raise ValueError("Invalid required DE seed count.")
         ok = (np.all(np.isfinite(seeds), axis=1)
               & np.all((seeds >= lo) & (seeds <= hi), axis=1))
+        if np.any(~ok[:required_seed_points]):
+            raise ValueError("Required DE seed point is outside the bounds.")
         if np.any(~ok):
             fprint(f"Skipped {np.sum(~ok)} DE seed point(s) outside bounds.")
         seeds = seeds[ok][:pop_size]
+    elif required_seed_points:
+        raise ValueError("Required DE seed point is missing.")
+
+    population_parts = []
+    fitness_parts = []
+    if seeds.shape[0]:
+        seed_population = (seeds - lo) / scale
+        population_parts.append(seed_population)
+        fitness_parts.append(_screen_eval(
+            batch_eval, jnp.asarray(seed_population),
+            "Initial seeded candidates"))
 
     n_sobol = pop_size - seeds.shape[0]
     if n_sobol:
         selected = _select_distinct(
             sobol_points, logp_all, n_sobol, min_dist_frac)
-        population = np.asarray((sobol_points[selected] - lo) / scale)
-    else:
-        population = np.empty((0, D))
-    if seeds.shape[0]:
-        population = np.vstack(((seeds - lo) / scale, population))
-    fitness = _screen_eval(
-        batch_eval, jnp.asarray(population), "Initial-population candidates")
-    jax.block_until_ready(fitness)
+        population_parts.append((sobol_points[selected] - lo) / scale)
+        fitness_parts.append(-logp_all[selected])
+    population = np.vstack(population_parts)
+    fitness = np.concatenate(fitness_parts)
     if population.shape[0] != pop_size:
         raise RuntimeError(
             f"DE initial population has {population.shape[0]} members, "
@@ -1449,19 +1736,91 @@ def _make_de_initial_population(batch_eval, lo, hi, pop_size, seed,
     return jnp.asarray(population), jnp.asarray(fitness)
 
 
+def _print_required_de_seeds(names, seed_points, fitness,
+                             required_seed_points, fixed=None):
+    """Audit required physical seed coordinates and their exact DE scores."""
+    required_seed_points = int(required_seed_points)
+    if not required_seed_points:
+        return
+    points = np.atleast_2d(np.asarray(seed_points, dtype=float))
+    fitness = np.asarray(fitness)
+    fixed = dict(fixed) if fixed else {}
+    for i, point in enumerate(points[:required_seed_points]):
+        fsection("Required base-model seed (injected)")
+        fprint("source: active galaxy [init], lifted into the expanded model")
+        fprint("scoring: exact all-spot joint (r_ang, phi) marginal + "
+               "global priors, identical to every DE candidate")
+        fprint("note: added normalised priors can shift absolute logP from "
+               "the nested linear-model value even at zero")
+        for name, value in zip(names, point):
+            fprint(f"  {name:20s} = {value:.10g}")
+        for name, value in fixed.items():
+            fprint(f"  {name:20s} = {float(np.asarray(value)):.10g} [fixed]")
+        if "eta" in names and "D_A" in names:
+            eta = point[names.index("eta")]
+            D_A = point[names.index("D_A")]
+            fprint(f"  {'log_MBH (derived)':20s} = "
+                   f"{eta + np.log10(D_A):.10g}")
+        rank = 1 + int(np.sum(fitness < fitness[i]))
+        fprint(f"exact all-spot marginal unnormalised logP = "
+               f"{-float(fitness[i]):.6f}")
+        fprint(f"initial-population rank = {rank}/{fitness.size}")
+
+
 # Per-observable noise floors, in the order candel_theta_from_point emits them.
 _PESCE_FLOOR_UNITS = (("sigma_x_floor", "uas"), ("sigma_y_floor", "uas"),
                       ("sigma_v_sys", "km/s"), ("sigma_v_hv", "km/s"),
                       ("sigma_a_floor", "km/s/yr"))
 _PESCE_FLOOR_NAMES = tuple(name for name, _ in _PESCE_FLOOR_UNITS)
 _FLOOR_UNIT = dict(_PESCE_FLOOR_UNITS)
+_DISTANCE_SLICE_FRACTIONS = np.asarray(
+    (0.001, 0.003, 0.01, 0.03, 0.1, 0.2))
+
+
+def _estimate_distance_gaussian(exact_eval, best_solution, best_fitness,
+                                distance_idx, lo, hi):
+    """Finite-difference conditional Gaussian scale in physical units."""
+    point = np.asarray(best_solution, dtype=float)
+    room = min(point[distance_idx], 1.0 - point[distance_idx])
+    steps = _DISTANCE_SLICE_FRACTIONS[
+        _DISTANCE_SLICE_FRACTIONS < 0.95 * room]
+    if not steps.size:
+        return None
+
+    points = np.repeat(point[None, :], 2 * len(steps), axis=0)
+    points[0::2, distance_idx] -= steps
+    points[1::2, distance_idx] += steps
+    values = np.asarray(exact_eval(points))
+    f_minus, f_plus = values[0::2], values[1::2]
+    h = steps * (float(hi[distance_idx]) - float(lo[distance_idx]))
+    f0 = float(best_fitness)
+    rise = 0.5 * (f_plus + f_minus) - f0
+    precision = (f_plus - 2.0 * f0 + f_minus) / h**2
+    logp_gradient = -(f_plus - f_minus) / (2.0 * h)
+    resolution = (32.0 * np.finfo(values.dtype).eps
+                  * max(1.0, abs(f0)))
+    valid = (np.isfinite(precision) & np.isfinite(logp_gradient)
+             & (precision > 0.0) & (rise > resolution))
+    if not np.any(valid):
+        return None
+    candidates = np.flatnonzero(valid)
+    chosen = candidates[np.argmin(np.abs(np.log(rise[candidates] / 0.5)))]
+    return {
+        "sigma": float(1.0 / np.sqrt(precision[chosen])),
+        "gradient": float(logp_gradient[chosen]),
+        "precision": float(precision[chosen]),
+        "step": float(h[chosen]),
+        "rise": float(rise[chosen]),
+        "mode_offset": float(logp_gradient[chosen] / precision[chosen]),
+    }
 
 
 def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             resume_path=None, checkpoint_interval=900.0,
             seed_points=None, fixed_params=None, reference_params=None,
             reference_status=(), objective_policy=_DE_OBJECTIVE_POLICY,
-            peak_candidates_per_wave=None):
+            peak_candidates_per_wave=None, seed_policy=_DE_SEED_POLICY,
+            required_seed_points=0):
     log2_N = int(opt_cfg.get("log2_N", 16))
     pop_size = int(opt_cfg.get("pop_size", 1000))
     max_generations = int(opt_cfg.get("max_generations", 5000))
@@ -1493,7 +1852,8 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     if resume_path is not None:
         ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
         _validate_de_checkpoint_policy(
-            ckpt, resume_path, objective_policy=objective_policy)
+            ckpt, resume_path, objective_policy=objective_policy,
+            seed_policy=seed_policy, optimizer_seed=seed)
     # seed_points arrive in full target.names order; drop the fixed columns.
     if fixed and seed_points is not None:
         free_idx = [target.names.index(n) for n in names]
@@ -1506,13 +1866,19 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
            f"patience={patience}, "
            f"{candidates_per_wave} candidate"
            f"{'s' if candidates_per_wave != 1 else ''} per GPU wave")
+    fprint(f"optimizer random seed: {seed}")
     fprint(f"current-to-pbest/1, success-history F/CR, "
            f"linear pop {pop_size}->{min_pop_size} over "
            f"the first {reduction_evaluations:,} DE candidate evaluations")
     fprint("population-reduction horizon only; candidate evaluations are not "
            "capped and do not terminate the optimiser")
-    fprint("seed policy: data-derived ridge + Sobol only; "
-           "Pesce/Reid is scored as a reference and never inserted")
+    if seed_policy == _DE_BASE_MODEL_SEED_POLICY:
+        fprint("seed policy: exact linear-model config point + "
+               "expansion-only variation cloud + linear-mass ridge + Sobol; "
+               "Pesce/Reid is never inserted")
+    else:
+        fprint("seed policy: data-derived ridge + Sobol only; "
+               "Pesce/Reid is scored as a reference and never inserted")
     fprint("initial DE population: seed points + scrambled Sobol candidates"
            if seed_points is not None
            else "initial DE population: scrambled Sobol candidates only")
@@ -1533,39 +1899,30 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     batch_eval = _make_batched_fitness(
         fitness_one, n_dev, devices,
         candidates_per_wave=candidates_per_wave)
-    archive_path = (checkpoint_path + ".sqlite"
-                    if checkpoint_path is not None else ":memory:")
-    exact_archive = _ExactArchive(
-        archive_path, D, resume=resume_path is not None,
-        objective_policy=objective_policy)
-
-    # Reproduce the archive's historical device-transfer downcast: the SQLite
-    # cache holds float64, but x64-disabled runs consumed it as float32.
     host_dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    evaluation_seconds = 0.0
 
     def exact_eval(points, desc=None):
-        return np.asarray(
-            exact_archive(batch_eval, points, desc=desc), dtype=host_dtype)
+        nonlocal evaluation_seconds
+        evaluation_start = time.perf_counter()
+        values = np.asarray(
+            batch_eval(jnp.asarray(points), desc=desc), dtype=host_dtype)
+        evaluation_seconds += time.perf_counter() - evaluation_start
+        return np.where(np.isnan(values), np.inf, values)
 
     t0 = time.time()
     reference_logp = None
     if reference_params is None:
-        # A new process always needs to compile, independently of archive
-        # resume state. Homogeneous GPUs share one pmap compilation; mixed
-        # devices retain one device-local compilation each.
+        # A new process always needs to compile. Homogeneous GPUs share one
+        # pmap compilation; mixed devices retain one device-local compilation
+        # each.
         warmup = batch_eval(jnp.full((1, D), 0.5))
         jax.block_until_ready(warmup)
     else:
         reference_point = _normalise_theta_point(
             reference_params, names, lo, hi)[None]
-        evaluations_before = exact_archive.evaluations
         reference_fitness = exact_eval(reference_point)
         jax.block_until_ready(reference_fitness)
-        if exact_archive.evaluations == evaluations_before:
-            # The SQLite sidecar supplied the value, but this process still
-            # needs the same executable for the population that follows.
-            warmup = batch_eval(jnp.asarray(reference_point))
-            jax.block_until_ready(warmup)
         reference_logp = -float(np.asarray(reference_fitness)[0])
     execution_mode = batch_eval.device_profile()["execution_mode"]
     fprint(f"JIT compiled in {time.time() - t0:.1f}s "
@@ -1632,9 +1989,12 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     else:
         population, fitness = _make_de_initial_population(
             exact_eval, lo, hi, pop_size, seed, N_sobol,
-            min_dist_frac, seed_points=seed_points)
+            min_dist_frac, seed_points=seed_points,
+            required_seed_points=required_seed_points)
         population = np.asarray(population)
         fitness = np.asarray(fitness)
+        _print_required_de_seeds(
+            names, seed_points, fitness, required_seed_points, fixed=fixed)
         key = jax.random.PRNGKey(seed)
         initial_pop_size = pop_size
         best_idx = int(np.argmin(np.asarray(fitness)))
@@ -1667,10 +2027,22 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         m_cr = np.asarray(ckpt["m_cr"])
         memory_index = int(ckpt["memory_index"])
 
+    def best_D_A():
+        distance = float(
+            lo[distance_idx]
+            + float(best_solution[distance_idx]) * scale[distance_idx])
+        if distance_name == "D_c":
+            distance = float(_D_A_from_D_c(target.model, distance))
+        return distance
+
+    history_generation, history_logp, history_D_A = _load_de_history(
+        ckpt, gen_start, -float(best_fitness), best_D_A())
+
     def checkpoint_extra():
         return {
             "algorithm": np.asarray(_DE_ALGORITHM),
-            "seed_policy": np.asarray(_DE_SEED_POLICY),
+            "seed_policy": np.asarray(seed_policy),
+            "optimizer_seed": np.asarray(seed),
             "population_schedule": np.asarray(_DE_POPULATION_SCHEDULE),
             "objective_policy": np.asarray(objective_policy),
             "initial_pop_size": np.asarray(initial_pop_size),
@@ -1683,14 +2055,12 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             "m_f": np.asarray(m_f),
             "m_cr": np.asarray(m_cr),
             "memory_index": np.asarray(memory_index),
+            "history_generation": np.asarray(history_generation),
+            "history_logp": np.asarray(history_logp),
+            "history_D_A": np.asarray(history_D_A),
         }
 
-    if resume_path is not None:
-        fprint("Exact-archive fingerprint index: "
-               f"{len(exact_archive._known_fingerprints):,} entries loaded "
-               f"in {exact_archive.index_load_seconds:.2f}s; "
-               f"legacy backfill={exact_archive.index_backfill_seconds:.2f}s")
-    exact_archive.reset_timing()
+    evaluation_seconds = 0.0
     phase_timing = {
         "trials": 0.0,
         "update": 0.0,
@@ -1701,18 +2071,13 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     def report_timing(label):
         host_seconds = (
             phase_timing["trials"] + phase_timing["update"]
-            + phase_timing["checkpoint"] + exact_archive.lookup_seconds
-            + exact_archive.write_seconds)
+            + phase_timing["checkpoint"])
         per_generation = host_seconds / max(1, timed_generations)
         fprint(
             f"  {label}: {timed_generations} generations; "
-            f"exact-eval={exact_archive.evaluation_seconds:.2f}s, "
+            f"exact-eval={evaluation_seconds:.2f}s, "
             f"host={host_seconds:.2f}s ({per_generation:.3f}s/gen): "
             f"trials={phase_timing['trials']:.2f}s, "
-            f"lookup={exact_archive.lookup_seconds:.2f}s "
-            f"({exact_archive.lookup_queries} SQL queries/"
-            f"{exact_archive.lookup_keys} keys), "
-            f"archive-write={exact_archive.write_seconds:.2f}s, "
             f"update={phase_timing['update']:.2f}s, "
             f"checkpoint={phase_timing['checkpoint']:.2f}s")
         if hasattr(batch_eval, "device_profile"):
@@ -1788,6 +2153,9 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             best_solution = population[gen_best_idx]
 
         current_best = -float(best_fitness)
+        history_generation.append(gen + 1)
+        history_logp.append(current_best)
+        history_D_A.append(best_D_A())
         if current_best > best_logp_so_far + 0.1:
             best_logp_so_far = current_best
             gens_without_improvement = 0
@@ -1808,9 +2176,6 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
 
         if (checkpoint_path is not None
                 and time.time() - last_ckpt >= checkpoint_interval):
-            # Commit buffered exact values so the archive is never staler than
-            # the checkpoint it serves on resume.
-            exact_archive.flush()
             phase_start = time.perf_counter()
             _save_de_checkpoint(
                 checkpoint_path, population, fitness, best_solution,
@@ -1827,7 +2192,6 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             break
 
     if checkpoint_path is not None:
-        exact_archive.flush()
         phase_start = time.perf_counter()
         _save_de_checkpoint(
             checkpoint_path, population, fitness, best_solution,
@@ -1836,9 +2200,6 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
             extra=checkpoint_extra())
         phase_timing["checkpoint"] += time.perf_counter() - phase_start
     report_timing("final timing")
-    fprint(f"Exact archive: {exact_archive.count()} unique evaluations, "
-           f"{exact_archive.hits} cache hits")
-    exact_archive.close()
 
     x_best = np.asarray(lo + jnp.asarray(best_solution) * scale)
     params_best = _flat_to_theta(jnp.asarray(x_best), names)
@@ -1857,6 +2218,10 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     return output, best_logp, {
         "generations": final_gen,
         "reference_logp": reference_logp,
+        "distance_slice_inputs": (
+            exact_eval, np.asarray(best_solution).copy(), float(best_fitness),
+            distance_idx, np.asarray(lo), np.asarray(hi))
+        if distance_name == "D_A" else None,
     }
 
 
@@ -1905,7 +2270,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Run 2D-marginal MAP optimisation for one megamaser disk.")
     parser.add_argument("galaxy", type=str)
-    parser.add_argument("--seed", type=int, default=None)
+    add_dataset_arg(parser)
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="DE random seed. Different seeds use independent checkpoint, "
+             "and progress-plot files.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--fix-globals", action="store_true",
                         help="Skip the DE search: hold the disc globals at "
@@ -1932,23 +2301,29 @@ def main(argv=None):
     parser.add_argument("--add-ecc", action="store_true")
     parser.add_argument("--no-quadratic-warp", action="store_true")
     parser.add_argument("--add-quadratic-warp", action="store_true")
+    parser.add_argument(
+        "--skip-base-model-seed", action="store_true",
+        help="Do not include the config [init] no-eccentricity, "
+             "no-quadratic-warp point in a quadratic-warp DE "
+             "initial population. By default that point is required.")
     parser.add_argument("--mass-parameterization",
                         choices=("eta", "log_mbh"), default=None,
                         help="Global mass coordinate for the optimiser. "
                              "Default: config value, eta in config_maser.")
-    parser.add_argument("--init-strategy",
-                        choices=("median", "config"), default=None,
-                        help="Fixed-global source for --fix-globals, and "
-                             "target initial check otherwise. DE never uses "
-                             "the Pesce/Reid point for initialisation; "
-                             "--fix-globals-pesce scores that reference "
-                             "without running DE.")
+    parser.add_argument(
+        "--init-strategy", default=None,
+        help="Only used by --fix-globals (median or config). Real DE "
+             "searches ignore this option and always build their initial "
+             "population from the data-derived ridge and scrambled Sobol "
+             "candidates, plus the linear-model anchor for quadratic-warp "
+             "models.")
     parser.add_argument("--spot-batch", type=int, default=None)
     parser.add_argument(
         "--phi-integration", choices=("fixed-grid", "peak-partition"),
         default=None,
         help="Phi integration used by the DE 2D marginal. Default: config "
-             "value (fixed-grid in config_maser.toml). peak-partition uses "
+             "value (peak-partition in config_maser.toml). "
+             "peak-partition uses "
              "fixed-size numerical peak searches in both systemic "
              "half-planes and one half-plane per HV group.")
     parser.add_argument(
@@ -1982,11 +2357,21 @@ def main(argv=None):
                              "(-> --gres=gpu:N).")
     args = parser.parse_args(argv)
 
+    if args.no_ecc and args.add_ecc:
+        raise SystemExit("--no-ecc and --add-ecc are mutually exclusive.")
+    if args.no_quadratic_warp and args.add_quadratic_warp:
+        raise SystemExit(
+            "--no-quadratic-warp and --add-quadratic-warp are mutually "
+            "exclusive.")
+    if args.fix_globals and args.fix_globals_pesce:
+        raise SystemExit(
+            "--fix-globals and --fix-globals-pesce are mutually exclusive.")
     if args.fix_floors_pesce and (args.fix_globals or args.fix_globals_pesce):
         raise SystemExit(
             "--fix-floors-pesce only applies to the DE; it cannot combine "
             "with --fix-globals/--fix-globals-pesce (those skip the DE).")
     master_cfg = _MASTER_CFG
+    dataset = apply_dataset(master_cfg, args.dataset)
     galaxies = master_cfg["model"]["galaxies"]
     if args.galaxy not in galaxies:
         raise SystemExit(
@@ -2023,7 +2408,7 @@ def main(argv=None):
 
     fsection(f"Loading {args.galaxy} data")
     data = load_megamaser_spots(
-        data_path("data", "Megamaser"), args.galaxy,
+        maser_data_root(dataset), args.galaxy,
         v_sys_obs=gcfg["v_sys_obs"])
     distance_bounds = _distance_bounds(gcfg)
     if distance_bounds is not None:
@@ -2101,15 +2486,38 @@ def main(argv=None):
     finally:
         os.unlink(tmp.name)
 
-    init_strategy = str(args.init_strategy or _required_inference(
-        inf_cfg, "init_strategy")).lower()
-    if init_strategy == "reid":
+    fixed_globals = args.fix_globals or args.fix_globals_pesce
+    quadratic_de = _quadratic_de_requires_base_model_seed(
+        model, fixed_globals=fixed_globals)
+    if args.skip_base_model_seed and not quadratic_de:
         raise SystemExit(
-            "DE initialisation never uses the Pesce/Reid point. Choose "
-            "--init-strategy median or config; use --fix-globals-pesce only "
-            "to score the Pesce/Reid reference.")
+            "--skip-base-model-seed requires a quadratic-warp DE run.")
+    base_model_params = None
+    if quadratic_de and not args.skip_base_model_seed:
+        try:
+            base_model_params = _lift_base_model_init(model, gal_blk)
+        except KeyError as exc:
+            raise SystemExit(
+                f"{args.galaxy} quadratic-warp DE seeding requires "
+                f"[model.galaxies.{args.galaxy}.init].") from exc
+
+    configured_init_strategy = (
+        _required_inference(inf_cfg, "init_strategy")
+        if args.fix_globals else None)
+    init_strategy = _resolve_de_init_strategy(
+        args.init_strategy, configured_init_strategy,
+        fix_globals=args.fix_globals)
+    if args.fix_globals and init_strategy not in ("median", "config"):
+        raise SystemExit(
+            "--fix-globals accepts --init-strategy median or config; use "
+            "--fix-globals-pesce to score the Pesce/Reid reference.")
+    if args.init_strategy is not None and not args.fix_globals:
+        fprint(f"--init-strategy {args.init_strategy!r} ignored: DE always "
+               "uses data-derived ridge and scrambled Sobol candidates.")
     init_params = _make_init(
-        model, _init_block(config["model"]["galaxies"][args.galaxy], model),
+        model,
+        (_init_block(config["model"]["galaxies"][args.galaxy], model)
+         if args.fix_globals else {}),
         init_strategy,
         int(_required_inference(inf_cfg, "init_num_samples")),
         jax.random.PRNGKey(seed))
@@ -2134,7 +2542,6 @@ def main(argv=None):
     pesce_params = None
     pesce_status = ()
     fixed_floors = None
-    fixed_globals = args.fix_globals or args.fix_globals_pesce
     if args.fix_globals_pesce:
         try:
             init_params, pesce_status = _pesce_init(target, args.galaxy,
@@ -2187,12 +2594,10 @@ def main(argv=None):
             master_cfg["io"].get("root_output", "results/Megamaser"),
             "de_checkpoints", args.galaxy)
         os.makedirs(ckpt_dir, exist_ok=True)
-        floor_suffix = "_pescefloors" if args.fix_floors_pesce else ""
         ckpt_path = os.path.join(
-            ckpt_dir,
-            f"de_ckpt_rmap{_variant_suffix(model)}"
-            f"{_phi_integration_suffix(model)}{floor_suffix}"
-            "_lshade_nopesce.npz")
+            ckpt_dir, _de_checkpoint_filename(
+                model, seed, fix_floors_pesce=args.fix_floors_pesce))
+        fprint(f"DE checkpoint: {ckpt_path}")
         resume_path = (
             ckpt_path if args.resume and os.path.isfile(ckpt_path)
             else None)
@@ -2201,18 +2606,57 @@ def main(argv=None):
                 f"--resume: no checkpoint found at {ckpt_path}, "
                 "starting fresh")
         # Pesce/Reid is passed only to the shared objective for an independent
-        # reference score. The population is structurally limited to
-        # data-derived and Sobol points.
+        # reference score.
         pop_size = int(opt_cfg.get("pop_size", 1000))
-        data_seeds, seed_info = _data_driven_seed(
-            model, target, init_params, _h_ref(model) * 100.0,
-            max(1, pop_size // 2), seed + 1,
-            sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5))
-        if data_seeds is None:
-            fprint(f"data seed unavailable ({seed_info}); Sobol only")
+        if base_model_params is not None:
+            expansion_count = pop_size // 4
+            ridge_count = pop_size // 4
+            expansion_seeds, expansion_info = _base_model_variation_seeds(
+                model, target, base_model_params,
+                max(0, expansion_count - 1),
+                seed + 1,
+                sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5))
+            if "eta" in base_model_params:
+                linear_eta = float(base_model_params["eta"])
+            else:
+                linear_D_A = (
+                    base_model_params["D_A"] if model._D_A_uniform
+                    else _D_A_from_D_c(model, base_model_params["D_c"]))
+                linear_eta = (
+                    float(base_model_params["log_MBH"])
+                    - np.log10(float(linear_D_A)))
+            ridge_seeds, ridge_info = _data_driven_seed(
+                model, target, base_model_params, ridge_count, seed + 2,
+                sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5),
+                eta_anchor=linear_eta)
+            clouds = [
+                points for points in (expansion_seeds, ridge_seeds)
+                if points is not None]
+            data_seeds = np.vstack(clouds) if clouds else None
+            seed_info = f"{expansion_info}; {ridge_info}"
+            fprint(
+                f"expanded seed mix: {expansion_count} expansion-only "
+                f"(one exact anchor), {ridge_count} linear-mass ridge, "
+                f"{pop_size - expansion_count - ridge_count} Sobol")
         else:
-            fprint(f"data seed: {seed_info}")
-        seed_points = _initial_de_seed_points(data_seeds)
+            data_seeds, seed_info = _data_driven_seed(
+                model, target, init_params, max(1, pop_size // 2), seed + 1,
+                sobol_n_sigma=opt_cfg.get("sobol_n_sigma", 5))
+        if data_seeds is None:
+            fprint(f"seed cloud unavailable ({seed_info}); Sobol only")
+        else:
+            fprint(f"seed cloud: {seed_info}")
+        base_model_seed = (
+            None if base_model_params is None
+            else _theta_to_flat(base_model_params, target.names))
+        seed_points = _initial_de_seed_points(
+            data_seeds, base_model_seed=base_model_seed)
+        if base_model_seed is not None:
+            fprint(f"{args.galaxy} base-model config point is required in the "
+                   "initial DE population.")
+        elif args.skip_base_model_seed:
+            fprint(f"{args.galaxy} base-model config point skipped explicitly "
+                   "(--skip-base-model-seed).")
         fprint("Pesce/Reid reference is not part of the DE initial "
                "population.")
         sb_flag = " [--spot-batch]" if args.spot_batch is not None else ""
@@ -2229,7 +2673,7 @@ def main(argv=None):
         fprint(f"DE device executable: fixed {_DEVICE_LOCAL_BLOCK_SIZE}-"
                f"candidate block in {n_waves} "
                f"wave{'s' if n_waves != 1 else ''} "
-               "(padding is excluded from NFE/archive)")
+               "(padding is excluded from candidate NFE)")
         if _use_shared_pmap(n_dev, gpu_devices):
             fprint("DE multi-GPU compilation: one shared pmap executable "
                    "for homogeneous devices")
@@ -2266,8 +2710,12 @@ def main(argv=None):
             seed_points=seed_points, fixed_params=fixed_floors,
             reference_params=pesce_params,
             reference_status=pesce_status,
-            objective_policy=_objective_policy(model),
-            peak_candidates_per_wave=args.peak_candidates_per_wave)
+            objective_policy=_objective_policy(model, fixed_floors),
+            peak_candidates_per_wave=args.peak_candidates_per_wave,
+            seed_policy=(
+                _DE_BASE_MODEL_SEED_POLICY
+                if base_model_seed is not None else _DE_SEED_POLICY),
+            required_seed_points=int(base_model_seed is not None))
         pesce_logp = run_info["reference_logp"]
         run_summary = f"generations = {run_info['generations']}"
     dt = time.time() - t0
@@ -2303,9 +2751,49 @@ def main(argv=None):
         else:
             vals = ", ".join(str(round(float(x), 4)) for x in value)
             lines.append(f"{key} = [{vals}]")
-    fprint("MAP init (copy into config_maser.toml manually if desired):")
+    fprint(f"MAP init (copy into init_{dataset}.toml manually if desired):")
     print("\n".join(lines), flush=True)
 
+    if fixed_globals:
+        return
+
+    fsection("Conditional latent posterior at MAP")
+    fprint("Integrating the three-sigma statistic over the deterministic "
+           "conditional (r_ang, phi) grids; no latent sampling.")
+    theta = {name: jnp.asarray(init_params[name]) for name in target.names}
+    if dataset == "unpruned":
+        data["clipped_by_pesce"] = _load_pesce_clipped_mask(
+            maser_data_root(dataset), args.galaxy, data["velocity"])
+    outlier_base = (
+        os.path.splitext(ckpt_path)[0] + "_posterior_outliers")
+    _write_map_outlier_outputs(target, theta, data, outlier_base)
+
+    distance_inputs = run_info["distance_slice_inputs"]
+    distance_gaussian = None
+    fsection("Conditional local D_A slice")
+    fprint("This holds every other sampled MAP coordinate fixed; it is not "
+           "a marginal posterior uncertainty.")
+    try:
+        if distance_inputs is not None:
+            distance_gaussian = _estimate_distance_gaussian(*distance_inputs)
+    except Exception as error:
+        fprint(f"WARNING: conditional D_A slice failed: {error}")
+    if distance_gaussian is None:
+        fprint("unavailable: the symmetric finite-difference slice was not "
+               "locally convex above numerical resolution")
+    else:
+        fprint(
+            "conditional Gaussian scale: "
+            f"sigma(D_A) = {distance_gaussian['sigma']:.4g} Mpc")
+        fprint(
+            f"dlogP/dD_A = {distance_gaussian['gradient']:.4g} "
+            f"Mpc^-1; -d2logP/dD_A2 = "
+            f"{distance_gaussian['precision']:.4g} Mpc^-2")
+        fprint(
+            f"finite-difference step = {distance_gaussian['step']:.4g} "
+            f"Mpc; mean Delta(-logP) = "
+            f"{distance_gaussian['rise']:.4g}; local mode offset = "
+            f"{distance_gaussian['mode_offset']:.4g} Mpc")
 
 if __name__ == "__main__":
     main()

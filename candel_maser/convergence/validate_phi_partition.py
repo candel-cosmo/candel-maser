@@ -36,7 +36,8 @@ import tomli_w  # noqa: E402
 
 if jax.default_backend() != "gpu":
     # This must precede importing run_de_map, which configures the persistent
-    # cache. Old CPU PjRt peak executables can terminate during deserialisation.
+    # cache. Old CPU PjRt peak executables can terminate during
+    # deserialisation.
     jax.config.update("jax_enable_compilation_cache", False)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -46,6 +47,8 @@ if str(MASER_DIR) not in sys.path:
     sys.path.insert(0, str(MASER_DIR))
 
 import run_de_map as de  # noqa: E402
+from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
+
 try:  # noqa: E402
     from .convergence_utils import (cast_floats, cast_model_floats,
                                     dense_r_phi_reference_per_spot)
@@ -117,7 +120,8 @@ VARIANT_ALIASES = {
 POPULATIONS = ("systemic", "red", "blue")
 DEFAULT_REFERENCE_R_LEVELS = (5001, 10001, 20001)
 DEFAULT_REFERENCE_PHI_LEVELS = (2501, 5001, 10001)
-NGC4258_REFERENCE_PHI_LEVELS = (50001, 100001, 200001)
+NGC4258_REFERENCE_R_LEVELS = (20001, 40001, 80001, 160001)
+NGC4258_REFERENCE_PHI_LEVELS = (50001,) * 4
 
 # Irrelevance classifier.  Every candidate is judged against the full dense
 # reference ladder (computed or loaded exactly from cache); this only labels
@@ -270,7 +274,8 @@ def _parse_scheme_setting(value):
         raise argparse.ArgumentTypeError(
             f"{method}.{key} requires a {expected.__name__} value")
     if minimum is not None:
-        valid_value = parsed >= minimum if expected is int else parsed > minimum
+        valid_value = (
+            parsed >= minimum if expected is int else parsed > minimum)
         if not valid_value:
             relation = ">=" if expected is int else ">"
             raise argparse.ArgumentTypeError(
@@ -289,20 +294,26 @@ def _scheme_overrides(settings):
 
 
 def _reference_grids(galaxy, args):
+    r_levels = args.reference_r_levels
+    if not r_levels:
+        r_levels = (NGC4258_REFERENCE_R_LEVELS
+                    if galaxy == "NGC4258"
+                    else DEFAULT_REFERENCE_R_LEVELS)
     phi_levels = args.reference_phi_levels
     if phi_levels is None:
         phi_levels = (NGC4258_REFERENCE_PHI_LEVELS
                       if galaxy == "NGC4258"
                       else DEFAULT_REFERENCE_PHI_LEVELS)
-    if len(args.reference_r_levels) != len(phi_levels):
+    if len(r_levels) != len(phi_levels):
         raise ValueError(
             "--reference-r-levels and --reference-phi-levels must have "
             "the same number of entries.")
-    return tuple(zip(args.reference_r_levels, phi_levels))
+    return tuple(zip(r_levels, phi_levels))
 
 
 def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
+    add_dataset_arg(parser)
     parser.add_argument(
         "--galaxies", nargs="+",
         default=list(de._MASTER_CFG["model"]["galaxies"]),
@@ -331,12 +342,14 @@ def _parser():
              "strict; the mismatch is recorded in the report.")
     parser.add_argument(
         "--reference-r-levels", type=_parse_levels,
-        default=DEFAULT_REFERENCE_R_LEVELS)
+        default=(),
+        help="Radial reference levels (default: 5001,10001,20001; "
+             "NGC4258: 20001,40001,80001,160001).")
     parser.add_argument(
         "--reference-phi-levels", type=_parse_levels,
         default=None,
         help="Phi reference levels (default: 2501,5001,10001; "
-             "NGC4258: 50001,100001,200001).")
+             "NGC4258: 50001 at every radial level).")
     parser.add_argument("--reference-tail-levels", type=int, default=3,
                         help="Number of final levels whose consecutive "
                              "comparisons must pass (default: 3).")
@@ -560,7 +573,7 @@ def _build_case(galaxy, variant, args, seed):
         "phi_integration", master["model"].get(
             "phi_integration", "fixed-grid"))
     data = de.load_megamaser_spots(
-        de.data_path("data", "Megamaser"), galaxy,
+        de.maser_data_root(master["io"]["dataset"]), galaxy,
         v_sys_obs=gcfg["v_sys_obs"])
     distance_bounds = de._distance_bounds(gcfg)
     if distance_bounds is not None:
@@ -1670,12 +1683,15 @@ def _candidate_table_row(galaxy, variant, candidate, separator):
     results = [candidate["methods"][method] for method in METHODS]
     comparisons = [result["comparison"] for result in results]
     seconds = candidate.get("production_seconds") or {}
+    absolute_errors = [r["absolute_total_error"] for r in comparisons]
+    spot_errors = [r["max_absolute_spot_error"] for r in comparisons]
+    timings = [seconds.get(method) for method in METHODS]
     return (
         f"| {galaxy} | {variant} | {source} | {cid} | "
         f"{_fmt(results[0]['reference_total_log_likelihood'], '.6g')} | "
-        f"{_paired([r['absolute_total_error'] for r in comparisons], separator=separator)} | "
-        f"{_paired([r['max_absolute_spot_error'] for r in comparisons], separator=separator)} | "
-        f"{_paired([seconds.get(method) for method in METHODS], '.3g', separator)} |")
+        f"{_paired(absolute_errors, separator=separator)} | "
+        f"{_paired(spot_errors, separator=separator)} | "
+        f"{_paired(timings, '.3g', separator)} |")
 
 
 def _markdown(report):
@@ -1765,12 +1781,15 @@ def _markdown(report):
         lines.extend(f"- {row}" for row in overflows)
 
     lines.extend([
-        "", "## Aggregate by galaxy, variant, point source, and phi integration", "",
+        "",
+        "## Aggregate by galaxy, variant, point source, and phi integration",
+        "",
         "| Galaxy | Variant | Source | Phi integration | N | Irrelevant | "
         "Unconverged refs | Unconverged excused | "
         "mask mismatch | overflows | worst abs total | worst spot | "
         "worst p99 | worst RMS | Pass |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ("|---|---|---|---|---:|---:|---:|---:|"
+         "---:|---:|---:|---:|---:|---:|---:|"),
     ])
     for row in report["aggregate"]:
         lines.append(
@@ -1837,8 +1856,9 @@ def _markdown(report):
     lines.extend([
         "", "## Rankings and worst spots", "",
         "Rankings and worst spots exclude irrelevant candidates.", "",
-        "| Galaxy | Variant | Phi integration | Reference ranking inversions | "
-        "test/reference inversions | Worst candidate | Worst spot error |",
+        "| Galaxy | Variant | Phi integration | "
+        "Reference ranking inversions | test/reference inversions | "
+        "Worst candidate | Worst spot error |",
         "|---|---|---|---:|---:|---|---:|",
     ])
     for case in report["cases"]:
@@ -1852,7 +1872,9 @@ def _markdown(report):
                 f"{worst['candidate']} | "
                 f"{_fmt(worst['max_absolute_spot_error'])} |")
     lines.extend([
-        "", "| Galaxy | Variant | Phi integration | Candidate | Spot | Population | "
+        "",
+        "| Galaxy | Variant | Phi integration | Candidate | "
+        "Spot | Population | "
         "signed error | absolute error | roots | overflow |",
         "|---|---|---|---|---:|---|---:|---:|---:|---:|",
     ])
@@ -2062,12 +2084,18 @@ def _print_case(case):
         results = [candidate["methods"][method] for method in METHODS]
         comparisons = [result["comparison"] for result in results]
         seconds = candidate.get("production_seconds") or {}
+        absolute_errors = _paired(
+            [r["absolute_total_error"] for r in comparisons])
+        spot_errors = _paired(
+            [r["max_absolute_spot_error"] for r in comparisons])
+        timings = _paired(
+            [seconds.get(method) for method in METHODS], ".3g")
         print(
             f"{candidate['id'] + marker:<20} "
             f"{_fmt(results[0]['reference_total_log_likelihood'], '.6g'):>16} "
-            f"{_paired([r['absolute_total_error'] for r in comparisons]):>30} "
-            f"{_paired([r['max_absolute_spot_error'] for r in comparisons]):>31} "
-            f"{_paired([seconds.get(method) for method in METHODS], '.3g'):>22}",
+            f"{absolute_errors:>30} "
+            f"{spot_errors:>31} "
+            f"{timings:>22}",
             flush=True)
     _print_reference_convergence(case)
     flagged = [candidate for candidate in case["candidates"]
@@ -2127,6 +2155,7 @@ def _print_case(case):
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(raw_argv)
+    apply_dataset(de._MASTER_CFG, args.dataset)
     _validate_args(args)
     cache_dir = _reference_cache_dir(args)
     if args.clean_cache:

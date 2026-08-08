@@ -67,7 +67,8 @@ def default_global_steps():
 
 def with_derived(g):
     out = dict(g)
-    out["_D_c"] = (out["Vsys_km_s"] + out["Vcor_km_s"]) / out["H0"]
+    out["_D_A"] = float(rr.reid_D_A(
+        out["Vsys_km_s"] + out["Vcor_km_s"], out["H0"]))
     return out
 
 
@@ -217,18 +218,17 @@ def profile_lnp(params, d, r_ref, grid_r=40, grid_phi=73):
     return total, per_spot, p
 
 
-def profile_globals(g, d):
+def profile_globals(g, d, r_ref):
     g = with_derived(g)
     if invalid_globals(g):
         return -np.inf, None, None, np.nan
     params = globals_to_params(g)
     fill_ez(g["H0"], g["Vsys_km_s"], g["Vcor_km_s"])
-    r_ref = reid_r_ref(d, g["x0_mas"], g["y0_mas"])
     total, per_spot, params = profile_lnp(params, d, r_ref)
     return total, per_spot, params, r_ref
 
 
-def optimise_globals(g, d, names, steps, maxiter):
+def optimise_globals(g, d, r_ref, names, steps, maxiter):
     names = list(names)
     if not names:
         return g, None
@@ -247,7 +247,7 @@ def optimise_globals(g, d, names, steps, maxiter):
     def objective(x):
         trial = dict(g)
         trial.update({name: float(xi) for name, xi in zip(names, x)})
-        total, _, _, _ = profile_globals(trial, d)
+        total, _, _, _ = profile_globals(trial, d, r_ref)
         if np.isfinite(total) and total > best["lnP"]:
             best["lnP"] = float(total)
             best["globals"] = trial
@@ -283,7 +283,8 @@ def result_dict(g, total, per_spot, params, r_ref):
     out = {
         "lnP": float(total),
         "r_ref_mas": float(r_ref),
-        "D_Mpc": float((g["Vsys_km_s"] + g["Vcor_km_s"]) / g["H0"]),
+        "D_Mpc": float(rr.reid_D_A(
+            g["Vsys_km_s"] + g["Vcor_km_s"], g["H0"])),
         "globals": {name: float(g[name]) for name in rr.GLOBAL_NAMES},
         "latents": [],
     }
@@ -307,6 +308,7 @@ def main(argv=None):
                     help="Init variant to select from --init when it is a "
                          "merged multi-galaxy TOML or a config fragment.")
     ap.add_argument("--galaxy", default="NGC4258")
+    rr.add_dataset_arg(ap)
     ap.add_argument("--data", required=True)
     ap.add_argument("--vcor", type=float, default=0.0)
     ap.add_argument(
@@ -336,12 +338,14 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     init_toml = rr.resolve_init_toml(args.init)
+    dataset = rr.resolve_dataset(rr.load_toml(rr.DEFAULT_CONFIG), args.dataset)
     reid_init = rr.load_toml_init(
-        init_toml, args.galaxy, args.vcor, variant=args.variant)
+        init_toml, args.galaxy, args.vcor, variant=args.variant,
+        dataset=dataset)
     d = build_data(args.data)
-    g = rr.shift_warp_pivots(
-        reid_init.values, reid_r_ref(d, reid_init.values["x0_mas"],
-                                     reid_init.values["y0_mas"]))
+    r_ref = reid_init.values.get("_reid_r_ref") or reid_r_ref(
+        d, reid_init.values["x0_mas"], reid_init.values["y0_mas"])
+    g = rr.shift_warp_pivots(reid_init.values, r_ref)
     for name, value in args.set:
         g[name] = value
     g = with_derived(g)
@@ -353,12 +357,12 @@ def main(argv=None):
         except argparse.ArgumentTypeError as exc:
             ap.error(str(exc))
         g, map_info = optimise_globals(
-            g, d, names, dict(args.map_step), args.map_maxiter)
+            g, d, r_ref, names, dict(args.map_step), args.map_maxiter)
     else:
         map_info = None
 
     g = with_derived(g)
-    total, per_spot, params, r_ref = profile_globals(g, d)
+    total, per_spot, params, r_ref = profile_globals(g, d, r_ref)
     if not np.isfinite(total):
         raise SystemExit("profiled likelihood is not finite")
     result = result_dict(g, total, per_spot, params, r_ref)
@@ -370,7 +374,8 @@ def main(argv=None):
 
     print(f"galaxy={args.galaxy} init={init_toml.name}")
     print(f"  globals: H0={g['H0']:.3f} Mbh={g['Mbh_1e7Msun']:.3f} "
-          f"i0={g['i0_deg']:.3f} D={g['_D_c']:.4f} r_ref={r_ref:.4f}")
+          f"i0={g['i0_deg']:.3f} D_A={g['_D_A']:.4f} "
+          f"r_ref={r_ref:.4f}")
     if map_info is not None:
         values = ", ".join(f"{k}={v:.6g}"
                            for k, v in map_info["values"].items())

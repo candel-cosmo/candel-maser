@@ -1,29 +1,99 @@
 # Megamaser Scripts
 
-Supported megamaser workflow:
+The normal scientific path is a per-galaxy DE MAP, followed by per-galaxy
+MCMC and, optionally, the joint-H0 analysis. For ordinary runs use `submit.sh`;
+the other entry points below are either thin sweep wrappers or diagnostics.
 
-- `run_maser.py`: unified megamaser runner. It defaults to `--sampler mcmc` (the explicit-latent `(r_ang, phi)` NUTS chain); use `--sampler de` for the 2D-marginal differential-evolution MAP (delegates to `run_de_map.py`), the global search used to seed the MCMC.
-- `run_de_map.py`: 2D-marginal MAP optimiser. Per spot it marginalises `(r_ang, phi)` jointly on a conditional per-spot r-grid (`_build_conditional_r_grids` + `_sum_phi_marginal`; not phi at a profiled `r_ang`, which overfits `D_A`) and optimises the globals with differential evolution. Phi integration defaults to the GPU-shaped peak-partition routine in `config_maser.toml`; the legacy fixed grids remain selectable with `--phi-integration fixed-grid`. Reached via `run_maser.py --sampler de`.
-- `benchmark_de_batching.py`: fixed-candidate exact-likelihood benchmark for
-  spot batching. Suite mode uses fresh child processes, bypasses SQLite, and
-  reads candidates from the current compatible DE checkpoint, or uses a
-  deterministic scrambled-Sobol fallback when no checkpoint exists.
-- `run_joint_H0.py`: toy joint MCP megamaser H0 inference using KDE distance likelihoods from the saved single-galaxy MCMC chains.
-- `submit.sh`: cluster/local submission helper for `--sampler mcmc`, `--sampler de`, or the toy joint H0 via `--infer-H0`.
-- `check_reid/`: standalone comparison against the Reid-style parameterisation.
+## Script Guide
+
+### Runners and submission helpers
+
+| File | Use |
+|---|---|
+| `run_maser.py` | Main single-galaxy runner. It defaults to explicit-latent BlackJAX MCMC; `--sampler de` delegates to `run_de_map.py`. |
+| `run_de_map.py` | Implements the 2D-marginal L-SHADE MAP search. Normally reached through `run_maser.py` or `submit.sh`. |
+| `run_joint_H0.py` | Runs the stage-2 joint-H0 model from saved per-galaxy `D_A` chains. |
+| `submit.sh` | Standard local/cluster front end for MCMC, DE, joint H0 (`--infer-H0`), and the post-MCMC marginal-objective diagnostic (`--evidence`). |
+| `submit_sweep.sh` | Submits the standard linear/quadratic-warp by config/Reid-init MCMC sweep over the five MCP H0 galaxies. |
+| `submit_sweep_H0.sh` | Submits the joint-H0 selection, reconstruction, and warp grid; it also provides the general leave-one-out mode. |
+| `submit_loo_H0.sh` | Preset leave-one-out wrapper using redshift selection and ManticoreLocalCOLA. |
+| `watch_and_resubmit.sh` | Watches submitted jobs for a completion marker and retries incomplete jobs; DE retries use `--resume`. `submit.sh --max-retries N` is the usual shortcut. |
+
+### Diagnostics and post-processing
+
+| File | Use |
+|---|---|
+| `run_map.py` | Optimises only the per-spot `(r_ang, phi)` latents at fixed DE or Pesce/Reid globals and reports comparable chi-squared values. |
+| `evidence_single_galaxy.py` | Re-scores an existing MCMC chain with the finite-support 2D-marginal objective. This is a diagnostic, not rigorous absolute evidence. |
+| `benchmark_de_batching.py` | Benchmarks exact DE candidate/spot batching, optionally from compatible checkpoint candidates. |
+| `backfill_map_chi2.py` | Backfills the fixed-global MAP chi-squared table without rerunning MCMC. |
+| `chi2_evidence_table.py` | Builds the paper comparison table from posterior-median profile chi-squared values and saved comparison logs. |
+| `dm2lnL_pesce.py` | Repeats that comparison with the Gaussian normalisation retained in `-2 ln L`. |
+| `warp_model_comparison.py` | Compares linear and quadratic warps using existing chains, profile chi-squared, and the nested Savage-Dickey test. |
+| `plot_dataset_distances.py` | Overlays the linear-warp `D_A` posteriors from the original-published and fiducial spot tables in one five-panel PDF. |
+| `plot_fiducial_warp_distances.py` | Overlays the fiducial linear- and quadratic-warp `D_A` posteriors in one five-panel PDF. |
+| `plot_rphi_bimodality.py` | Produces per-spot `(r_ang, phi)` likelihood maps for the NGC5765b bimodality figure. |
+| `extract_vext_prior.py` | Fits a static Gaussian `Vext` prior from external reconstruction chains and prints a TOML block. |
+
+### Configuration and specialist tools
+
+| File or directory | Use |
+|---|---|
+| `config_maser.toml` | Authoritative sampler, optimiser, prior, grid, and default-dataset settings. |
+| `init_fiducial.toml`, `init_original_published.toml`, `init_unpruned.toml` | Dataset-specific MAP initial points, per-spot radii, and warp pivots. |
+| `maser_config.py`, `joint_H0_helpers.py` | Shared support modules; they are imported, not run directly. |
+| `convergence/` | Independent phi/radius convergence and gradient diagnostics. Use the matching `.sh` wrapper for cluster submission. |
+| `check_reid/` | Reid `fit_disk` preparation, profiling, MCMC, Gibbs comparisons, and their specialist submit wrappers. |
+
+## How to Run and Submit
+
+`submit.sh` is the normal front door. Use `--local` to run in the current
+terminal or `-q QUEUE` to submit a batch job. Add `--dry` first to print the
+resolved command without running or submitting it. On Glamdring, use
+`redwood`, `berg`, or `cmb` for CPU work and `gpulong`, `cmbgpu`, or `optgpu`
+for GPU work; ARC uses `short`, `medium`, or `long`.
+
+```bash
+# Inspect a DE submission, then submit it on a GPU queue.
+bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC6323 \
+    --sampler de --dry
+bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC6323 --sampler de
+
+# Single-galaxy MCMC is CPU-only on the cluster.
+bash scripts/megamaser/submit.sh -q cmb --galaxy NGC6323 --sampler mcmc
+
+# Joint H0 can use a CPU or GPU queue; this example uses a GPU.
+bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --infer-H0 \
+    --selection redshift --distance-prior volume
+
+# Short local development run.
+bash scripts/megamaser/submit.sh --local --galaxy NGC6323 --sampler mcmc \
+    --num-warmup 100 --num-samples 100
+```
+
+The default dataset is `fiducial`; pass `--dataset original_published` for the
+literature tables. `--galaxy all` means the five MCP H0 galaxies and excludes
+NGC4258. Put runner-only options after `--` when useful. See `submit.sh --help`
+for all flags. The standard sweep wrappers can also be inspected safely:
+
+```bash
+bash scripts/megamaser/submit_sweep.sh -q cmb --dry
+bash scripts/megamaser/submit_sweep_H0.sh -q cmbgpu --dry
+bash scripts/megamaser/submit_loo_H0.sh -q cmbgpu --dry
+```
 
 ## Production Sampling
 
 Run a single galaxy locally:
 
 ```bash
-python scripts/megamaser/run_maser.py NGC5765b
+venv_candel/bin/python scripts/megamaser/run_maser.py NGC5765b
 ```
 
 Useful development flags:
 
 ```bash
-python scripts/megamaser/run_maser.py NGC6264 \
+venv_candel/bin/python scripts/megamaser/run_maser.py NGC6264 \
     --num-warmup 100 --num-samples 100
 ```
 
@@ -31,7 +101,7 @@ Use `run_maser.py --help` for MCMC options and
 `run_maser.py --sampler de --help` for the DE MAP options.
 
 ```bash
-python scripts/megamaser/run_maser.py NGC6264 --sampler mcmc \
+venv_candel/bin/python scripts/megamaser/run_maser.py NGC6264 --sampler mcmc \
     --num-warmup 100 --num-samples 100
 ```
 
@@ -40,9 +110,9 @@ python scripts/megamaser/run_maser.py NGC6264 --sampler mcmc \
 Submit production MCMC jobs:
 
 ```bash
-bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b --sampler mcmc
-bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --sampler mcmc
-bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --sampler mcmc
+bash scripts/megamaser/submit.sh -q cmb --galaxy NGC5765b --sampler mcmc
+bash scripts/megamaser/submit.sh -q cmb --galaxy NGC5765b,NGC6264 --sampler mcmc
+bash scripts/megamaser/submit.sh -q cmb --galaxy all --sampler mcmc
 ```
 
 `--galaxy all` expands to `CGCG074-064,NGC5765b,NGC6264,NGC6323,UGC3789`.
@@ -60,26 +130,36 @@ adaptation of the mutation and crossover rates, a displaced-parent archive,
 and linear population reduction.  Population reduction follows the number of
 DE-population fitness evaluations, not the generation counter.  Consequently,
 raising `max_generations` as a safety ceiling does not slow the reduction
-schedule.  The production population is 2000 -> 128 over 3,400,000 such
-evaluations; after that it remains at 128 until patience or the generation
-ceiling stops the run.  The 3,400,000 value is only the population-reduction
+schedule.  The production population is 2000 -> 1024 over 5,000,000 such
+evaluations; after that it remains at 1024 until patience or the generation
+ceiling stops the run.  The 5,000,000 value is only the population-reduction
 horizon, not an NFE limit: evaluations continue beyond it.  There is no
 classic/hybrid selector and no Adam polishing path.
 
-The initial population contains only the data-derived ridge and scrambled
-Sobol points.  The Pesce/Reid point is never inserted, including through the
-DE initialisation strategy.  Its exact all-spot unnormalised log posterior
-density is still printed as an independent reference and is scored through the
-same compiled DE objective rather than a separate startup executable.  (A
-single point has zero probability mass in a continuous posterior.) Runs use
-the explicit
-`*_lshade_nopesce.npz` checkpoint plus a SQLite exact-evaluation sidecar, and
-`--resume` restores both without accepting an older seeded or
-generation-scheduled checkpoint.
+The initial population contains the data-derived ridge and scrambled Sobol
+points.  For any galaxy, quadratic-warp runs instead require and seed the exact
+no-eccentricity, no-quadratic-warp `[init]` config point plus variations that
+hold its fitted coordinates fixed and scatter only the newly enabled terms
+around zero.  Linear and eccentric-only DE runs do not require `[init]`.  The
+production population of 2,000 contains 500 expansion-only starts (one exact
+anchor plus 499 variations), 500 data-driven ridge starts whose
+mass-to-distance coordinate is fixed to the linear fit, and 1,000 screened
+Sobol starts.  Scrambled Sobol points retain global coverage; pass
+`--skip-base-model-seed` to omit the lifted point and its variations explicitly.
+DE ignores every point-initialisation strategy and always constructs this
+ridge/Sobol population. The Pesce/Reid point is never inserted. Its exact all-spot
+unnormalised log posterior density is still printed as an independent
+reference and is scored through the same compiled DE objective rather than a
+separate startup executable.  (A single point has zero probability mass in a
+continuous posterior.) Runs use the explicit
+`*_seed<N>_lshade_nopesce.npz` checkpoint. `--resume` restores the complete
+optimiser state without accepting an older seeded or generation-scheduled
+checkpoint. `--seed N` selects the optimiser randomness and its independent
+checkpoint and progress plot, so different seeds can run concurrently.
 
-Every L-SHADE proposal is evaluated with the exact all-spot objective and
-deduplicated in the sidecar.  Spot batching remains allowed because it is an
-exact sum. The five standard float32 galaxies (`CGCG074-064`, `NGC5765b`,
+Every L-SHADE proposal is evaluated with the exact all-spot objective. Spot
+batching remains allowed because it is an exact sum. The five standard
+float32 galaxies (`CGCG074-064`, `NGC5765b`,
 `NGC6264`, `NGC6323`, and `UGC3789`) default to true all-spots evaluation;
 an explicit `--spot-batch` or per-galaxy setting still overrides this. The f64
 `NGC4258` path retains its configured/planned spot batching. GPU runs use
@@ -96,20 +176,15 @@ the setting changes only batching, not the objective. Heterogeneous devices
 retain concurrent device-local JITs, learn bounded per-device throughput weights, and
 adopt a weighted assignment only when its block-aware predicted makespan
 improves by at least 2%. Fixed-grid candidate batching remains an implementation
-invariant. Padding is evaluated but
-excluded from the archive and algorithmic NFE count.
-The SQLite sidecar persists deterministic 64-bit
-fingerprints, so a resume loads the compact fingerprint table instead of every
-full point key.  Possible matches are still verified against the complete BLOB
-key, preserving exact cache semantics even under a fingerprint collision.
-Checkpoint logs report exact-evaluation, trial-generation, archive lookup/write,
-device balance, update, and checkpoint timings.  Pass budget overrides after
-`--` when using `submit.sh`, for example:
+invariant. Padding is evaluated but discarded and excluded from the algorithmic
+NFE count. Checkpoint logs report exact-evaluation, trial-generation, device
+balance, update, and checkpoint timings. Pass budget overrides after `--` when
+using `submit.sh`, for example:
 
 ```bash
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC6264 \
     --sampler de --gpu-count 4 --cpus 2 -- \
-    --population-reduction-evaluations 3400000 \
+    --population-reduction-evaluations 5000000 \
     --max-generations 5000 --patience 500
 ```
 
@@ -117,18 +192,17 @@ For a development-only batching benchmark inside an existing two-GPU
 allocation, run:
 
 ```bash
-python scripts/megamaser/benchmark_de_batching.py UGC3789 --suite \
+venv_candel/bin/python scripts/megamaser/benchmark_de_batching.py UGC3789 --suite \
     --candidates 512 --n-devices 2
 ```
 
 The benchmark reports compile/adaptation passes separately from steady timed
-passes. It does not change the checkpoint or exact-evaluation sidecar. To
-trace the production-like fixed/config score and DE evaluator at 50 ms
-resolution, while isolating allocator state in one fresh process per setting,
-use for example:
+passes. It does not change the checkpoint. To trace the production-like
+fixed/config score and DE evaluator at 50 ms resolution, while isolating
+allocator state in one fresh process per setting, use for example:
 
 ```bash
-python scripts/megamaser/benchmark_de_batching.py UGC3789 --suite \
+venv_candel/bin/python scripts/megamaser/benchmark_de_batching.py UGC3789 --suite \
     --phi-integration peak-partition --candidate-wave 8 \
     --spot-batches 8,16,34,68,all,68 \
     --candidates 128 --warmups 3 --repeats 1 --n-devices 2 \
@@ -171,7 +245,7 @@ bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --infer-H0 
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --infer-H0 --selection redshift --distance-prior volume
 ```
 
-Common forwarded options are `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. DE accepts `--init-strategy median|config`; MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit single-galaxy evidence separately with `submit.sh --evidence` after the chain exists. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses the matching saved per-galaxy `samples/D_A` chains (legacy `samples/D_c` chains are converted to D_A) as KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
+Common forwarded options are `--seed`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. `--init-strategy` controls MCMC/evidence initial points; real DE searches ignore both that option and `[inference].init_strategy` and use the seed policy described above. Only `--fix-globals`, which skips DE, uses `median|config`. MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit the single-galaxy finite-support marginal-objective diagnostic with `submit.sh --evidence` after the chain exists; it is not a rigorous absolute evidence because the saved explicit-latent chain and finite-radius marginal objective do not define exactly the same posterior measure. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) requires matching saved per-galaxy `samples/D_A` chains with a recorded `uniform_D_A` stage-1 prior, uses them as KDE distance likelihoods, and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
 
 Automatic retries use the watcher wrapper. The `--max-retries` shortcut
 launches the watcher in a detached `screen`/`tmux` session and prints the
@@ -184,22 +258,86 @@ bash scripts/megamaser/watch_and_resubmit.sh --marker "MAP init" -- \
     bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --sampler de
 
 bash scripts/megamaser/watch_and_resubmit.sh --marker "saved samples to" -- \
-    bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --sampler mcmc
+    bash scripts/megamaser/submit.sh -q cmb --galaxy all --sampler mcmc
 ```
 
 Short galaxy aliases are accepted by `submit.sh`: `5765b`, `6264`, `6323`, `3789`, and `4258`.
 
 MCMC jobs also write `*_log_density.png` beside the HDF5 and corner plots.
+After a DE MAP run, `run_de_map.py` writes
+`<checkpoint>_posterior_outliers.csv` and `.png`. At the MAP globals it
+integrates over each spot's existing deterministic conditional `(r_ang, phi)`
+grids and reports the posterior probability that at least one measured,
+floor-inflated coordinate residual in x, y, velocity or acceleration exceeds
+3 sigma. The CSV also reports coordinate-wise probabilities and marks
+`P >= 0.95` as a diagnostic flag. No latent sampling is used, and MCMC does
+not run this diagnostic.
 Pass `--compare-reid` to additionally print the slow compact
 Pesce/Reid-reported/config/MCMC-median comparison table scored with the same
 2D marginal disk likelihood used by the DE objective; per-spot
 `(r_ang, phi)` latents are integrated out. Add `--compare-reid-2x` for the
-2x-denser-grid logZ check. Submit harmonic evidence separately with
+2x-denser-grid logZ check. Submit the harmonic marginal-objective diagnostic
+separately with
 `submit.sh -q short --galaxy NGC6323 --evidence --init-strategy config`.
 
 ## Configuration
 
 The main config is `config_maser.toml`.
+
+### Datasets
+
+Three spot-table datasets coexist and are selected end to end with `--dataset`,
+accepted by `submit.sh` and by every runner (`run_maser.py`, `run_de_map.py`,
+`run_map.py`, `run_joint_H0.py`, `evidence_single_galaxy.py`, the convergence
+scripts and `check_reid/prepare_reid_data.py`):
+
+| dataset | what it is |
+|---|---|
+| `original_published` | the complete literature tables, including NGC5765b's 20 systemic rows without measured accelerations |
+| `fiducial` | the tables Pesce et al. (2020) actually fitted, released with their erratum — **the default** |
+| `unpruned` | published astrometry, fiducial accelerations where available, plus 19 Kuo et al. (2011) NGC6323 spots |
+
+They differ for NGC5765b, NGC6264, NGC6323 and UGC3789 (spots removed in MCP
+vetting, NGC6323 augmented, NGC6264 acceleration uncertainties replaced).
+CGCG074-064 and NGC4258 are byte-identical in all three. Full provenance is in
+`docs/notes/megamaser_p20_clipping_audit.md`.
+
+Build the clipping-test input with
+`venv_candel/bin/python scripts/megamaser/build_unpruned_dataset.py`. The unpruned
+dataset intentionally starts without MAP blocks: run a fresh linear-warp DE
+search before config-started MCMC or quadratic-warp DE.
+
+All inputs and outputs are namespaced by dataset so nothing can be mixed
+silently:
+
+```
+data/Megamaser/<dataset>/       spot tables (+ generated *_loader_reid.inp)
+results/Megamaser/<dataset>/    chains, DE checkpoints, joint-H0 outputs
+```
+
+`data/` is intentionally ignored by Git. Provision the selected spot-table
+directory separately on every machine before running; the fiducial tables came
+from the MCP `fiducial_tables.zip` response and are not part of this checkout.
+
+`reid_mcmc/` and `convergence/` stay directly under `results/Megamaser/`;
+sampler and scheduler logs follow the corresponding dataset namespace.
+
+The per-galaxy DE MAP best points (`[model.galaxies.<G>.init*]`) and the warp
+pivots (`r_ang_ref_*`) live in `init_<dataset>.toml`, not in
+`config_maser.toml`. They are dataset-specific by
+construction: each init carries a per-spot `r_ang` array whose length is that
+dataset's spot count. `maser_config.apply_dataset` merges the selected file
+and appends the dataset to `[io].root_output`.
+
+The default is set by `[io].dataset` in `config_maser.toml`; `--dataset`
+overrides it. `fiducial` is the operational default now that matching linear
+DE MAP `[init]` blocks exist for all six galaxies; select the literature tables
+explicitly with `--dataset original_published`.
+
+The four re-vetted galaxies use their own fiducial DE MAP points and per-spot
+`r_ang` arrays. Config-started MCMC and `--fix-globals --init-strategy config`
+are available for `original_published` and `fiducial`; `unpruned` needs fresh DE
+points first.
 
 The all-galaxy validated DE default is `phi_integration = "peak-partition"`.
 The legacy dense fixed grid remains available for controlled comparisons:
@@ -214,7 +352,7 @@ Peak partition searches the two systemic half-planes independently using
 129 nodes per half-plane, and uses 65 nodes for each red/blue half-plane;
 validated per-galaxy overrides can raise either scan independently. It
 then locates extrema from neighbouring likelihood values, refines all fixed-size
-brackets in parallel, and integrates peak/tail partitions. All 128 global
+brackets in parallel, and integrates peak/tail partitions. All 176 global
 radii span the full physical support and are scanned concurrently; radius-only
 position, velocity, and acceleration terms are precomputed once. A three-point
 log-radius interpolation supplies the local-grid centre, avoiding the former
@@ -233,8 +371,8 @@ Circular disks use the structural four-root capacity, while eccentric disks
 retain eight because their rational velocity factor breaks the circular
 trigonometric-polynomial bound. A capacity overflow falls back to the already
 computed scan trapezoid, producing a finite poor-fit objective while retaining
-an explicit overflow diagnostic. Peak-partition v6 and fixed-grid radial-policy
-v2 therefore reject older checkpoints rather than mixing objective values.
+an explicit overflow diagnostic. Peak-partition v7 and fixed-grid radial-policy
+v3 therefore reject older checkpoints rather than mixing objective values.
 For a galaxy whose radial likelihood is exceptionally narrow, the optional
 peak-radius path first narrows a log-radius bracket with fixed value-only
 stencils, takes a guarded three-point quadratic vertex, and can solve the two
@@ -253,12 +391,11 @@ UGC3789; NGC6264 and NGC6323 retain 129/65.  NGC5765b uses a centred
 321-node local-radius grid.  UGC3789 uses 384 local nodes and a
 `scan_width_drop = 50` support envelope.  NGC4258 uses 513/65 scans, three
 all-class radial refinements, an eight-step value-only width solve, and a
-32-spot tile.  NGC6264 also uses a 32-spot tile; the other float32 DE targets
-use all spots.  The complete circular/eccentric validation, pathological-point
-audit, sustained GPU speedups, memory measurements, and caveats are in
-`docs/notes/megamaser_phi_integration_all_galaxies.md`; the preceding
-algorithm-development study is
-`docs/notes/megamaser_phi_integration_research.md`.
+32-spot tile.  Every galaxy, disk variant, and integration method uses 176
+global-radius discovery nodes.  NGC6264 also uses a 32-spot tile; the other
+float32 DE targets use all spots. Reproduce the current acceptance evidence
+with `convergence/validate_phi_partition.py`; do not infer it from these
+configuration values alone.
 
 ### Fixed-grid versus peak-partition validation
 
@@ -275,12 +412,15 @@ float64 reference. That reference integrates a log-uniform radial grid over
 the full physical support and a uniform phi grid over the matching physical
 half-plane support. Its default paired convergence sequence is
 `5001 x 2501`, `10001 x 5001`, and `20001 x 10001` radial-by-phi nodes;
-NGC4258 instead uses `5001 x 50001`, `10001 x 100001`, and
-`20001 x 200001`, matching the 200001-node dense phi reference used in the
-earlier NGC4258 benchmark. Explicit reference-level flags override these
-defaults. The radial axis is chunked to control memory. The finest reference
-is accepted only when the requested consecutive-level gates pass. Production
-uses the configured galaxy precision; NGC4258 remains forced to float64.
+NGC4258 instead uses `20001 x 50001`, `40001 x 50001`,
+`80001 x 50001`, and `160001 x 50001`. Individual-spot refinement shows that
+NGC4258's former failure was radial: 50001 phi nodes are converged, while the
+uniform radial grid enters its asymptotic regime only beyond 40001 nodes.
+The default tail-three gate therefore requires the final two radial
+transitions to pass without weakening any tolerance. Explicit reference-level
+flags override these defaults. The radial axis is chunked to control memory.
+Production uses the configured galaxy precision; NGC4258 remains forced to
+float64.
 
 Submit the default circular validation for every configured galaxy:
 
@@ -328,7 +468,7 @@ bash scripts/megamaser/convergence/validate_phi_partition.sh -q cmbgpu \
     --galaxies NGC4258 --sobol-candidates 0 --no-config-point \
     --no-pesce-point \
     --checkpoint-candidate \
-    results/Megamaser/de_checkpoints/NGC4258/de_ckpt_rmap_peakpartition_lshade_nopesce.npz \
+    results/Megamaser/original_published/de_checkpoints/NGC4258/de_ckpt_rmap_peakpartition_seed44_lshade_nopesce.npz \
     --allow-checkpoint-policy-mismatch
 ```
 
@@ -446,10 +586,8 @@ variant, seed, candidate options, and reference options fixed across trials.
 An agent can treat a zero exit code and `passed: true` as the feasibility gate,
 then rank feasible trials by the selected method's warmed throughput in
 `cases[].timing`. Local CPU trials are suitable for accuracy and workflow
-checks; final performance choices must be repeated on the production GPU.
-The completed all-galaxy multi-loop benchmark, physical analysis, pass/fail
-boundaries, and production recommendation are recorded in
-`docs/notes/megamaser_phi_integration_all_galaxies.md`.
+checks; final performance choices must be repeated on the production GPU and
+the generated report retained with the run artefacts.
 
 The production objective timing separates the cold compile/evaluation from
 warmed throughput and records backend peak memory when JAX exposes it.
@@ -463,6 +601,24 @@ phi_sys_ranges_deg = [[-180, 180]]
 MCMC samples non-centred log-radius residuals,
 `z_r = log(r_ang / r_hat(theta))`. Per-spot `r_ang`/`phi` samples are not
 written by default; pass `--save-latents` to keep them in the HDF5 output.
+Multiple chains use fixed, phase-specific progress rows for latent burn-in,
+MCMC warmup, and sampling. They run concurrently, capped at the allocated or
+available CPU count and `[inference].chain_workers` (8 by default).
+Both single-galaxy and joint-H0 MCMC enable JAX float64 before constructing
+their models; `--f64` remains only as a compatible no-op for MCMC.
+`--chain-workers N` overrides the cap; unless `--cpus` is set, `submit.sh`
+requests `min(num_chains, chain_workers)` CPUs.
+Every chain count defaults to the configured initial point. Multi-chain runs
+remain independent throughout warmup and sampling, so ordinary R-hat and ESS
+diagnostics retain their usual meaning.
+
+The optional global `sample_n_inner` setting controls saved-sample Gibbs
+sweeps, while per-galaxy `mcmc_target_accept_theta` and
+`mcmc_sample_n_inner` values can override global NUTS and Gibbs settings.
+`--target-accept-theta` and `--n-inner` still take precedence. Only NGC4258
+enables `mcmc_transport_systemic_phi`: its numerous, tightly constrained
+systemic spots exhibit the astrometric-centre ridge targeted by the fixed
+linear transport. Saved angles remain physical.
 The DE MAP marginalises `(r_ang, phi)` rather than sampling them.
 
 The default mass coordinate is `mass_parameterization = "eta"`, i.e. `eta = log_MBH - log10(D_A)`. Saved samples still include derived `log_MBH`, and the original `log_MBH` prior is applied to that derived value. Change `mass_parameterization` in `config_maser.toml` to sample `log_MBH` directly. The single-galaxy megamaser distance is always sampled as uniform `D_A` over the configured distance bounds (no flag).
@@ -470,12 +626,20 @@ The default mass coordinate is `mass_parameterization = "eta"`, i.e. `eta = log_
 ## Reid Likelihood Queries
 
 `check_reid/reid_profile.py` evaluates Mark Reid's unmodified `fit_disk` likelihood through the local f2py wrapper.  The data file and init TOML are the inputs; per-spot `(r, phi)` latents are MAP-profiled for each query.
+CANDEL config inputs are converted automatically using their `D_A` and active `eta`/`log_mbh` mass coordinate.  Moving a quadratic warp to Reid's data-derived reference radius preserves the complete polynomial by shifting both its intercept and linear coefficient.
+
+The Reid Gibbs comparison wrappers also accept `--dataset`. Unlabelled legacy
+`mystart_globals.toml` and `reid_control_<galaxy>.inp` files are treated as
+`original_published`; a fiducial run requires dataset-labelled globals and a
+control generated with `make_candel_globals.py --dataset fiducial` and
+`make_reid_control.py --dataset fiducial`.
 
 ```bash
-python scripts/megamaser/check_reid/reid_profile.py \
+venv_candel/bin/python scripts/megamaser/check_reid/reid_profile.py \
     --init reid_ngc4258_best.toml \
     --galaxy NGC4258 \
-    --data data/Megamaser/N4258_disk_data_MarkReid.final \
+    --dataset original_published \
+    --data data/Megamaser/original_published/N4258_disk_data_MarkReid.final \
     --set H0=63.0 \
     --json-out /tmp/reid_query.json
 ```

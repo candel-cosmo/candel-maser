@@ -19,6 +19,10 @@ import tempfile
 import tomli
 import tomli_w
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
 with open(_CONFIG_PATH, "rb") as f:
     _MASTER_CFG = tomli.load(f)
@@ -32,8 +36,11 @@ import numpy as np  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_map import evaluate_at_globals  # noqa: E402
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
-from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
-from candel.util import data_path, get_nested, results_path  # noqa: E402
+from candel.pvdata.megamaser_data import (  # noqa: E402
+    load_megamaser_spots, maser_data_root)
+from candel.util import get_nested, results_path  # noqa: E402
+from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
+                          check_init_block)
 
 
 def _h_ref(model):
@@ -63,6 +70,7 @@ def _init_block(gal_cfg, model):
 
 def _clean_init(model, init_cfg):
     """Config [init] block -> constrained-globals dict (from run_de_map)."""
+    check_init_block(init_cfg, model)
     p = {k: jnp.asarray(v) for k, v in init_cfg.items()}
     p.pop("M_BH", None)
     if model._D_A_uniform:
@@ -98,7 +106,7 @@ def _clean_init(model, init_cfg):
     return p
 
 
-def _build_target(galaxy, gcfg, spot_batch):
+def _build_target(galaxy, gcfg, spot_batch, dataset):
     config = {
         "inference": _MASTER_CFG["inference"],
         "model": dict(_MASTER_CFG["model"]),
@@ -107,7 +115,7 @@ def _build_target(galaxy, gcfg, spot_batch):
     config["model"]["galaxies"] = {
         g: dict(blk) for g, blk in _MASTER_CFG["model"]["galaxies"].items()}
     data = load_megamaser_spots(
-        data_path("data", "Megamaser"), galaxy, v_sys_obs=gcfg["v_sys_obs"])
+        maser_data_root(dataset), galaxy, v_sys_obs=gcfg["v_sys_obs"])
     if "D_de_lo" in gcfg and "D_de_hi" in gcfg:
         data["D_lo"] = float(gcfg["D_de_lo"])
         data["D_hi"] = float(gcfg["D_de_hi"])
@@ -193,7 +201,7 @@ def _reid_fortran_chi2(galaxy, model, results):
     except Exception as exc:                           # noqa: BLE001
         print(f"Reid-Fortran cross-check unavailable: {exc}", flush=True)
         return False
-    ctx = loglik_context(galaxy, model.n_spots)
+    ctx = loglik_context(galaxy, model.n_spots, model.dataset)
     if ctx is None:
         return False
     for s in results.values():
@@ -214,6 +222,7 @@ def _serialise(s):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("galaxy")
+    add_dataset_arg(parser)
     parser.add_argument("--out", default=None)
     parser.add_argument("--nm-maxiter", type=int, default=400)
     parser.add_argument("--n-restarts", type=int, default=5,
@@ -227,6 +236,7 @@ def main(argv=None):
                         help="skip the latent-marginalised ln L (faster)")
     args = parser.parse_args(argv)
 
+    dataset = apply_dataset(_MASTER_CFG, args.dataset)
     galaxies = _MASTER_CFG["model"]["galaxies"]
     if args.galaxy not in galaxies:
         raise SystemExit(
@@ -236,7 +246,7 @@ def main(argv=None):
     print("float64 enabled; JAX backend:", jax.default_backend(), flush=True)
 
     model, target, init = _build_target(
-        args.galaxy, galaxies[args.galaxy], args.spot_batch)
+        args.galaxy, galaxies[args.galaxy], args.spot_batch, dataset)
     print(f"{args.galaxy}: n_spots={model.n_spots}, "
           f"globals={list(target.names)}", flush=True)
 

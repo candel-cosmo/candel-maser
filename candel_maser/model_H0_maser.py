@@ -46,16 +46,15 @@ import numpy as _np
 from jax.scipy.special import logsumexp
 from numpyro.distributions import Delta, Uniform
 
-from ..util import SPEED_OF_LIGHT, fprint, fsection, get_nested
+from ..util import fprint, fsection, get_nested
 from . import maser_physics as _maser_physics
 from .base_model import ModelBase
 from .integration import trapz_log_weights
 from .maser_physics import (LOG_2PI, PC_PER_MAS_MPC, R_EST_EPS, W_LOG_FLOOR,
-                            centripetal_acceleration, predict_acceleration_los,
-                            gamma_minus_one, gravitational_redshift_minus1,
-                            keplerian_speed, predict_position,
-                            predict_velocity_los,
-                            radius_from_los_acceleration,
+                            centripetal_acceleration, gamma_minus_one,
+                            gravitational_redshift_minus1, keplerian_speed,
+                            predict_acceleration_los, predict_position,
+                            predict_velocity_los, radius_from_los_acceleration,
                             radius_from_los_velocity, velocity_rel_affine,
                             warp_geometry)
 from .optim1d import brent_1d
@@ -105,12 +104,32 @@ def neg_half_chi2_acceleration(a_obs, A_pred, var_a, has_a):
     return da * da * (-0.5 * has_a / var_a)
 
 
+def _neg_half_chi2_position_weighted(
+        x_obs, y_obs, X_pred, Y_pred, weight_x, weight_y):
+    dx = x_obs - X_pred
+    dy = y_obs - Y_pred
+    return dx * dx * weight_x + dy * dy * weight_y
+
+
+def _neg_half_chi2_velocity_weighted(v_obs, V_pred, weight_v):
+    dv = v_obs - V_pred
+    return dv * dv * weight_v
+
+
+def _neg_half_chi2_acceleration_weighted(a_obs, A_pred, weight_a):
+    da = a_obs - A_pred
+    return da * da * weight_a
+
+
 def _neg_half_chi2_quadform(r_pre, sin_phi, cos_phi, sin2, cos2, sincos,
-                            shared_r=False):
+                            shared_r=False, include_velocity=True):
     """−½χ² on the (r, φ) grid via a quadratic form in (sinφ, cosφ).
 
-    Circular-orbit only. Every residual channel is low-order in φ with
-    coefficients that depend only on r:
+    Position and acceleration are low-order in φ for every orbit. Circular
+    velocity is low-order too, so ``include_velocity=True`` gives the complete
+    circular integrand. For eccentric orbits, ``include_velocity=False`` gives
+    the position-plus-acceleration part for combination with the nonlinear
+    velocity residual.
 
         X = x0 + Px_s·sinφ + Px_c·cosφ,   Y = y0 + Py_s·sinφ + Py_c·cosφ
         V_rel = V0 + Bv·sinφ               (velocity relative to v_sys_obs)
@@ -145,8 +164,9 @@ def _neg_half_chi2_quadform(r_pre, sin_phi, cos_phi, sin2, cos2, sincos,
         px_c = r_pre["pos_x_c"][rp]
         py_s = r_pre["pos_y_s"][rp]
         py_c = r_pre["pos_y_c"][rp]
-        v0 = r_pre["velocity_0"][rp]
-        bv = r_pre["velocity_s"][rp]
+        if include_velocity:
+            v0 = r_pre["velocity_0"][rp]
+            bv = r_pre["velocity_s"][rp]
     else:
         sin_i = r_pre["sin_i"][rp]
         cos_i = r_pre["cos_i"][rp]
@@ -159,30 +179,36 @@ def _neg_half_chi2_quadform(r_pre, sin_phi, cos_phi, sin2, cos2, sincos,
         px_c = -R_cosO * cos_i
         py_s = R_cosO
         py_c = R_sinO * cos_i
-        v0, bv = velocity_rel_affine(
-            r_ang, r_pre["D"], r_pre["M_BH"], r_pre["v_sys"],
-            r_pre["dv_sys"], sin_i)
+        if include_velocity:
+            v0, bv = velocity_rel_affine(
+                r_ang, r_pre["D"], r_pre["M_BH"], r_pre["v_sys"],
+                r_pre["dv_sys"], sin_i)
 
-    kx = (-0.5 / r_pre["var_x"])[dp]
-    ky = (-0.5 / r_pre["var_y"])[dp]
-    kv = (-0.5 / r_pre["var_v"])[dp]
+    kx = r_pre["weight_x"][dp]
+    ky = r_pre["weight_y"][dp]
     ex = r_pre["all_x"][dp] - r_pre["x0"]
     ey = r_pre["all_y"][dp] - r_pre["y0"]
-    ev = r_pre["all_v_rel"][dp] - v0
 
-    C0 = kx * ex * ex + ky * ey * ey + kv * ev * ev
-    Cs = -2.0 * (kx * ex * px_s + ky * ey * py_s + kv * ev * bv)
+    C0 = kx * ex * ex + ky * ey * ey
+    Cs = -2.0 * (kx * ex * px_s + ky * ey * py_s)
     Cc = -2.0 * (kx * ex * px_c + ky * ey * py_c)
-    Css = kx * px_s * px_s + ky * py_s * py_s + kv * bv * bv
+    Css = kx * px_s * px_s + ky * py_s * py_s
     Ccc = kx * px_c * px_c + ky * py_c * py_c
     Csc = 2.0 * (kx * px_s * px_c + ky * py_s * py_c)
+
+    if include_velocity:
+        kv = r_pre["weight_v"][dp]
+        ev = r_pre["all_v_rel"][dp] - v0
+        C0 = C0 + kv * ev * ev
+        Cs = Cs - 2.0 * kv * ev * bv
+        Css = Css + kv * bv * bv
 
     if r_pre["has_any_accel"]:
         ba = (r_pre["accel_c"][rp] if "accel_c" in r_pre else
               centripetal_acceleration(
                   r_ang, r_pre["D"], r_pre["M_BH"])
               * r_pre["sin_i"][rp])
-        ka = (-0.5 * r_pre["has_a"] / r_pre["var_a"])[dp]
+        ka = r_pre["weight_a"][dp]
         ea = r_pre["all_a"][dp]
         C0 = C0 + ka * ea * ea
         Cc = Cc - 2.0 * (ka * ea * ba)
@@ -283,8 +309,8 @@ class MaserDiskModel(ModelBase):
 
         if "v_sys_obs" not in data:
             raise ValueError(
-                "data must contain 'v_sys_obs' (CMB-frame recession "
-                "velocity in km/s).")
+                "data must contain 'v_sys_obs' (the fixed velocity reference "
+                "used to centre residual arithmetic, km/s).")
         self.v_sys_obs = float(data["v_sys_obs"])
 
         accel_meas = self._build_spot_indices(data)
@@ -418,6 +444,7 @@ class MaserDiskModel(ModelBase):
         Returns the galaxy config dict.
         """
         gname = data.get("galaxy_name", "")
+        self.galaxy_name = gname
         gal_cfg = get_nested(self.config, f"model/galaxies/{gname}", {})
         self._configure_features(gal_cfg)
         self._configure_mass_parameterization(gal_cfg)
@@ -430,6 +457,11 @@ class MaserDiskModel(ModelBase):
         self.use_ecc = gal_cfg.get("use_ecc", use_ecc)
         self.ecc_cartesian = gal_cfg.get("ecc_cartesian", True)
         self.use_quadratic_warp = gal_cfg.get("use_quadratic_warp", use_qw)
+        if self.use_ecc and isinstance(
+                self.priors["dperiapsis_dr"], Delta):
+            raise ValueError(
+                "Eccentric megamaser models must sample dperiapsis_dr; "
+                "its prior cannot be Delta.")
         flags = []
         if self.use_ecc:
             flags.append("ecc" + ("(cart)" if self.ecc_cartesian else ""))
@@ -1405,19 +1437,25 @@ class MaserDiskModel(ModelBase):
             velocity_0, velocity_s = velocity_rel_affine(
                 r_ang, D_A, M_BH, v_sys, dv_sys, sin_i_r)
             velocity_kep = None
+            velocity_los_scale = None
             velocity_beta_c2 = None
             velocity_zg = None
         else:
             velocity_0 = None
             velocity_s = None
             velocity_kep = keplerian_speed(r_ang, D_A, M_BH)
-            velocity_beta_c2 = (velocity_kep / SPEED_OF_LIGHT) ** 2
+            velocity_los_scale = sin_i_r * velocity_kep
+            velocity_beta_c2 = (
+                velocity_kep / _maser_physics.SPEED_OF_LIGHT) ** 2
             velocity_zg = gravitational_redshift_minus1(
                 r_ang, D_A, M_BH)
 
         var_x = sx2 + sigma_x_floor2
         var_y = sy2 + sigma_y_floor2
         var_v = sv2 + jnp.where(is_hv, var_v_hv, var_v_sys)
+        weight_x = -0.5 / var_x
+        weight_y = -0.5 / var_y
+        weight_v = -0.5 / var_v
         # Per-spot Gaussian normalisation (added after the φ/r integral
         # — see the neg_half_chi2_* docstrings for the precision rationale).
         lnorm = -0.5 * (3 * LOG_2PI + jnp.log(var_x) +
@@ -1428,9 +1466,11 @@ class MaserDiskModel(ModelBase):
             # stays strictly positive. has_a then zeroes out both the
             # log-norm and the residual contribution for those spots.
             var_a = sa2 + sigma_a_floor2
+            weight_a = -0.5 * has_a / var_a
             lnorm_a = -0.5 * (LOG_2PI + jnp.log(var_a)) * has_a
         else:
             var_a = None
+            weight_a = None
             lnorm_a = jnp.zeros_like(lnorm)
 
         return dict(
@@ -1442,16 +1482,62 @@ class MaserDiskModel(ModelBase):
             accel_c=accel_c,
             velocity_0=velocity_0, velocity_s=velocity_s,
             velocity_kep=velocity_kep,
+            velocity_los_scale=velocity_los_scale,
             velocity_beta_c2=velocity_beta_c2,
             velocity_zg=velocity_zg,
-            velocity_scale=SPEED_OF_LIGHT * (1.0 + v_sys / SPEED_OF_LIGHT),
+            velocity_scale=(
+                _maser_physics.SPEED_OF_LIGHT
+                * (1.0 + v_sys / _maser_physics.SPEED_OF_LIGHT)),
             ecc_cos_om=ecc_cos_om_r, ecc_sin_om=ecc_sin_om_r, ecc2=ecc2,
             x0=x0, y0=y0, D=D_A, M_BH=M_BH, v_sys=v_sys, dv_sys=dv_sys,
             all_x=all_x, all_y=all_y, all_v_rel=all_v_rel, all_a=all_a,
             var_x=var_x, var_y=var_y, var_v=var_v, var_a=var_a,
+            weight_x=weight_x, weight_y=weight_y,
+            weight_v=weight_v, weight_a=weight_a,
             has_a=has_a, lnorm=lnorm, lnorm_a=lnorm_a,
             has_any_accel=has_any_accel,
         )
+
+    def _predict_velocity_on_grid(self, r_pre, sin_phi, cos_phi, rpad):
+        ecc2 = r_pre["ecc2"]
+        if ecc2 is None and "velocity_0" in r_pre:
+            return (r_pre["velocity_0"][rpad]
+                    + r_pre["velocity_s"][rpad] * sin_phi)
+
+        r_b = r_pre["r_ang"][rpad]
+        sin_i_b = r_pre["sin_i"][rpad]
+        if ecc2 is None:
+            return predict_velocity_los(
+                r_b, sin_phi, cos_phi, r_pre["D"], r_pre["M_BH"],
+                r_pre["v_sys"], r_pre["dv_sys"], sin_i_b)
+        if "velocity_kep" not in r_pre:
+            return predict_velocity_los(
+                r_b, sin_phi, cos_phi, r_pre["D"], r_pre["M_BH"],
+                r_pre["v_sys"], r_pre["dv_sys"], sin_i_b,
+                ecc2=ecc2, ecc_cos_om=r_pre["ecc_cos_om"][rpad],
+                ecc_sin_om=r_pre["ecc_sin_om"][rpad])
+
+        ecc_cos_om = r_pre["ecc_cos_om"][rpad]
+        ecc_sin_om = r_pre["ecc_sin_om"][rpad]
+        ecc_cos_d = cos_phi * ecc_cos_om + sin_phi * ecc_sin_om
+        denom = jnp.maximum(1.0 + ecc_cos_d, 1e-6)
+        inv_sqrt_denom = jax.lax.rsqrt(denom)
+        inv_denom = inv_sqrt_denom * inv_sqrt_denom
+        los_scale = (r_pre["velocity_los_scale"][rpad]
+                     if "velocity_los_scale" in r_pre else
+                     sin_i_b * r_pre["velocity_kep"][rpad])
+        v_z = los_scale * (sin_phi + ecc_sin_om) * inv_sqrt_denom
+        beta_g2 = (r_pre["velocity_beta_c2"][rpad]
+                   if _maser_physics.REID_CIRCULAR_GAMMA else
+                   r_pre["velocity_beta_c2"][rpad]
+                   * (1.0 + ecc2 + 2.0 * ecc_cos_d) * inv_denom)
+        gm1 = gamma_minus_one(beta_g2)
+        z_D = (
+            gm1 + (1.0 + gm1)
+            * (v_z / _maser_physics.SPEED_OF_LIGHT))
+        zg = r_pre["velocity_zg"][rpad]
+        z_og = z_D + zg + z_D * zg
+        return r_pre["velocity_scale"] * z_og + r_pre["dv_sys"]
 
     def _predict_on_grid(self, r_pre, sin_phi, cos_phi, rpad):
         """Evaluate predict_* on an (r, φ) grid broadcast by ``rpad``.
@@ -1472,38 +1558,7 @@ class MaserDiskModel(ModelBase):
                 sin_i_b, r_pre["cos_i"][rpad],
                 r_pre["sin_O"][rpad], r_pre["cos_O"][rpad])
 
-        ecc2 = r_pre["ecc2"]
-        if ecc2 is None and "velocity_0" in r_pre:
-            V = (r_pre["velocity_0"][rpad]
-                 + r_pre["velocity_s"][rpad] * sin_phi)
-        elif ecc2 is None:
-            V = predict_velocity_los(
-                r_b, sin_phi, cos_phi, r_pre["D"], r_pre["M_BH"],
-                r_pre["v_sys"], r_pre["dv_sys"], sin_i_b)
-        elif "velocity_kep" in r_pre:
-            ecc_cos_om = r_pre["ecc_cos_om"][rpad]
-            ecc_sin_om = r_pre["ecc_sin_om"][rpad]
-            ecc_cos_d = cos_phi * ecc_cos_om + sin_phi * ecc_sin_om
-            denom = jnp.maximum(1.0 + ecc_cos_d, 1e-6)
-            inv_sqrt_denom = jax.lax.rsqrt(denom)
-            inv_denom = inv_sqrt_denom * inv_sqrt_denom
-            v_z = (r_pre["sin_i"][rpad] * r_pre["velocity_kep"][rpad]
-                   * (sin_phi + ecc_sin_om) * inv_sqrt_denom)
-            beta_g2 = (r_pre["velocity_beta_c2"][rpad]
-                       if _maser_physics.REID_CIRCULAR_GAMMA else
-                       r_pre["velocity_beta_c2"][rpad]
-                       * (1.0 + ecc2 + 2.0 * ecc_cos_d) * inv_denom)
-            gm1 = gamma_minus_one(beta_g2)
-            z_D = gm1 + (1.0 + gm1) * (v_z / SPEED_OF_LIGHT)
-            zg = r_pre["velocity_zg"][rpad]
-            z_og = z_D + zg + z_D * zg
-            V = r_pre["velocity_scale"] * z_og + r_pre["dv_sys"]
-        else:
-            V = predict_velocity_los(
-                r_b, sin_phi, cos_phi, r_pre["D"], r_pre["M_BH"],
-                r_pre["v_sys"], r_pre["dv_sys"], sin_i_b,
-                ecc2=ecc2, ecc_cos_om=r_pre["ecc_cos_om"][rpad],
-                ecc_sin_om=r_pre["ecc_sin_om"][rpad])
+        V = self._predict_velocity_on_grid(r_pre, sin_phi, cos_phi, rpad)
 
         if r_pre["has_any_accel"] and "accel_c" in r_pre:
             A = r_pre["accel_c"][rpad] * cos_phi
@@ -1525,36 +1580,43 @@ class MaserDiskModel(ModelBase):
         Returns shape (N, [n_r,] n_phi) — residual term only; callers
         add lnorm/lnorm_a after logsumexp.
 
-        Circular orbits under x64 use the quadratic-form integrand
-        (`_neg_half_chi2_quadform`): ~2.5× fewer big-tensor ops. It expands
-        a cancellation-prone constant, so it is restricted to float64 (the
-        production regime); float32 and the eccentric branch keep the
-        residual-stable predict/chi² path. `sin2/cos2/sincos` are the
-        precomputed φ-basis; computed inline if omitted.
+        Under x64, position and acceleration use the quadratic-form integrand
+        (`_neg_half_chi2_quadform`). Circular velocity is included in that
+        form; eccentric velocity is evaluated separately because it is
+        nonlinear in φ. The form expands a cancellation-prone constant, so
+        float32 keeps the residual-stable predict/chi² path.
+        `sin2/cos2/sincos` are the precomputed φ-basis; computed inline if
+        omitted.
         """
-        if (r_pre["ecc2"] is None
-                and r_pre["r_ang"].dtype == jnp.float64):
+        r_ang = r_pre["r_ang"]
+        rpad = (slice(None),) * r_ang.ndim + (None,)
+        dpad = (slice(None),) + (None,) * r_ang.ndim
+        if r_ang.dtype == jnp.float64:
             if sin2 is None:
                 sin2 = sin_phi * sin_phi
                 cos2 = cos_phi * cos_phi
                 sincos = sin_phi * cos_phi
-            return _neg_half_chi2_quadform(
-                r_pre, sin_phi, cos_phi, sin2, cos2, sincos)
-        r_ang = r_pre["r_ang"]
-        rpad = (slice(None),) * r_ang.ndim + (None,)
-        dpad = (slice(None),) + (None,) * r_ang.ndim
+            nhc = _neg_half_chi2_quadform(
+                r_pre, sin_phi, cos_phi, sin2, cos2, sincos,
+                include_velocity=r_pre["ecc2"] is None)
+            if r_pre["ecc2"] is None:
+                return nhc
+            V = self._predict_velocity_on_grid(
+                r_pre, sin_phi, cos_phi, rpad)
+            return nhc + _neg_half_chi2_velocity_weighted(
+                r_pre["all_v_rel"][dpad], V, r_pre["weight_v"][dpad])
 
         X, Y, V, A = self._predict_on_grid(r_pre, sin_phi, cos_phi, rpad)
 
-        nhc = neg_half_chi2_position(
+        nhc = _neg_half_chi2_position_weighted(
             r_pre["all_x"][dpad], r_pre["all_y"][dpad], X, Y,
-            r_pre["var_x"][dpad], r_pre["var_y"][dpad])
-        nhc = nhc + neg_half_chi2_velocity(
-            r_pre["all_v_rel"][dpad], V, r_pre["var_v"][dpad])
+            r_pre["weight_x"][dpad], r_pre["weight_y"][dpad])
+        nhc = nhc + _neg_half_chi2_velocity_weighted(
+            r_pre["all_v_rel"][dpad], V, r_pre["weight_v"][dpad])
         if r_pre["has_any_accel"]:
-            nhc = nhc + neg_half_chi2_acceleration(
+            nhc = nhc + _neg_half_chi2_acceleration_weighted(
                 r_pre["all_a"][dpad], A,
-                r_pre["var_a"][dpad], r_pre["has_a"][dpad])
+                r_pre["weight_a"][dpad])
         return nhc
 
     def _phi_value(self, r_pre, phi):
@@ -1750,30 +1812,36 @@ class MaserDiskModel(ModelBase):
                            sin2=None, cos2=None, sincos=None,
                            use_quadform=False):
         """Shared-r variant of `_phi_eval` for scan/reference grids."""
-        if (use_quadform and r_pre["ecc2"] is None
-                and jax.config.jax_enable_x64):
+        if use_quadform and jax.config.jax_enable_x64:
             if sin2 is None:
                 sin2 = sin_phi * sin_phi
                 cos2 = cos_phi * cos_phi
                 sincos = sin_phi * cos_phi
-            return _neg_half_chi2_quadform(
+            nhc = _neg_half_chi2_quadform(
                 r_pre, sin_phi, cos_phi, sin2, cos2, sincos,
-                shared_r=True)
+                shared_r=True, include_velocity=r_pre["ecc2"] is None)
+            if r_pre["ecc2"] is None:
+                return nhc
+            V = self._predict_velocity_on_grid(
+                r_pre, sin_phi, cos_phi, (slice(None), None))
+            dpad = (slice(None), None, None)
+            return nhc + _neg_half_chi2_velocity_weighted(
+                r_pre["all_v_rel"][dpad], V[None],
+                r_pre["weight_v"][dpad])
         rpad = (slice(None), None)
         X, Y, V, A = self._predict_on_grid(r_pre, sin_phi, cos_phi, rpad)
 
         dpad = (slice(None), None, None)
         X3, Y3, V3 = X[None], Y[None], V[None]
 
-        nhc = neg_half_chi2_position(
+        nhc = _neg_half_chi2_position_weighted(
             r_pre["all_x"][dpad], r_pre["all_y"][dpad], X3, Y3,
-            r_pre["var_x"][dpad], r_pre["var_y"][dpad])
-        nhc = nhc + neg_half_chi2_velocity(
-            r_pre["all_v_rel"][dpad], V3, r_pre["var_v"][dpad])
+            r_pre["weight_x"][dpad], r_pre["weight_y"][dpad])
+        nhc = nhc + _neg_half_chi2_velocity_weighted(
+            r_pre["all_v_rel"][dpad], V3, r_pre["weight_v"][dpad])
         if r_pre["has_any_accel"]:
-            nhc = nhc + neg_half_chi2_acceleration(
-                r_pre["all_a"][dpad], A[None],
-                r_pre["var_a"][dpad], r_pre["has_a"][dpad])
+            nhc = nhc + _neg_half_chi2_acceleration_weighted(
+                r_pre["all_a"][dpad], A[None], r_pre["weight_a"][dpad])
         return nhc
 
     def _phi_integrand(self, r_ang, sin_phi, cos_phi, idx,
@@ -1988,17 +2056,17 @@ class MaserDiskModel(ModelBase):
                 r_pre["v_sys"], r_pre["dv_sys"], r_pre["sin_i"], ecc2=ecc2,
                 ecc_cos_om=r_pre["ecc_cos_om"], ecc_sin_om=r_pre["ecc_sin_om"])
 
-        nhc = neg_half_chi2_position(
+        nhc = _neg_half_chi2_position_weighted(
             r_pre["all_x"], r_pre["all_y"], X, Y,
-            r_pre["var_x"], r_pre["var_y"])
-        nhc = nhc + neg_half_chi2_velocity(
-            r_pre["all_v_rel"], V, r_pre["var_v"])
+            r_pre["weight_x"], r_pre["weight_y"])
+        nhc = nhc + _neg_half_chi2_velocity_weighted(
+            r_pre["all_v_rel"], V, r_pre["weight_v"])
         if has_any_accel:
             A = predict_acceleration_los(
                 r_ang, sin_phi, cos_phi,
                 r_pre["D"], r_pre["M_BH"], r_pre["sin_i"])
-            nhc = nhc + neg_half_chi2_acceleration(
-                r_pre["all_a"], A, r_pre["var_a"], r_pre["has_a"])
+            nhc = nhc + _neg_half_chi2_acceleration_weighted(
+                r_pre["all_a"], A, r_pre["weight_a"])
         return r_pre["lnorm"] + r_pre["lnorm_a"] + nhc
 
     def _eval_phi_fixed(self, spot_groups, phi, phys_args, phys_kw=None):

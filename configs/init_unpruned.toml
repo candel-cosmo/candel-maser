@@ -1,0 +1,35 @@
+# The unpruned dataset deliberately has no borrowed MAP points. Run a fresh
+# linear-warp DE search before config-started MCMC or quadratic-warp DE.
+# The warp pivots are fixed reference coordinates, not fitted MAP values, and
+# are shared verbatim with the other two datasets.
+[model.galaxies]
+
+[model.galaxies.CGCG074-064]
+r_ang_ref_i = 0.416615
+r_ang_ref_Omega = 0.416615
+r_ang_ref_periapsis = 0.208308
+
+[model.galaxies.NGC4258]
+r_ang_ref_i = 5.1
+r_ang_ref_Omega = 5.1
+r_ang_ref_periapsis = 5.1
+
+[model.galaxies.NGC5765b]
+r_ang_ref_i = 0.969575
+r_ang_ref_Omega = 0.969575
+r_ang_ref_periapsis = 0.484787
+
+[model.galaxies.NGC6264]
+r_ang_ref_i = 0.572839
+r_ang_ref_Omega = 0.572839
+r_ang_ref_periapsis = 0.286420
+
+[model.galaxies.NGC6323]
+r_ang_ref_i = 0.398971
+r_ang_ref_Omega = 0.398971
+r_ang_ref_periapsis = 0.199486
+
+[model.galaxies.UGC3789]
+r_ang_ref_i = 0.579550
+r_ang_ref_Omega = 0.579550
+r_ang_ref_periapsis = 0.289775

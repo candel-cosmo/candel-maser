@@ -32,8 +32,10 @@ from numpyro.diagnostics import split_gelman_rubin
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from run_reid_mcmc import (DEFAULT_CONFIG, PARAM_LABELS, ROOT,  # noqa: E402
-                           compute_reid_r_ref, load_config_init,
-                           load_galaxy_config, parse_data_rows, reid_H0)
+                           add_dataset_arg, compute_reid_r_ref,
+                           config_D_A_from_D_c, load_config_init,
+                           load_galaxy_config, load_toml, parse_data_rows,
+                           reid_H0, reid_data_path, resolve_dataset)
 
 # Reid-convention name -> LaTeX label, for the params both samplers constrain.
 SHARED = [
@@ -87,15 +89,16 @@ def _auto_hist_bin_factor(x):
     return n_bins / CORNER_BINS
 
 
-def candel_to_reid(h5_path, galaxy, config, variant, data):
+def candel_to_reid(h5_path, galaxy, config, variant, data, dataset):
     """Map CANDEL posterior draws into Reid's global convention."""
-    gcfg = load_galaxy_config(config, galaxy)
+    gcfg = load_galaxy_config(config, galaxy, dataset=dataset)
     v_sys_obs = float(gcfg["v_sys_obs"])
     icfg = dict(gcfg[variant])
     r_ref_i = float(gcfg.get("r_ang_ref_i", icfg.get("r_ang_ref", 0.0)))
     r_ref_pa = float(gcfg.get("r_ang_ref_Omega", icfg.get("r_ang_ref", 0.0)))
 
-    init = load_config_init(config, galaxy, 0.0, variant=variant).values
+    init = load_config_init(config, galaxy, 0.0, variant=variant,
+                            dataset=dataset).values
     header, rows = parse_data_rows(data)
     reid_r_ref = compute_reid_r_ref(rows, header, init)
     dr_i = reid_r_ref - r_ref_i
@@ -108,12 +111,8 @@ def candel_to_reid(h5_path, galaxy, config, variant, data):
     if "D_A" in s:
         D = s["D_A"]
     elif "D_c" in s:
-        # Legacy comoving-only chain: convert to angular-diameter distance,
-        # D_A = D_c/(1+z). z ~ vsys/c is the low-z form (<0.1% at MCP
-        # redshifts) of CANDEL's own D_A = D_c/(1+z_cosmo), and matches the
-        # z=vsys/c convention of the reid_H0 map applied below -- unlike the
-        # old code, which used D_c directly as D_A (~(1+z) too large).
-        D = s["D_c"] / (1.0 + (v_sys_obs + s["dv_sys"]) / 299792.458)
+        # Legacy comoving-only chain: replay the CANDEL config cosmology.
+        D = config_D_A_from_D_c(load_toml(config), s["D_c"])
     else:
         raise KeyError(
             f"{h5_path} has no D_A or D_c distance samples; candel_to_reid "
@@ -135,9 +134,9 @@ def candel_to_reid(h5_path, galaxy, config, variant, data):
         "x0_mas": s["x0"] / 1000.0,
         "y0_mas": s["y0"] / 1000.0,
         "i0_deg": (180.0 - s["i0"]) - s["di_dr"] * dr_i + d2i * dr_i**2,
-        "di_dr_deg_mas": -s["di_dr"],
+        "di_dr_deg_mas": -s["di_dr"] + 2.0 * d2i * dr_i,
         "PA_deg": s["Omega0"] + s["dOmega_dr"] * dr_pa + d2pa * dr_pa**2,
-        "dPA_dr_deg_mas": s["dOmega_dr"],
+        "dPA_dr_deg_mas": s["dOmega_dr"] + 2.0 * d2pa * dr_pa,
         "sigma_x_mas": s["sigma_x_floor"] / 1000.0,
         "sigma_y_mas": s["sigma_y_floor"] / 1000.0,
         "sigma_vsys_km_s": s["sigma_v_sys"],
@@ -346,6 +345,7 @@ def main(argv=None):
     p.add_argument("--galaxy", required=True)
     p.add_argument("--variant", default="init", choices=["init", "init_qw"])
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    add_dataset_arg(p)
     p.add_argument("--data", type=Path, default=None)
     p.add_argument("--reid-chain", type=Path, default=None)
     p.add_argument("--candel", type=Path, default=None)
@@ -356,11 +356,12 @@ def main(argv=None):
 
     g = args.galaxy
     suffix = "_qw" if args.variant == "init_qw" else ""
-    data = args.data or ROOT / f"data/Megamaser/{g}_loader_reid.inp"
+    dataset = resolve_dataset(load_toml(args.config), args.dataset)
+    data = args.data or reid_data_path(g, dataset)
     reid_chain = args.reid_chain or (
         ROOT / f"results/Megamaser/reid_mcmc/{g}_try/global_chain.csv")
     candel = args.candel or (
-        ROOT / f"results/Megamaser/{g}/{g}_blackjax_mcmc_rphi{suffix}_initreid.hdf5")  # noqa: E501
+        ROOT / f"results/Megamaser/{dataset}/{g}/{g}_blackjax_mcmc_rphi{suffix}_initreid.hdf5")  # noqa: E501
     out_dir = args.out_dir or reid_chain.parent
 
     for pth in (data, reid_chain, candel):
@@ -369,7 +370,7 @@ def main(argv=None):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     reid = load_reid(reid_chain, args.burn)
-    cand = candel_to_reid(candel, g, args.config, args.variant, data)
+    cand = candel_to_reid(candel, g, args.config, args.variant, data, dataset)
     rhat = reid_split_rhat(reid)
     write_table(cand, reid, rhat, out_dir / f"compare_{g}{suffix}.txt")
     overlay_corner(cand, reid, out_dir / f"compare_{g}{suffix}_corner.png")

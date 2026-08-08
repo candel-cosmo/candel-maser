@@ -12,7 +12,7 @@
 # You should have received a copy of the GNU General Public License along
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-"""Helper functions for one-step joint megamaser H0 inference."""
+"""Helpers for stage-2 toy joint-H0 inference from saved distance chains."""
 import hashlib
 import json
 import os
@@ -29,6 +29,7 @@ from candel.field.field_interp import (_get_grid_params,
                                        _trilinear_interp_field,
                                        apply_gaussian_smoothing,
                                        prepare_los_geometry)
+from candel.model.pv_utils import _R_ICRS_TO_GAL, _R_ICRS_TO_SUPERGAL
 from candel.model.utils import log_prob_integrand_sel
 from candel.pvdata.field_cache import (_field_cache_dir_from_config,
                                        _field_cache_enabled_from_config)
@@ -286,6 +287,8 @@ def _load_volume_selection_data(reconstruction, field_config_path,
         "log_r_3d", "log_dV_3d",
         "log_volume_weight_3d", "zcosmo_3d", "vrad_3d_fields",
         "rhat_x_3d", "rhat_y_3d", "rhat_z_3d",
+        # `rhat_*_3d` are in the field frame, so Vext must be rotated into it.
+        "coordinate_frame_3d",
     }
     return {k: v for k, v in out.items() if k in keep}
 
@@ -299,6 +302,8 @@ def _attach_velocity_data(galaxy_data, velocity_data):
         gd["los_r"] = jnp.asarray(velocity_data["r"])
         gd["los_velocity"] = jnp.asarray(los_velocity[:, i, :])
         gd["rhat"] = jnp.asarray(velocity_data["rhat"][i])
+        # `prepare_los_geometry` builds rhat in the field's own frame.
+        gd["rhat_frame"] = velocity_data["coordinate_frame"]
 
 
 def _attach_icrs_rhat(galaxy_data):
@@ -307,6 +312,7 @@ def _attach_icrs_rhat(galaxy_data):
         np.asarray([gd["dec"] for gd in galaxy_data]))
     for gd, row in zip(galaxy_data, rhat):
         gd["rhat"] = jnp.asarray(row)
+        gd["rhat_frame"] = "icrs"
 
 
 def _interp_los_velocity(r, los_r, los_velocity, r0_decay_scale=5.0):
@@ -349,7 +355,26 @@ def _volume_log_cell_weight(volume_data, h, flat_dist):
     return out
 
 
+def rotate_vext_to_frame(Vext, frame):
+    """
+    Rotate an ICRS-Cartesian `Vext` into a reconstruction's own frame.  Vext is
+    sampled in ICRS, but direction vectors taken from a reconstruction grid
+    (the LOS `rhat` and the voxel `rhat_*_3d`) are in the field frame, so the
+    two must be brought together before projecting.  Mirrors
+    `base_model._vol_sel_Vext_rad_3d`.
+    """
+    frame = str(frame).lower()
+    if frame == "icrs":
+        return Vext
+    if frame == "galactic":
+        return _R_ICRS_TO_GAL @ Vext
+    if frame == "supergalactic":
+        return _R_ICRS_TO_SUPERGAL @ Vext
+    raise ValueError(f"Unsupported coordinate frame for Vext: `{frame}`.")
+
+
 def _volume_vext_radial(volume_data, Vext):
+    Vext = rotate_vext_to_frame(Vext, volume_data["coordinate_frame_3d"])
     return (Vext[0] * volume_data["rhat_x_3d"]
             + Vext[1] * volume_data["rhat_y_3d"]
             + Vext[2] * volume_data["rhat_z_3d"])

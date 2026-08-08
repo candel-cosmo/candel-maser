@@ -1,10 +1,10 @@
-"""Reid f2py calc_warped_model vs CANDEL JAX circular disk physics.
+"""Reid f2py calc_warped_model vs CANDEL JAX disk physics.
 
-This is a convention regression for the active no-eccentricity branch.  It
-aligns CANDEL's constants and angular-diameter distance rounding to Reid's
-Fortran before comparing position, velocity, and acceleration.  Production
-CANDEL intentionally uses its own constants, and the eccentric branch is not
-asserted here because Reid uses the circular speed in the SR gamma factor.
+This convention regression aligns CANDEL's constants, angular-diameter
+distance rounding, and Reid's circular-speed SR gamma before comparing
+position, velocity, and acceleration in both circular and eccentric branches.
+Production CANDEL intentionally uses its own constants and the true eccentric
+orbital speed in the SR gamma.
 
 Run:  venv_candel/bin/python -m pytest tests/test_megamaser_reid_jax_precision.py
 """
@@ -39,6 +39,7 @@ except ModuleNotFoundError as exc:  # private f2py module is gitignored
     raise
 
 import candel.model.maser_physics as phys  # noqa: E402
+from run_reid_mcmc import reid_D_A, reid_H0  # noqa: E402
 
 
 CLIGHT_REID = 2.997925e5
@@ -90,6 +91,9 @@ def candel_model(g, r_ref, r_mas, phi_deg, D_A):
         + g["d2PA_dr2_deg_mas2"] * dr ** 2
     )
     phi = math.radians(phi_deg)
+    peri = math.radians(
+        g["peri_az_deg"] + g["dperi_dr_deg_mas"] * r_mas)
+    ecc = g["ecc"]
     sin_phi, cos_phi = jnp.sin(phi), jnp.cos(phi)
     sin_i, cos_i = jnp.sin(inc), jnp.cos(inc)
     sin_pa, cos_pa = jnp.sin(pa), jnp.cos(pa)
@@ -100,7 +104,9 @@ def candel_model(g, r_ref, r_mas, phi_deg, D_A):
         sin_i, cos_i, sin_pa, cos_pa)
     v_rel = phys.predict_velocity_los(
         r_mas, sin_phi, cos_phi, D_A, g["Mbh_1e7Msun"],
-        g["Vsys_km_s"], 0.0, sin_i, ecc2=0.0)
+        g["Vsys_km_s"], 0.0, sin_i, ecc2=ecc * ecc,
+        ecc_cos_om=ecc * math.cos(peri),
+        ecc_sin_om=ecc * math.sin(peri))
     acc = phys.predict_acceleration_los(
         r_mas, sin_phi, cos_phi, D_A, g["Mbh_1e7Msun"], sin_i)
     return (
@@ -137,33 +143,59 @@ def main():
     }
     r_ref = 0.5
     D_A = reid_distance(g)
-    saved = phys.C_v, phys.C_a, phys.C_g, phys.SPEED_OF_LIGHT
+    saved = (
+        phys.C_v, phys.C_a, phys.C_g, phys.SPEED_OF_LIGHT,
+        phys.REID_CIRCULAR_GAMMA,
+    )
     phys.C_v, phys.C_a, phys.C_g = reid_candel_constants()
     phys.SPEED_OF_LIGHT = CLIGHT_REID
+    phys.REID_CIRCULAR_GAMMA = True
     try:
         max_abs = 0.0
         labels = ("x", "y", "v", "a")
-        for r_mas, phi_deg in ((0.7, 73.0), (1.1, -24.0), (0.35, 165.0)):
-            rr = reid_model(g, r_ref, r_mas, phi_deg)
-            cc = candel_model(g, r_ref, r_mas, phi_deg, D_A)
-            diff = [abs(a - b) for a, b in zip(rr, cc)]
-            max_abs = max(max_abs, *diff)
-            print(
-                f"r={r_mas:.3f} mas phi={phi_deg:7.2f} deg "
-                + " ".join(f"d{label}={value:.3e}"
-                           for label, value in zip(labels, diff)))
-            assert diff[0] < 1e-12
-            assert diff[1] < 1e-12
-            assert diff[2] < 1e-8
-            assert diff[3] < 1e-10
+        for ecc, peri, slope in ((0.0, 0.0, 0.0), (0.17, 37.0, -2.3)):
+            g["ecc"] = ecc
+            g["peri_az_deg"] = peri
+            g["dperi_dr_deg_mas"] = slope
+            for r_mas, phi_deg in (
+                    (0.7, 73.0), (1.1, -24.0), (0.35, 165.0)):
+                rr = reid_model(g, r_ref, r_mas, phi_deg)
+                cc = candel_model(g, r_ref, r_mas, phi_deg, D_A)
+                diff = [abs(a - b) for a, b in zip(rr, cc)]
+                max_abs = max(max_abs, *diff)
+                print(
+                    f"e={ecc:.2f} r={r_mas:.3f} mas "
+                    f"phi={phi_deg:7.2f} deg "
+                    + " ".join(f"d{label}={value:.3e}"
+                               for label, value in zip(labels, diff)))
+                assert diff[0] < 1e-12
+                assert diff[1] < 1e-12
+                assert diff[2] < 1e-8
+                assert diff[3] < 1e-10
     finally:
-        phys.C_v, phys.C_a, phys.C_g, phys.SPEED_OF_LIGHT = saved
+        (phys.C_v, phys.C_a, phys.C_g, phys.SPEED_OF_LIGHT,
+         phys.REID_CIRCULAR_GAMMA) = saved
 
-    print(f"PASS: Reid/CANDEL circular branch agrees; max abs={max_abs:.3e}")
+    print(f"PASS: Reid/CANDEL physics agrees; max abs={max_abs:.3e}")
 
 
 def test_reid_jax_precision():
     main()
+
+
+def test_scalar_reid_h0_replays_fortran_distance():
+    rp.setup_numbers()
+    v = 667.0 - 259.7458
+    D_A = 8.1421
+    H0 = reid_H0(v, D_A)
+    rp.fill_ez(H0, v, 0.0)
+    n_v = int(v + 0.5)
+    replay = (
+        CLIGHT_REID * rp.reidlik.ez_integral.ez_int[n_v - 1]
+        / (H0 * (1.0 + v / CLIGHT_REID))
+    )
+    assert replay == pytest.approx(D_A, abs=2e-14)
+    assert reid_D_A(v, H0) == pytest.approx(D_A, abs=2e-14)
 
 
 if __name__ == "__main__":

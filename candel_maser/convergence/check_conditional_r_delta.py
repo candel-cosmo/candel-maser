@@ -19,14 +19,17 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-import tomli
-from convergence_utils import build_model, cast_floats, resolve_grid_for_galaxy
+from convergence_utils import (add_dataset_arg, build_model, cast_floats,
+                               load_master_config, resolve_grid_for_galaxy)
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
 
 CONFIG_PATH = "scripts/megamaser/config_maser.toml"
-OUT_DIR = "/mnt/users/rstiskalek/CANDEL/results/Megamaser/convergence"
+# Repo-root-relative, like CONFIG_PATH: run this from the CANDEL repo root.
+# Not dataset-namespaced -- convergence/ holds grid diagnostics and stays
+# directly under results/Megamaser/.
+OUT_DIR = "results/Megamaser/convergence"
 
 
 def phys_from_init(model, galaxy, galaxies_cfg):
@@ -409,7 +412,10 @@ def main():
     ap.add_argument("--n-r-dense", type=int, default=2001)
     ap.add_argument("--r-batch", type=int, default=64)
     ap.add_argument("--n-worst", type=int, default=12)
+    add_dataset_arg(ap)
     args = ap.parse_args()
+
+    master_cfg = load_master_config(CONFIG_PATH, args.dataset)
 
     jax.config.update("jax_enable_x64", True)
     print(f"JAX: {jax.default_backend()}, "

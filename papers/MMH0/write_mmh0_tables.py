@@ -10,7 +10,8 @@ import numpy as np
 from astropy.cosmology import FlatLambdaCDM
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RESULTS = ROOT / "results" / "Megamaser"
+DATASET = "original_published"
+DEFAULT_RESULTS = ROOT / "results" / "Megamaser" / DATASET
 PESCE_PARAMS = ROOT / "scripts" / "megamaser" / "check_reid" / (
     "pesce_disk_params.toml")
 

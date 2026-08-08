@@ -26,11 +26,11 @@ GLOBAL_INIT_KEYS = (
     "sigma_a_floor")
 
 
-def loglik_context(galaxy, n_spots):
-    """Import the f2py Reid likelihood and build its data once.
+def loglik_context(galaxy, n_spots, dataset):
+    """Import the f2py Reid likelihood and build `dataset`'s data once.
 
-    Returns ``(rp, rr, d)`` or None if reidlik is not built in this environment
-    or the spot count differs from CANDEL.
+    Returns ``(rp, rr, d, dataset)`` or None if reidlik is not built in this
+    environment or the spot count differs from CANDEL.
     """
     helper_dir = os.path.dirname(__file__)
     for p in (helper_dir, os.path.join(helper_dir, "reidlik_build")):
@@ -44,13 +44,19 @@ def loglik_context(galaxy, n_spots):
         print(f"reid_chi2: reidlik unavailable ({exc})")
         return None
     rp.setup_numbers()
-    inp = os.path.join(tempfile.gettempdir(), f"{galaxy}_reid_chi2.inp")
-    prepare_reid_data.main([galaxy, "--out", inp])
-    d = rp.build_data(inp)
+    tmp = tempfile.NamedTemporaryFile(
+        suffix="_reid_chi2.inp", delete=False)
+    inp = tmp.name
+    tmp.close()
+    try:
+        prepare_reid_data.main([galaxy, "--out", inp, "--dataset", dataset])
+        d = rp.build_data(inp)
+    finally:
+        os.unlink(inp)
     if d["N"] != int(n_spots):
         print(f"reid_chi2: spot count mismatch (Reid {d['N']} vs {n_spots}).")
         return None
-    return rp, rr, d
+    return rp, rr, d, dataset
 
 
 def _h0_for_D_A(rp, g, D_A):
@@ -69,17 +75,20 @@ def neg_half_chi2(ctx, galaxy, point, r_ang, phi, D_A=None):
     normalisation constants.  ``D_A`` (if given) resets Reid's H0 so its
     internal angular-diameter distance equals CANDEL's.
     """
-    rp, rr, d = ctx
+    rp, rr, d, dataset = ctx
     r_ang = np.asarray(r_ang, dtype=float)
     init_block = {k: float(point[k]) for k in GLOBAL_INIT_KEYS
                   if k in point and np.asarray(point[k]).ndim == 0}
     if "D_c" not in init_block and "D_A" in point:
-        init_block["D_c"] = float(point["D_A"])
+        init_block["D_A"] = float(point["D_A"])
     tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False)
     tomli_w.dump({"model": {"galaxies": {galaxy: {"init": init_block}}}}, tmp)
     tmp.close()
     try:
-        reid_init = rr.load_toml_init(rr.Path(tmp.name), galaxy, 0.0)
+        # dataset: the r_ang_ref_* warp pivots live in init_<dataset>.toml,
+        # not in the one-point fragment written above.
+        reid_init = rr.load_toml_init(rr.Path(tmp.name), galaxy, 0.0,
+                                      dataset=dataset)
     finally:
         os.unlink(tmp.name)
     g = rp.with_derived(rr.shift_warp_pivots(

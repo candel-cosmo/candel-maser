@@ -7,7 +7,9 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from candel.model.model_H0_maser import (  # noqa: E402
-    MaserDiskModel, _quadratic_log_grid_peak, _scan_log_radius_scale)
+    MaserDiskModel, _quadratic_log_grid_peak, _scan_log_radius_scale,
+    neg_half_chi2_acceleration, neg_half_chi2_position,
+    neg_half_chi2_velocity)
 
 
 class _ToyModel:
@@ -30,6 +32,11 @@ def _eccentric_r_pre():
     i = jnp.deg2rad(jnp.array([[88.0, 89.0], [91.0, 92.0]]))
     Omega = jnp.deg2rad(jnp.array([[20.0, 21.0], [19.0, 18.0]]))
     ex, ey = 0.035, -0.02
+    var_x = jnp.array([16.0, 25.0])
+    var_y = jnp.array([16.0, 25.0])
+    var_v = jnp.array([4.0, 4.0])
+    var_a = jnp.array([0.01, 1.0])
+    has_a = jnp.array([1.0, 0.0])
     return dict(
         r_ang=r_ang,
         sin_i=jnp.sin(i), cos_i=jnp.cos(i),
@@ -44,16 +51,15 @@ def _eccentric_r_pre():
         all_y=jnp.array([70.0, -90.0]),
         all_v_rel=jnp.array([650.0, -590.0]),
         all_a=jnp.array([0.4, 0.0]),
-        var_x=jnp.array([16.0, 25.0]),
-        var_y=jnp.array([16.0, 25.0]),
-        var_v=jnp.array([4.0, 4.0]),
-        var_a=jnp.array([0.01, 1.0]),
-        has_a=jnp.array([1.0, 0.0]),
+        var_x=var_x, var_y=var_y, var_v=var_v, var_a=var_a,
+        weight_x=-0.5 / var_x, weight_y=-0.5 / var_y,
+        weight_v=-0.5 / var_v, weight_a=-0.5 * has_a / var_a,
+        has_a=has_a,
         has_any_accel=True,
     )
 
 
-def _precomputed_model_fields(eccentric):
+def _precomputed_model_fields(eccentric, shared_r=False):
     model = object.__new__(MaserDiskModel)
     model._all_x = jnp.array([120.0, -160.0])
     model._all_y = jnp.array([70.0, -90.0])
@@ -65,7 +71,8 @@ def _precomputed_model_fields(eccentric):
     model._all_sigma_a2 = jnp.array([0.01, 1.0])
     model._all_has_accel = jnp.array([True, False])
     model.is_highvel = jnp.array([False, True])
-    r_ang = jnp.array([[0.28, 0.34], [0.39, 0.47]])
+    r_ang = (jnp.array([0.28, 0.34]) if shared_r else
+             jnp.array([[0.28, 0.34], [0.39, 0.47]]))
     return model, model._r_precompute(
         r_ang, jnp.arange(2),
         2.0, -1.0, 110.0, 3.0, 7003.0,
@@ -136,8 +143,8 @@ def test_root_capacity_overflow_uses_finite_scan_fallback():
 def test_radius_only_precompute_preserves_circular_and_eccentric_integrands():
     hoisted_keys = {
         "pos_x_s", "pos_x_c", "pos_y_s", "pos_y_c", "accel_c",
-        "velocity_0", "velocity_s", "velocity_kep", "velocity_beta_c2",
-        "velocity_zg", "velocity_scale",
+        "velocity_0", "velocity_s", "velocity_kep", "velocity_los_scale",
+        "velocity_beta_c2", "velocity_zg", "velocity_scale",
     }
     phi = jnp.linspace(-jnp.pi, jnp.pi, 41)
     for eccentric in (False, True):
@@ -147,6 +154,40 @@ def test_radius_only_precompute_preserves_circular_and_eccentric_integrands():
         got = model._phi_eval(r_pre, jnp.sin(phi), jnp.cos(phi))
         expected = model._phi_eval(legacy, jnp.sin(phi), jnp.cos(phi))
         np.testing.assert_array_equal(got, expected)
+
+
+def test_eccentric_f64_hybrid_matches_full_residual_kernel():
+    model, r_pre = _precomputed_model_fields(True)
+    phi = jnp.linspace(-jnp.pi, jnp.pi, 41)
+    sin_phi, cos_phi = jnp.sin(phi), jnp.cos(phi)
+    rpad = (slice(None),) * r_pre["r_ang"].ndim + (None,)
+    dpad = (slice(None),) + (None,) * r_pre["r_ang"].ndim
+    X, Y, V, A = model._predict_on_grid(
+        r_pre, sin_phi, cos_phi, rpad)
+    expected = neg_half_chi2_position(
+        r_pre["all_x"][dpad], r_pre["all_y"][dpad], X, Y,
+        r_pre["var_x"][dpad], r_pre["var_y"][dpad])
+    expected += neg_half_chi2_velocity(
+        r_pre["all_v_rel"][dpad], V, r_pre["var_v"][dpad])
+    expected += neg_half_chi2_acceleration(
+        r_pre["all_a"][dpad], A, r_pre["var_a"][dpad],
+        r_pre["has_a"][dpad])
+
+    model._predict_on_grid = lambda *args: (_ for _ in ()).throw(
+        AssertionError("hybrid path rebuilt every residual channel"))
+    got = model._phi_eval(r_pre, sin_phi, cos_phi)
+    np.testing.assert_allclose(got, expected, rtol=0.0, atol=1e-9)
+
+
+def test_eccentric_f64_shared_r_hybrid_matches_residual_kernel():
+    model, r_pre = _precomputed_model_fields(True, shared_r=True)
+    phi = jnp.linspace(-jnp.pi, jnp.pi, 41)
+    sin_phi, cos_phi = jnp.sin(phi), jnp.cos(phi)
+    expected = model._phi_eval_shared_r(
+        r_pre, sin_phi, cos_phi, use_quadform=False)
+    got = model._phi_eval_shared_r(
+        r_pre, sin_phi, cos_phi, use_quadform=True)
+    np.testing.assert_allclose(got, expected, rtol=0.0, atol=1e-9)
 
 
 def test_quadratic_log_grid_peak_interpolates_and_guards_boundaries():
@@ -187,6 +228,22 @@ def test_asymmetric_local_grid_does_not_collapse_at_support_edge():
     np.testing.assert_allclose(r[0, 0], 0.1, rtol=0.0, atol=1e-15)
     assert r[0, -1] > 0.1
     assert np.all(np.diff(np.asarray(r[0])) >= 0.0)
+
+
+def test_global_radius_count_is_integration_and_variant_agnostic():
+    for integration, eccentric, quadratic_warp in (
+            ("peak-partition", False, False),
+            ("peak-partition", True, False),
+            ("peak-partition", False, True),
+            ("peak-partition", True, True),
+            ("fixed-grid", True, True)):
+        model = object.__new__(MaserDiskModel)
+        model.config = {"model": {"n_r_local": 256, "n_r_global": 176}}
+        model.phi_integration = integration
+        model.use_ecc = eccentric
+        model.use_quadratic_warp = quadratic_warp
+        model._build_r_config({}, {})
+        assert model._n_r_global == 176
 
 
 def test_peak_radius_stencil_refines_coarse_group_centres():

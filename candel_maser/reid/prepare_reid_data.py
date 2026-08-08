@@ -2,8 +2,9 @@
 """Write a Reid ``fit_disk`` data file for any megamaser galaxy.
 
 Drives off ``load_megamaser_spots`` so every galaxy uses CANDEL's frame and
-unit conventions (positions micro-arcsec -> mas, optical-LSR velocities), and
-keeps the loader spot order so per-spot quantities line up with CANDEL chains.
+unit conventions (positions micro-arcsec -> mas, native-frame optical
+velocities), and keeps the loader spot order so per-spot quantities line up
+with CANDEL chains.
 
 Reid's likelihood uses the control-file error floors (params 16-20), so the
 floor values written in the data header here are inert placeholders; only the
@@ -11,15 +12,19 @@ spot data and the systemic Vmin/Vmax classification matter.
 """
 import argparse
 import os
+import sys
 
 import numpy as np
 import tomli
 
-from candel.pvdata.megamaser_data import load_megamaser_spots
-from candel.util import data_path
+from candel.pvdata.megamaser_data import load_megamaser_spots, maser_data_root
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(SCRIPT_DIR, "..", "config_maser.toml")
+
+if os.path.dirname(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, os.path.dirname(SCRIPT_DIR))
+from maser_config import add_dataset_arg, resolve_dataset  # noqa: E402
 
 
 def systemic_window(velocity, is_highvel, is_blue):
@@ -38,15 +43,17 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("galaxy")
     ap.add_argument("--out", default=None)
+    add_dataset_arg(ap)
     args = ap.parse_args(argv)
 
     with open(CONFIG, "rb") as f:
         master = tomli.load(f)
     gcfg = master["model"]["galaxies"][args.galaxy]
     sigma_v = float(master["model"].get("sigma_v_default", 0.25))
+    dataset = resolve_dataset(master, args.dataset)
 
     d = load_megamaser_spots(
-        data_path("data", "Megamaser"), args.galaxy,
+        maser_data_root(dataset), args.galaxy,
         v_sys_obs=gcfg["v_sys_obs"])
 
     v = np.asarray(d["velocity"])
@@ -65,9 +72,9 @@ def main(argv=None):
     lines = [
         header,
         f"! Reid fit_disk data for {args.galaxy} from load_megamaser_spots "
-        f"({d['n_spots']} spots, {n_sys} systemic, "
+        f"(dataset={d['dataset']}, {d['n_spots']} spots, {n_sys} systemic, "
         f"{int(measured.sum())} with acceleration).",
-        f"! Velocities optical-LSR (frame={d['velocity_frame']}); "
+        f"! Native-frame optical velocities (frame={d['velocity_frame']}); "
         "positions in mas; raw velocity error set to sigma_v_default.",
         "! Unmeasured accelerations flagged with sigma_A = -2.",
         "! ID  Vlsr_opt  sigma_V   x  sigma_x   y  sigma_y   Acc  sigma_Acc",
@@ -80,12 +87,12 @@ def main(argv=None):
             f" {x[i]:12.6f} {sx[i]:10.6f} {y[i]:12.6f} {sy[i]:10.6f}"
             f" {acc:12.6f} {sigma_acc:10.6f}")
 
-    out = args.out or data_path(
-        "data", "Megamaser", f"{args.galaxy}_loader_reid.inp")
+    out = args.out or os.path.join(
+        maser_data_root(dataset), f"{args.galaxy}_loader_reid.inp")
     with open(out, "w") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"wrote {out}: {d['n_spots']} spots, {n_sys} systemic, "
-          f"Vmin/Vmax = {vmin:.2f}/{vmax:.2f}", flush=True)
+    print(f"wrote {out}: dataset {dataset}, {d['n_spots']} spots, "
+          f"{n_sys} systemic, Vmin/Vmax = {vmin:.2f}/{vmax:.2f}", flush=True)
 
 
 if __name__ == "__main__":

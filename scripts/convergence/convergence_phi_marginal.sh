@@ -29,6 +29,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -q QUEUE      GPU queue (default: gpulong)"
             echo ""
             echo "Common Python toggles (forwarded as-is):"
+            echo "  --dataset NAME          original_published, fiducial, or unpruned"
             echo "  --driver-factor N       multiplier for the fiducial driver"
             echo "                          diagnostic (default: 2)"
             echo "  --grid-factors F...     also test scaled production grids,"

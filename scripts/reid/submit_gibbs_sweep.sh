@@ -18,6 +18,7 @@ BASE_OUTPUT="$ROOT/results/Megamaser/reid_mcmc"
 
 QUEUE=""
 CHAINS=12
+DATASET=""
 # GALAXIES="NGC6323 NGC6264 NGC5765b UGC3789 CGCG074-064"
 GALAXIES="NGC6323 NGC6264 UGC3789"
 INITS="config pesce"
@@ -42,6 +43,7 @@ Required:
 
 Options:
   --chains N              Chains per variant / CPUs per variant job (default: $CHAINS)
+  --dataset NAME          Spot-table dataset (default: config [io].dataset)
   --galaxies "G1 G2 .."   Space-separated galaxy list (default: "$GALAXIES")
   --inits "config pesce"  Space-separated start points (default: "$INITS")
   --output-dir DIR        Output root (default: $BASE_OUTPUT)
@@ -55,9 +57,10 @@ Options:
   --dry                   Forward --dry: print the submit commands, submit nothing
   -h, --help
 
-Each galaxy needs reid_control_<galaxy>.inp (both inits use it for priors/steps;
-pesce only overwrites its value column). The collect step also needs the CANDEL
-posterior HDF5 for the overlay -- pass --candel via -- ... if it is nonstandard.
+Each galaxy needs the selected dataset's control file (both inits use it for
+priors/steps; pesce only overwrites its value column). The collect step also
+needs the matching CANDEL posterior HDF5 for the overlay -- pass --candel via
+-- ... if it is nonstandard.
 EOF
 }
 
@@ -65,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -q|--queue) QUEUE="$2"; shift 2 ;;
         --chains|--cpus) CHAINS="$2"; shift 2 ;;
+        --dataset) DATASET="$2"; shift 2 ;;
         --galaxies) GALAXIES="$2"; shift 2 ;;
         --inits) INITS="$2"; shift 2 ;;
         --output-dir) BASE_OUTPUT="$2"; shift 2 ;;
@@ -78,6 +82,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$QUEUE" ]] || { echo "[ERROR] -q QUEUE is required" >&2; exit 1; }
+if [[ -n "$DATASET" && "$DATASET" != "original_published" && "$DATASET" != "fiducial" ]]; then
+    echo "[ERROR] --dataset must be original_published or fiducial" >&2
+    exit 1
+fi
 
 stamp="$(date +%Y%m%d_%H%M%S)"
 # Self-document the batch folder by floor mode (matching the per-combo
@@ -96,6 +104,7 @@ for galaxy in $GALAXIES; do
         out_dir="$sweep_dir/${galaxy}_${init}"
         cmd=("$SUBMIT" -q "$QUEUE" --chains "$CHAINS" --galaxy "$galaxy"
              --init "$init" --out-dir "$out_dir")
+        [[ -n "$DATASET" ]] && cmd+=(--dataset "$DATASET")
         [[ -n "$H0_RANGE" ]] && cmd+=(--H0-range "$H0_RANGE")
         [[ -n "$MATCH_PRIORS" ]] && cmd+=(--match-priors "$MATCH_PRIORS")
         [[ ${#EXTRA[@]} -gt 0 ]] && cmd+=("${EXTRA[@]}")

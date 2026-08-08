@@ -23,7 +23,6 @@ import tempfile
 import threading
 import time
 
-
 _RESULT_PREFIX = "BATCH_BENCHMARK_JSON="
 
 
@@ -47,8 +46,12 @@ def _spot_batch_label(value):
 
 
 def _parser():
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from maser_config import add_dataset_arg
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("galaxy")
+    add_dataset_arg(parser)
     parser.add_argument("--suite", action="store_true",
                         help="Run several spot-batch sizes, then repeat the "
                              "baseline, each in a fresh process.")
@@ -114,6 +117,8 @@ def _run_suite(args):
             "--n-devices", str(args.n_devices),
             "--seed", str(args.seed),
         ]
+        if args.dataset is not None:
+            cmd.extend(["--dataset", args.dataset])
         if args.phi_integration is not None:
             cmd.extend(["--phi-integration", args.phi_integration])
         if args.candidate_wave is not None:
@@ -203,7 +208,7 @@ def _build_target(de, galaxy, spot_batch, seed, phi_integration=None):
         raise ValueError(f"Unknown galaxy {galaxy!r}.")
     gcfg = galaxies[galaxy]
     data = de.load_megamaser_spots(
-        de.data_path("data", "Megamaser"), galaxy,
+        de.maser_data_root(master["io"]["dataset"]), galaxy,
         v_sys_obs=gcfg["v_sys_obs"])
     distance_bounds = de._distance_bounds(gcfg)
     if distance_bounds is not None:
@@ -252,9 +257,7 @@ def _checkpoint_points(
         master["io"].get("root_output", "results/Megamaser"),
         "de_checkpoints", galaxy)
     ckpt_path = os.path.join(
-        ckpt_dir,
-        f"de_ckpt_rmap{de._variant_suffix(model)}"
-        f"{de._phi_integration_suffix(model)}_lshade_nopesce.npz")
+        ckpt_dir, de._de_checkpoint_filename(model, seed))
 
     def sobol_fallback(reason):
         exponent = max(0, (int(candidates) - 1).bit_length())
@@ -272,7 +275,8 @@ def _checkpoint_points(
         checkpoint = de._load_de_checkpoint(
             ckpt_path, lo, hi, names, sizes)
         de._validate_de_checkpoint_policy(
-            checkpoint, ckpt_path, de._objective_policy(model))
+            checkpoint, ckpt_path, de._objective_policy(model),
+            optimizer_seed=seed)
     except (KeyError, ValueError) as exc:
         if checkpoint is not None:
             checkpoint.close()
@@ -441,6 +445,9 @@ def _run_child(args):
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import run_de_map as de
+    from maser_config import apply_dataset
+
+    apply_dataset(de._MASTER_CFG, args.dataset)
 
     model, target, master, init_params = _build_target(
         de, args.galaxy, args.spot_batch, args.seed,

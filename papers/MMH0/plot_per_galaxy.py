@@ -28,7 +28,8 @@ from palette import PALETTE
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "scripts" / "megamaser" / "config_maser.toml"
-RESULTS = ROOT / "results" / "Megamaser"
+DATASET = "original_published"
+RESULTS = ROOT / "results" / "Megamaser" / DATASET
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
 C_KMS = 299792.458
 

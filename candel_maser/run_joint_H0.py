@@ -10,6 +10,9 @@ import numpy as np
 import tomli
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
 MCP_GALAXIES = ("CGCG074-064", "NGC5765b", "NGC6264",
                 "NGC6323", "UGC3789")
@@ -22,34 +25,13 @@ with open(CONFIG_PATH, "rb") as f:
     MASTER_CFG = tomli.load(f)
 
 
-def _preparse_galaxies(argv):
-    galaxies = None
-    f64 = "--f64" in argv
-    for i, arg in enumerate(argv):
-        if arg == "--galaxy" and i + 1 < len(argv):
-            galaxies = argv[i + 1]
-        elif arg.startswith("--galaxy="):
-            galaxies = arg.split("=", 1)[1]
-    if galaxies is None:
-        galaxies = "NGC6264,NGC6323"
-    if galaxies == "all":
-        names = MCP_GALAXIES
-    else:
-        names = tuple(g.strip() for g in galaxies.split(",") if g.strip())
-    force_f64 = any(MASTER_CFG["model"]["galaxies"].get(g, {}).get(
-        "force_f64", False) for g in names)
-    return names, f64 or force_f64
-
-
-_PRE_GALAXIES, _ENABLE_F64 = _preparse_galaxies(sys.argv[1:])
-if _ENABLE_F64:
-    from jax import config as _jax_config
-    _jax_config.update("jax_enable_x64", True)
-
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault(
     "MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "candel-mpl"))
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+
+from jax import config as _jax_config  # noqa: E402
+_jax_config.update("jax_enable_x64", True)
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
@@ -64,7 +46,10 @@ from joint_H0_helpers import (DEFAULT_FIELD_CONFIG, _attach_icrs_rhat,  # noqa
                               _load_volume_selection_data, _logmeanexp,
                               _predict_cz_exact, _resolve_velocity_beta,
                               _resolve_volume_subsample_fraction,
-                              _volume_log_Z_distance, _volume_log_Z_redshift)
+                              _volume_log_Z_distance, _volume_log_Z_redshift,
+                              rotate_vext_to_frame)
+from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
+                          check_chain_dataset)
 from numpyro.diagnostics import print_summary  # noqa: E402
 from numpyro.infer import MCMC, NUTS, init_to_value  # noqa: E402
 
@@ -188,7 +173,7 @@ def _toy_ad2redshift():
     return _TOY_AD2Z
 
 
-def _load_toy_distance_samples(path):
+def _load_toy_distance_samples(path, dataset=None):
     """Return stage-1 D_A samples (samples/D_A from a uniform_D_A chain).  The
     toy reuses the stage-1 distance posterior as a likelihood, which is only
     valid under stage-1's uniform-D_A prior; anything else would double-count
@@ -202,6 +187,8 @@ def _load_toy_distance_samples(path):
             raise ValueError(
                 f"{path} has D_c_prior={prior_str!r}; the toy distance "
                 f"likelihood requires a uniform_D_A stage-1 chain.")
+        if dataset is not None:
+            check_chain_dataset(f.attrs, dataset, path)
         if "samples/D_A" not in f:
             raise KeyError(f"{path} has no samples/D_A dataset")
         samples = np.asarray(f["samples/D_A"][...], dtype=np.float64)
@@ -257,7 +244,8 @@ def _build_toy_items(galaxies, args, velocity_data=None):
         gcfg = MASTER_CFG["model"]["galaxies"][galaxy]
         path = overrides.get(galaxy) or _toy_default_distance_file(
             galaxy, args)
-        samples = _load_toy_distance_samples(path)        # D_A samples
+        samples = _load_toy_distance_samples(         # D_A samples
+            path, MASTER_CFG.get("io", {}).get("dataset"))
         D_q16, D_med, D_q84 = np.percentile(samples, [16, 50, 84])
         # D_c init for the sampled comoving distance: D_c = D_A (1 + z)
         # at H0_ref.
@@ -327,6 +315,9 @@ class ToyDistanceTarget:
             1.0, max(item["D_hi"] for item in self.items), 1001)
         self.log_d2_sel = 2.0 * jnp.log(self.d_sel)
         self.sel_rhat = healpix_los_vectors(los_nside)
+        # Frame of `item["rhat"]`: the field frame when the LOS velocity cache
+        # supplied it, ICRS when built straight from RA/dec.
+        self.los_frame = self.items[0]["rhat_frame"]
 
         specs = [("H0", self.shared_priors["H0"]),
                  ("sigma_pec", self.shared_priors["sigma_pec"])]
@@ -447,6 +438,7 @@ class ToyDistanceTarget:
             cz_width = params["cz_lim_selection_width"]
             if self.volume_data is None:
                 z_sel = self.distance2redshift(self.d_sel, h=h)
+                # Equal-weight full-sky average, so it needs no frame rotation.
                 Vext_los = self.sel_rhat @ Vext
                 cz_pred = _predict_cz_exact(
                     z_sel[None, :], Vext_los[:, None])
@@ -462,11 +454,12 @@ class ToyDistanceTarget:
                     Vext, cz_lim, cz_width, self.flat_dist)
 
         ll_fields_total = None
+        Vext_los_frame = rotate_vext_to_frame(Vext, self.los_frame)
         for item in self.items:
             D_c = self._D_c(params, item)
             z_cosmo = self.distance2redshift(
                 jnp.atleast_1d(D_c), h=h).squeeze()
-            Vext_rad = jnp.dot(item["rhat"], Vext)
+            Vext_rad = jnp.dot(item["rhat"], Vext_los_frame)
             if "los_velocity" in item:
                 vlos = _interp_los_velocity(
                     D_c * h, item["los_r"], item["los_velocity"])
@@ -675,8 +668,12 @@ def _result_path(galaxies, selection, reconstruction, flat_dist,
         "_".join(g.replace("-", "") for g in galaxies))
     stem = "joint_H0_toy" if toy else "joint_H0"
     prior_tag = "flat" if flat_dist else "r2"
+    # root_output is dataset-namespaced by apply_dataset, so the two datasets'
+    # joint runs cannot overwrite each other.
+    root = MASTER_CFG.get("io", {}).get("root_output", "results/Megamaser")
     return results_path(
-        f"results/Megamaser/{stem}_{gal_tag}_{selection}"
+        root,
+        f"{stem}_{gal_tag}_{selection}"
         f"_{reconstruction}_{prior_tag}{variant}.hdf5")
 
 
@@ -788,7 +785,7 @@ def _print_toy_support_diagnostics(result, items):
 
 
 def _toy_distance_kde_plots(items, outpath):
-    """Overlay each toy distance KDE on a fine histogram of its raw D_c
+    """Overlay each toy distance KDE on a fine histogram of its raw D_A
     samples so the rule-of-thumb bandwidth can be eyeballed for
     over/under-smoothing."""
     import matplotlib
@@ -799,7 +796,9 @@ def _toy_distance_kde_plots(items, outpath):
     n = len(items)
     fig, axs = plt.subplots(1, n, figsize=(4.5 * n, 3.6), squeeze=False)
     for ax, item in zip(axs[0], items):
-        samples = _load_toy_distance_samples(item["toy_distance_file"])
+        samples = _load_toy_distance_samples(
+            item["toy_distance_file"],
+            MASTER_CFG.get("io", {}).get("dataset"))
         D = np.asarray(item["D_grid"])
         L = np.exp(np.asarray(item["log_L_grid"]))
         norm = np.trapezoid(L, D)
@@ -922,6 +921,7 @@ def main(argv=None):
                     "the saved single-galaxy chains.")
     parser.add_argument("--galaxy", default="NGC6264,NGC6323",
                         help="Comma-separated galaxies, or all for five MCP.")
+    add_dataset_arg(parser)
     parser.add_argument("--selection", choices=("none", "distance",
                                                 "redshift"),
                         default="redshift")
@@ -982,7 +982,8 @@ def main(argv=None):
     parser.add_argument("--max-tree-depth", type=int, default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--f64", action="store_true",
-                        help="Enable float64 before JAX initialises.")
+                        help="Accepted for compatibility; MCMC always uses "
+                             "float64.")
     parser.add_argument("--add-ecc", action="store_true",
                         help="Select the eccentric stage-1 chains.")
     parser.add_argument("--add-quadratic-warp", action="store_true",
@@ -992,6 +993,7 @@ def main(argv=None):
                         help="Galaxy dropped in this leave-one-out fit; "
                              "logged for provenance (not analysed).")
     args = parser.parse_args(argv)
+    apply_dataset(MASTER_CFG, args.dataset)
 
     inf_cfg = MASTER_CFG["inference"]
     joint_inf = MASTER_CFG.get("joint", {}).get("inference", {})
@@ -1163,6 +1165,7 @@ def main(argv=None):
         "chain_method": "vectorized",
         "toy_distances": True,
         "galaxies": ",".join(galaxies),
+        "dataset": str(MASTER_CFG["io"]["dataset"]),
         "selection": args.selection,
         "reconstruction": args.reconstruction,
         "use_ecc": bool(args.add_ecc),

@@ -16,6 +16,7 @@ Usage:
 import argparse
 import os
 import sys
+import tempfile
 
 # float64 so the comparison isolates model identity (Reid's fit_disk is f64);
 # production CANDEL chains run in f32, where rounding at large chi^2 is larger.
@@ -24,6 +25,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import h5py  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+import tomli_w  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -36,20 +38,29 @@ for p in (MEGA, os.path.join(MEGA, "check_reid"),
 import run_maser as rm  # noqa: E402
 
 from candel.model.maser_blackjax import _initial_phi  # noqa: E402
+from maser_config import apply_dataset, check_chain_dataset  # noqa: E402
 
-RESULTS = os.path.join(ROOT, "results", "Megamaser")
+DATASET = "original_published"
+RESULTS = os.path.join(ROOT, "results", "Megamaser", DATASET)
 GALAXIES = ["CGCG074-064", "NGC5765b", "UGC3789", "NGC6264", "NGC6323"]
+
+apply_dataset(rm.master_cfg, DATASET)
 
 
 def build_model_target(galaxy):
     gcfg = rm.master_cfg["model"]["galaxies"][galaxy]
     data = rm.load_megamaser_spots(
-        rm.data_path("data", "Megamaser"), galaxy,
-        v_sys_obs=gcfg["v_sys_obs"])
+        rm.maser_data_root(DATASET), galaxy, v_sys_obs=gcfg["v_sys_obs"])
     if "D_lo" in gcfg and "D_hi" in gcfg:
         data["D_lo"] = float(gcfg["D_lo"])
         data["D_hi"] = float(gcfg["D_hi"])
-    model = rm.MaserDiskModel(rm._CONFIG_PATH, data)
+    tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False)
+    tomli_w.dump(rm.master_cfg, tmp)
+    tmp.close()
+    try:
+        model = rm.MaserDiskModel(tmp.name, data)
+    finally:
+        os.unlink(tmp.name)
     return model, gcfg
 
 
@@ -57,6 +68,7 @@ def load_global_samples(galaxy):
     path = os.path.join(
         RESULTS, galaxy, f"{galaxy}_blackjax_mcmc_rphi_initconfig.hdf5")
     with h5py.File(path, "r") as f:
+        check_chain_dataset(f.attrs, DATASET, path)
         return {k: np.asarray(v, dtype=float).ravel()
                 for k, v in f["samples"].items()}
 
@@ -79,7 +91,7 @@ def check_galaxy(galaxy, n_samples, n_spots, rng):
     init = rm._complete_mass_point(
         model, {k: np.asarray(v[0]) for k, v in samples.items()})
     target = rm.MaserBlackJaxTarget(model, rm._h_ref(model), init)
-    ctx = rm._reid_loglik_context(galaxy, model.n_spots)
+    ctx = rm._reid_loglik_context(galaxy, model.n_spots, DATASET)
     if ctx is None:
         print(f"{galaxy}: reidlik unavailable, skipping")
         return None

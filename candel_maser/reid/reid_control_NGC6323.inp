@@ -1,10 +1,10 @@
-!  Parameters for NGC 6323 (CANDEL globals, Reid convention)
+!  Parameters for NGC6323 (CANDEL globals, Reid convention)
       100000 ! Total "burn-in" trials (done in stages of 100,000); if negative, instead read in "burnin_values.dat" 
-      500000            4       15.0     210.0 ! Total # trials (stored or not); # of M-H strands (1-20); Initial Ho strand range (min max)
+      500000            4           15          210 ! Total # trials (stored or not); # of M-H strands (1-20); Initial Ho strand range (min max)
            0          0.5            T            T            T            T ! Gaussian (0) or "outlier tolerant" (1) data unc; fraction Ho-M trials correlated; x,y,v,a fitted?
        0.015    -47351937 ! Initial McMC parameter step size in burnin phase; random number seed 
-   60.345873           -5          0.7 ! Ho (Mpc); prior_unc (<0 for flat prior), expected posteriori_unc
-   1.1703075         -0.1         0.05 ! BH mass (10^7 Msuns)
+   60.361298           -5          0.7 ! Ho (Mpc); prior_unc (<0 for flat prior), expected posteriori_unc
+   1.1703678         -0.1         0.05 ! BH mass (10^7 Msuns)
    7852.7119         -0.5         0.25 ! Vlsr_optical of BH (km/s) 
    0.0146898        -0.01        0.002 ! Xo of BH (mas)
    0.0039044        -0.01        0.004 ! Yo of BH (mas)

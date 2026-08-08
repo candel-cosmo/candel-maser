@@ -13,16 +13,52 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 """Megamaser spot data loading from AAS machine-readable tables."""
-from os.path import join
+import re
+from os.path import basename, join, normpath
 
 import numpy as np
 from scipy.cluster.vq import kmeans2
 
-from ..util import SPEED_OF_LIGHT, fprint
+from ..util import SPEED_OF_LIGHT, data_path, fprint
+
+# Spot-table datasets. See docs/notes/megamaser_p20_clipping_audit.md for
+# provenance and the exact construction of the "unpruned" union.
+MASER_DATASETS = ("original_published", "fiducial", "unpruned")
+DEFAULT_MASER_DATASET = "fiducial"
+
+# Galaxies whose fiducial table is a Pesce+2020 erratum "p20" file; the other
+# two galaxies' tables are identical between datasets.
+_P20_GALAXIES = ("NGC5765b", "NGC6264", "NGC6323", "UGC3789")
 
 _MRT_FILES = {
     "CGCG074-064": "CGCG074-064_Pesce2020_mrt.txt",
 }
+
+
+def maser_data_root(dataset):
+    """Directory holding `dataset`'s spot tables.
+
+    The only place a dataset name is joined onto a path; `load_megamaser_spots`
+    takes the resulting directory and does no joining of its own.
+    """
+    if dataset not in MASER_DATASETS:
+        raise ValueError(
+            f"Unknown megamaser dataset '{dataset}'. "
+            f"Available: {list(MASER_DATASETS)}.")
+    return data_path("data", "Megamaser", dataset)
+
+
+def maser_dataset_of_root(root):
+    """Dataset name implied by a spot-table directory."""
+    dataset = basename(normpath(root))
+    if dataset not in MASER_DATASETS:
+        raise ValueError(
+            f"Spot-table directory '{root}' is not dataset-qualified: its "
+            f"last component '{dataset}' is not one of "
+            f"{list(MASER_DATASETS)}. Resolve it with "
+            f"maser_data_root(dataset).")
+    return dataset
+
 
 # Velocity reference frame of the spot data for each galaxy.
 # "lsr"         — LSR frame, optical convention (cz)
@@ -106,7 +142,13 @@ def v_sys_from_cmb(v_cmb_km_s, frame, ra_deg, dec_deg):
 
 def megamaser_velocity_frame(galaxy):
     """Return the spot-velocity reference frame used by the source table."""
-    return _GALAXY_VELOCITY_FRAME.get(galaxy, "unknown")
+    frame = _GALAXY_VELOCITY_FRAME.get(galaxy)
+    if frame is None:
+        raise ValueError(
+            f"No velocity frame recorded for galaxy '{galaxy}'. Add it to "
+            f"_GALAXY_VELOCITY_FRAME; a wrong frame silently corrupts every "
+            f"CMB conversion downstream.")
+    return frame
 
 
 # Column byte ranges (1-indexed, inclusive) from the MRT header.
@@ -142,15 +184,17 @@ def _parse_mrt_line(line):
 def load_NGC5765b_spots(root, v_sys_obs=None):
     """Load maser spot data for NGC 5765b from Gao+2016 Table 6.
 
-    The table provides velocity, position (x, y), and acceleration for 192
-    maser spots. All spots have measured accelerations.
+    The table provides velocity, position (x, y), and acceleration columns for
+    all 212 published maser spots. Placeholder and undetected accelerations
+    are retained as rows but masked from the acceleration likelihood.
 
     Parameters
     ----------
     root : str
         Directory containing ``NGC5765b_Gao2016_table6.dat``.
     v_sys_obs : float
-        Observed CMB-frame recession velocity in km/s. Required.
+        Fixed velocity reference used to centre residual arithmetic, km/s.
+        The fitted native-frame systemic velocity is ``v_sys_obs + dv_sys``.
 
     Returns
     -------
@@ -236,8 +280,8 @@ def _load_kuo_table2(root, fname, galaxy_label, v_sys_obs=None):
     galaxy_label : str
         Short label used in output messages.
     v_sys_obs : float or None
-        Observed CMB-frame recession velocity in km/s. If None, use the
-        per-galaxy default.
+        Fixed velocity reference used to centre residual arithmetic, km/s.
+        The fitted native-frame systemic velocity is ``v_sys_obs + dv_sys``.
 
     Returns
     -------
@@ -372,7 +416,8 @@ def load_NGC4258_spots(root, v_sys_obs=472.0):
     root : str
         Directory containing ``N4258_disk_data_MarkReid.final``.
     v_sys_obs : float
-        Observed CMB-frame recession velocity in km/s.
+        Fixed velocity reference used to centre residual arithmetic, km/s.
+        The fitted native-frame systemic velocity is ``v_sys_obs + dv_sys``.
 
     Returns
     -------
@@ -459,24 +504,138 @@ def load_NGC4258_spots(root, v_sys_obs=472.0):
     return data
 
 
+# Column byte ranges (1-indexed, inclusive) shared by all four "p20" tables.
+_P20_COLUMNS = {
+    "velocity":       (1, 8),
+    "x":              (10, 17),
+    "sigma_x":        (19, 24),
+    "y":              (26, 33),
+    "sigma_y":        (35, 40),
+    "a":              (42, 47),
+    "sigma_a":        (49, 53),
+    "accel_measured": (55, 55),
+}
+
+# Blue/red velocity thresholds stated in the p20 tables' Note (1).
+_P20_CLASS_RE = re.compile(
+    r"classified spots with Vel < (\S+) km/s as blueshifted, "
+    r"Vel > (\S+) km/s as redshifted")
+
+
+def _load_p20_table(root, galaxy, v_sys_obs=None):
+    """Load maser spots from a Pesce+2020 erratum ``<galaxy>_p20_data.txt``.
+
+    These are the tables P20 actually fitted. Unlike the published tables they
+    supersede, they state their own blue/red classification thresholds, so the
+    spots are classified from the header rather than by k-means.
+
+    Parameters
+    ----------
+    root : str
+        Directory containing ``<galaxy>_p20_data.txt``.
+    galaxy : str
+        Galaxy name, used for the filename and output messages.
+    v_sys_obs : float
+        Fixed velocity reference used to centre residual arithmetic, km/s.
+
+    Returns
+    -------
+    dict with the same keys as ``load_megamaser_spots``.
+    """
+    if v_sys_obs is None:
+        raise ValueError(f"v_sys_obs must be provided for {galaxy}.")
+
+    fpath = join(root, f"{galaxy}_p20_data.txt")
+    fprint(f"loading maser spots from '{fpath}'.")
+
+    with open(fpath) as f:
+        lines = f.readlines()
+
+    match = _P20_CLASS_RE.search(" ".join(" ".join(lines).split()))
+    if match is None:
+        raise ValueError(
+            f"'{fpath}' does not state its blue/red classification "
+            f"thresholds in Note (1); refusing to guess them.")
+    blue_max, red_min = float(match.group(1)), float(match.group(2))
+
+    data_start = max(i for i, ln in enumerate(lines)
+                     if ln.startswith("---")) + 1
+
+    rows = []
+    for line in lines[data_start:]:
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+        row = {}
+        for key, (b0, b1) in _P20_COLUMNS.items():
+            raw = line[b0 - 1:b1].strip()
+            if key == "accel_measured":
+                row[key] = bool(int(raw))
+            elif raw:
+                row[key] = float(raw)
+            else:
+                # Acc/e_Acc blank when f_Acc = 0. σ_a = 1e4 is a large
+                # placeholder keeping the model's var_a positive; the
+                # accel_measured mask zeroes the contribution.
+                row[key] = 0.0 if key == "a" else 1e4
+        rows.append(row)
+
+    n = len(rows)
+    if n == 0:
+        raise ValueError(f"No spots found in {fpath}.")
+
+    velocity = np.array([r["velocity"] for r in rows])
+    data = {
+        "velocity": velocity,
+        "x": np.array([r["x"] for r in rows]),
+        "sigma_x": np.array([r["sigma_x"] for r in rows]),
+        "y": np.array([r["y"] for r in rows]),
+        "sigma_y": np.array([r["sigma_y"] for r in rows]),
+        "a": np.array([r["a"] for r in rows]),
+        "sigma_a": np.array([r["sigma_a"] for r in rows]),
+        "accel_measured": np.array(
+            [r["accel_measured"] for r in rows], dtype=bool),
+        "spot_type": ["b" if v < blue_max else "r" if v > red_min else "s"
+                      for v in velocity],
+        "n_spots": n,
+        "galaxy_name": galaxy,
+        "v_sys_obs": float(v_sys_obs),
+    }
+
+    # Convert positions from mas to μas for float32 precision
+    for key in ("x", "y", "sigma_x", "sigma_y"):
+        data[key] = data[key] * 1000.0
+
+    n_accel = int(data["accel_measured"].sum())
+    fprint(f"loaded {n} maser spots for {galaxy} "
+           f"({n_accel} with measured acceleration).")
+    return data
+
+
 def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
     """Load individual maser spot data for a megamaser galaxy.
 
     Parameters
     ----------
     root : str
-        Directory containing the data file.
+        Dataset-qualified directory containing the data file, as returned by
+        :func:`maser_data_root`. No dataset name is joined on here.
     galaxy : str
         Galaxy name: ``"CGCG074-064"``, ``"NGC5765b"``, etc.
     v_sys_obs : float or None
-        Observed CMB-frame recession velocity in km/s. Required except for
-        NGC4258, where a default is supplied.
+        Fixed velocity reference used to centre residual arithmetic, km/s.
+        Required except for NGC4258, where a default is supplied.
 
     Returns
     -------
-    dict with numpy arrays for each spot property, including ``v_sys_obs``.
+    dict with numpy arrays for each spot property, including ``v_sys_obs``
+    and the ``dataset`` the spots came from.
     """
-    if galaxy == "NGC5765b":
+    dataset = maser_dataset_of_root(root)
+
+    if dataset == "fiducial" and galaxy in _P20_GALAXIES:
+        data = _load_p20_table(root, galaxy, v_sys_obs=v_sys_obs)
+    elif galaxy == "NGC5765b":
         data = load_NGC5765b_spots(root, v_sys_obs=v_sys_obs)
     elif galaxy == "NGC6264":
         data = load_NGC6264_spots(root, v_sys_obs=v_sys_obs)
@@ -558,6 +717,7 @@ def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
         method = "k-means on velocity"
 
     data["velocity_frame"] = megamaser_velocity_frame(galaxy)
+    data["dataset"] = dataset
     data["is_highvel"] = labels != 1
 
     # Per-spot phi bounds

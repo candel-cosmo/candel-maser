@@ -40,6 +40,9 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "scripts" / "megamaser" / "config_maser.toml"
+# Spot-table dataset whose results are analysed; the runners namespace
+# [io].root_output by this name.
+DATASET = "original_published"
 WARP_COEFS = ("d2i_dr2", "d2Omega_dr2")
 ROW_LABELS = ("Pesce/Reid", "config init", "MCMC median")
 ORDER = [("nowarp", "config"), ("nowarp", "reid"),
@@ -51,7 +54,7 @@ def root_output():
     with open(CONFIG, "rb") as fh:
         cfg = tomllib.load(fh)
     rel = cfg.get("io", {}).get("root_output", "results/Maser")
-    return ROOT / rel
+    return ROOT / rel / DATASET
 
 
 def pct(x):

@@ -12,6 +12,8 @@ GALAXY=""
 SAMPLER="mcmc"
 MEM=""            # unset -> default memory request (computed post-parse)
 CPUS=""
+NUM_CHAINS=""
+CHAIN_WORKERS=""
 GPUTYPE=""
 GPU_MEM=""
 GPU_COUNT=""
@@ -33,10 +35,13 @@ ADD_ECC=false
 ADD_QW=false
 MATCH_REID=false
 FIX_FLOORS_PESCE=false
+FIX_GLOBALS=false
 LOO_DROPPED=""
 
+DATASET=""
 ALWAYS_ARGS=()
 SINGLE_ARGS=()
+INIT_ARGS=()
 VARIANT_ARGS=()       # --add-ecc/--add-quadratic-warp: valid for single + joint
 MCMC_JOINT_ARGS=()
 MCMC_ARGS=()
@@ -56,13 +61,19 @@ Usage: $0 (--local | -q QUEUE) --galaxy GAL[,GAL,...]|all \\
 Required:
   --local                Run in the current terminal instead of submitting
                          to a batch backend.  Local runs are also tee'd to
-                         <root_output>/<gal>/logs/<gal>_<sampler><variant>_<stamp>.log
+                         <root_output>/<dataset>/<gal>/logs/
+                         <gal>_<sampler><variant>_<stamp>.log
                          (root_output from config_maser.toml [io], e.g.
                          results/Megamaser; full transcript incl. Reid/Pesce).
   -q, --queue QUEUE      Queue/partition for batch submission
                          (glamdring CPU: redwood|berg|cmb;
                          glamdring GPU: gpulong|cmbgpu|optgpu;
                          arc: short|medium|long).
+  --dataset original_published|fiducial|unpruned
+                         Spot-table dataset. Default: [io].dataset from
+                         config_maser.toml (currently fiducial). Selects the tables,
+                         the init_<dataset>.toml best points, and the
+                         <root_output>/<dataset>/ results namespace.
   --galaxy GAL[,GAL,...]|all
                          Galaxy/galaxies to submit.
                          Choices: $ALL_GALS
@@ -81,10 +92,10 @@ Required:
                          saved single-galaxy MCMC chains.  --galaxy takes the
                          comma list (or all = the five MCP H0 galaxies; NGC4258
                          rejected).
-  --evidence             Submit the single-galaxy harmonic evidence job for an
-                         existing MCMC HDF5 chain. The chain path is resolved
-                         from --galaxy, --init-strategy, and model flags.
-                         This is the GPU path for total evidence.
+  --evidence             Submit the single-galaxy harmonic marginal-objective
+                         diagnostic for an existing MCMC HDF5 chain. The chain
+                         path is resolved from --galaxy, --init-strategy, and
+                         model flags. This is not rigorous absolute evidence.
 
 Joint H0 options (with --infer-H0), passed to run_joint_H0.py:
   --selection none|distance|redshift
@@ -101,9 +112,10 @@ Joint H0 options (with --infer-H0), passed to run_joint_H0.py:
 
 Common options passed to run_maser.py:
   --init-strategy median|config|reid
-                         median/config apply to all samplers. reid is MCMC and
-                         evidence only; DE never initialises from Pesce/Reid
-                         (but reports its exact reference logP).
+                         MCMC/evidence initial point. Real DE searches ignore
+                         it and use their model-specific seed policy;
+                         median/config only select the separate --fix-globals
+                         diagnostic point.
   --spot-batch N         Maser spots evaluated together per pass (DE, mcmc and
                          --evidence). Default: all at once (auto-shrunk only if
                          one candidate's spots overflow VRAM); lower to cut
@@ -112,7 +124,9 @@ Common options passed to run_maser.py:
                          selects matching distance files).
   --add-quadratic-warp   Also valid with --infer-H0 (applies to all galaxies;
                          selects matching distance files).
-  --f64                  Emergency/debug precision override.
+  --f64                  Force float64 for DE; MCMC already always uses it.
+  --seed N               Random seed (all samplers; default: config
+                         inference/seed). DE checkpoints are separated by seed.
   --fix-floors-pesce     Hold the five error floors fixed at the published
                          Pesce/Reid values. de: dropped from the DE search;
                          mcmc: dropped from the sampled sites.
@@ -120,13 +134,13 @@ Common options passed to run_maser.py:
 MCMC/joint quick overrides passed to the Python runner:
   --num-warmup N
   --num-samples N
-  --seed N               Random seed (all samplers; default: config
-                         inference/seed).
-  --num-chains N         Run N chains sequentially in one job. With the
-                         default config/reid init they all start from the
-                         same point with independent per-chain seeds and
-                         drift apart; --init-strategy median instead gives
-                         overdispersed starts.
+  --num-chains N         Run N chains in one job, concurrently up to the
+                         allocated CPU and worker limits. Every chain count
+                         defaults to the configured initial point.
+  --chain-workers N      Single-galaxy MCMC only. Run at most N chains
+                         concurrently (default: 8). Without --cpus, requests
+                         min(chains, workers) CPUs; --cpus overrides only that
+                         scheduler request.
   --output PATH
   --max-tree-depth N     NUTS max tree depth (default: config inference).
   --target-accept-theta F
@@ -141,16 +155,19 @@ Experimental MCMC options passed to run_maser.py --sampler mcmc:
   --compare-reid-2x     With --compare-reid, also run the 2x-denser-grid
                          logZ check. Disabled by default.
   --compute-evidence    Not supported through submit.sh; run a separate
-                         --evidence submission after the chain finishes.
+                         --evidence diagnostic after the chain finishes.
   --save-latents        Save per-spot r_ang/phi samples in the HDF5 output.
                          Disabled by default.
 
 DE optimiser options passed to run_maser.py --sampler de:
-  DE always uses L-SHADE and a data-ridge + Sobol initial population. The
-                         Pesce/Reid point is never seeded; its exact all-spot
-                         unnormalised log posterior density is reported.
+  DE always uses L-SHADE. The initial population normally uses a data ridge
+                         plus Sobol points. Quadratic-warp models use the exact
+                         lifted base-model point, an expansion-only cloud, a
+                         ridge anchored to the linear-fit mass, and Sobol.
+                         Pesce/Reid is never seeded.
                          Population reduction follows DE fitness evaluations,
                          independently of the generation ceiling.
+  --skip-base-model-seed Explicitly omit that quadratic base-model seed cloud.
   --resume               Resume from the DE checkpoint if present.
   --fix-globals          Skip the DE search; score logP and the conditional
                          r_ang MAP at the config [init] globals.
@@ -160,9 +177,10 @@ DE optimiser options passed to run_maser.py --sampler de:
                          published Pesce/Reid values (all other globals free).
   --phi-integration fixed-grid|peak-partition
                          Phi integration for the 2D marginal. Default:
-                         fixed-grid. peak-partition numerically locates and
-                         refines peaks in two independent systemic half-planes
-                         and one half-plane for each high-velocity group.
+                         config_maser.toml (currently peak-partition).
+                         peak-partition numerically locates and refines peaks
+                         in two independent systemic half-planes and one
+                         half-plane for each high-velocity group.
   --peak-candidates-per-wave 1|2|4|8
                          Concurrent candidates per GPU for peak-partition.
                          Default: 8; try 2 or 4 when calibrating throughput.
@@ -188,9 +206,12 @@ Cluster options:
   -h, --help
 
 Advanced runner options:
-  Put options after -- to pass them directly to the selected Python runner.
+  Put runner-only options at the end of the command. The first unrecognised
+  option and everything after it are passed directly to the selected Python
+  runner; an explicit -- separator remains supported but is optional.
   Example:
-    $0 -q cmbgpu --galaxy all --infer-H0 -- --field-indices 0 1 2
+    $0 -q cmbgpu --galaxy NGC6264 --sampler de \
+       --checkpoint-interval-minutes 1
 
 Retries:
   --max-retries N       Launch this submit command through the detached
@@ -257,6 +278,7 @@ config_value() {
         current == section && $0 ~ "^[[:space:]]*"key"[[:space:]]*=" {
             line = $2
             sub(/[[:space:]]*(#.*)?$/, "", line)
+            sub(/^[[:space:]]*/, "", line)
             gsub(/^[[:space:]]*["'\'']|["'\''][[:space:]]*$/, "", line)
             print line
             exit
@@ -321,6 +343,7 @@ while [[ $# -gt 0 ]]; do
         --skip-done) SKIP_DONE=true; shift ;;
         --infer-H0) INFER_H0=true; shift ;;
         --evidence) EVIDENCE=true; shift ;;
+        --dataset) DATASET="$2"; ALWAYS_ARGS+=("$1" "$2"); shift 2 ;;
         --f64) ALWAYS_ARGS+=("--f64"); shift ;;
         --seed) ALWAYS_ARGS+=("--seed" "$2"); shift 2 ;;
         --Vext)
@@ -336,8 +359,14 @@ while [[ $# -gt 0 ]]; do
         --distance-prior|--field-config)
             JOINT_ARGS+=("$1" "$2"); shift 2 ;;
         --init-strategy)
-            INIT_STRATEGY="$2"; SINGLE_ARGS+=("$1" "$2"); shift 2 ;;
-        --num-warmup|--num-samples|--num-chains|--output|\
+            INIT_STRATEGY="$2"; INIT_ARGS+=("$1" "$2"); shift 2 ;;
+        --num-chains)
+            NUM_CHAINS="$2"
+            MCMC_JOINT_ARGS+=("$1" "$2"); shift 2 ;;
+        --chain-workers)
+            CHAIN_WORKERS="$2"
+            MCMC_ARGS+=("$1" "$2"); shift 2 ;;
+        --num-warmup|--num-samples|--output|\
             --max-tree-depth|--target-accept-theta)
             MCMC_JOINT_ARGS+=("$1" "$2"); shift 2 ;;
         --compare-reid|--match-reid|--compare-reid-2x|--compute-evidence)
@@ -359,7 +388,8 @@ while [[ $# -gt 0 ]]; do
                 --add-quadratic-warp) ADD_QW=true ;;
             esac
             VARIANT_ARGS+=("$1"); shift ;;
-        --resume|--fix-globals)
+        --resume|--fix-globals|--skip-base-model-seed)
+            [[ "$1" == "--fix-globals" ]] && FIX_GLOBALS=true
             DE_ARGS+=("$1"); shift ;;
         --fix-globals-pesce|--fix-floors-pesce)
             case "$1" in
@@ -377,12 +407,41 @@ while [[ $# -gt 0 ]]; do
             PASSTHRU_ARGS+=("$@")
             break ;;
         -h|--help) usage; exit 0 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        *) PASSTHRU_ARGS+=("$@"); break ;;
     esac
 done
 
+if [[ -z "$NUM_CHAINS" || -z "$CHAIN_WORKERS" ]]; then
+    for ((i = 0; i < ${#PASSTHRU_ARGS[@]}; i++)); do
+        case "${PASSTHRU_ARGS[$i]}" in
+            --num-chains)
+                if [[ -z "$NUM_CHAINS" ]]; then
+                    j=$((i + 1)); NUM_CHAINS="${PASSTHRU_ARGS[$j]:-}"
+                fi ;;
+            --num-chains=*)
+                if [[ -z "$NUM_CHAINS" ]]; then
+                    NUM_CHAINS="${PASSTHRU_ARGS[$i]#*=}"
+                fi ;;
+            --chain-workers)
+                if [[ -z "$CHAIN_WORKERS" ]]; then
+                    j=$((i + 1)); CHAIN_WORKERS="${PASSTHRU_ARGS[$j]:-}"
+                fi ;;
+            --chain-workers=*)
+                if [[ -z "$CHAIN_WORKERS" ]]; then
+                    CHAIN_WORKERS="${PASSTHRU_ARGS[$i]#*=}"
+                fi ;;
+        esac
+    done
+fi
+
 if [[ -z "$GALAXY" ]]; then
     echo "[ERROR] --galaxy is required. Choices: $ALL_GALS"; exit 1
+fi
+[[ -z "$DATASET" ]] && DATASET="$(config_value io dataset)"
+[[ -z "$DATASET" ]] && DATASET="fiducial"
+if [[ "$DATASET" != "original_published" && "$DATASET" != "fiducial" && "$DATASET" != "unpruned" ]]; then
+    echo "[ERROR] --dataset must be original_published, fiducial, or unpruned"
+    exit 1
 fi
 if [[ "$SAMPLER" != "mcmc" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler must be mcmc or de"; exit 1
@@ -413,12 +472,6 @@ if [[ "$EVIDENCE" == true && "$JOINT_H0_MODE" == true ]]; then
 fi
 if [[ "$EVIDENCE" == true && "$SAMPLER_EXPLICIT" == true ]]; then
     echo "[ERROR] --sampler is not valid with --evidence"; exit 1
-fi
-if [[ "$EVIDENCE" == false && "$JOINT_H0_MODE" == false
-      && "$SAMPLER" == "de" && "$(chain_init_strategy)" == "reid" ]]; then
-    echo "[ERROR] DE never initialises from Pesce/Reid."
-    echo "        Use --init-strategy median or config; Pesce logP is reported separately."
-    exit 1
 fi
 if [[ "$COMPUTE_EVIDENCE" == true ]]; then
     echo "[ERROR] --compute-evidence is no longer submitted inline;"
@@ -478,6 +531,7 @@ elif [[ "$JOINT_H0_MODE" == true ]]; then
     # Joint H0 modes are always one joint NUTS chain; --sampler is ignored.
     bad_args=()
     [[ ${#SINGLE_ARGS[@]} -gt 0 ]] && bad_args+=("${SINGLE_ARGS[@]}")
+    [[ ${#INIT_ARGS[@]} -gt 0 ]] && bad_args+=("${INIT_ARGS[@]}")
     [[ ${#MCMC_ARGS[@]} -gt 0 ]] && bad_args+=("${MCMC_ARGS[@]}")
     [[ ${#DE_ARGS[@]} -gt 0 ]] && bad_args+=("${DE_ARGS[@]}")
     [[ ${#bad_args[@]} -gt 0 ]] && fail_if_args "--infer-H0" "${bad_args[@]}"
@@ -492,6 +546,7 @@ elif [[ "$SAMPLER" == "mcmc" ]]; then
     [[ ${#DE_ARGS[@]} -gt 0 ]] && bad_args+=("${DE_ARGS[@]}")
     [[ ${#bad_args[@]} -gt 0 ]] && fail_if_args "--sampler mcmc" "${bad_args[@]}"
     [[ ${#ALWAYS_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${ALWAYS_ARGS[@]}")
+    [[ ${#INIT_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${INIT_ARGS[@]}")
     [[ ${#SINGLE_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${SINGLE_ARGS[@]}")
     [[ ${#VARIANT_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${VARIANT_ARGS[@]}")
     [[ ${#MCMC_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${MCMC_ARGS[@]}")
@@ -504,6 +559,9 @@ else
     [[ ${#MCMC_JOINT_ARGS[@]} -gt 0 ]] && bad_args+=("${MCMC_JOINT_ARGS[@]}")
     [[ ${#bad_args[@]} -gt 0 ]] && fail_if_args "--sampler de" "${bad_args[@]}"
     [[ ${#ALWAYS_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${ALWAYS_ARGS[@]}")
+    if [[ "$FIX_GLOBALS" == true && ${#INIT_ARGS[@]} -gt 0 ]]; then
+        RUN_ARGS+=("${INIT_ARGS[@]}")
+    fi
     [[ ${#SINGLE_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${SINGLE_ARGS[@]}")
     [[ ${#VARIANT_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${VARIANT_ARGS[@]}")
     [[ ${#DE_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${DE_ARGS[@]}")
@@ -553,6 +611,28 @@ fi
 if [[ "$JOINT_H0_MODE" == true && -z "$CPUS" ]]; then
     CPUS=4
 fi
+if [[ "$EVIDENCE" == false && "$JOINT_H0_MODE" == false
+      && "$SAMPLER" == "mcmc" ]]; then
+    [[ -z "$NUM_CHAINS" ]] && \
+        NUM_CHAINS="$(config_value inference num_chains)"
+    [[ -z "$CHAIN_WORKERS" ]] && \
+        CHAIN_WORKERS="$(config_value inference chain_workers)"
+    if [[ ! "$NUM_CHAINS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] --num-chains must be a positive integer"
+        exit 1
+    fi
+    if [[ ! "$CHAIN_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] --chain-workers must be a positive integer"
+        exit 1
+    fi
+    if [[ -z "$CPUS" ]]; then
+        if (( NUM_CHAINS < CHAIN_WORKERS )); then
+            CPUS="$NUM_CHAINS"
+        else
+            CPUS="$CHAIN_WORKERS"
+        fi
+    fi
+fi
 
 # Default memory: 7 GB per CPU for every submitted job type. MEM is per-CPU
 # (matches addqueue -m / SLURM --mem-per-cpu); submit_job scales it to a total
@@ -582,11 +662,12 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
         exit 1
     fi
     gal_tag="$(printf '%s' "$GALAXY" | tr ', /' '___' | tr -cd '[:alnum:]_.-')"
+    ds_tag="${DATASET%%_*}"
     joint_label="joint H0"
     # Tag the job (hence the scheduler log filename) with selection and
     # reconstruction, matching the joint_H0 result-file convention; defaults
     # mirror run_joint_H0.py (redshift / none).
-    job_name="maser_jointh0_${gal_tag}_${SELECTION:-redshift}_${RECONSTRUCTION:-none}"
+    job_name="maser_jointh0_${ds_tag}_${gal_tag}_${SELECTION:-redshift}_${RECONSTRUCTION:-none}"
     [[ -n "$LOO_DROPPED" ]] && job_name="${job_name}_loo${LOO_DROPPED}"
     if [[ "$LOCAL" == true ]]; then
         echo "Running $joint_label ($GALAXY) locally"
@@ -618,13 +699,13 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
             pycmd="/usr/bin/env JAX_PLATFORMS=cpu $CANDEL_PYTHON -u $runner --galaxy $GALAXY"
         fi
         [[ ${#RUN_ARGS[@]} -gt 0 ]] && pycmd+=" ${RUN_ARGS[*]}"
-        # Joint output is a flat results/Megamaser/joint_H0_*.hdf5 (no per-galaxy
-        # dir), so copy the scheduler log into a shared <root_output>/logs.
+        # Joint output is flat within the dataset namespace (no per-galaxy
+        # directory), so keep its scheduler log in the same namespace.
         joint_root="$(config_value io root_output)"
         [[ -z "$joint_root" ]] && joint_root="results/Megamaser"
         submit_args=(--queue "$QUEUE" --mem "$MEM"
                      --name "$job_name"
-                     --logdir "$ROOT/$joint_root/logs")
+                     --logdir "$ROOT/$joint_root/$DATASET/logs")
         if [[ "$joint_gpu" == true ]]; then
             submit_args=(--gpu "${submit_args[@]}")
         fi
@@ -654,17 +735,21 @@ done
 GALAXY="${expanded_galaxies[*]}"
 
 RUNNER="$ROOT/scripts/megamaser/run_maser.py"
+# Short tag so the same galaxy can run on both datasets concurrently without
+# colliding on job name or scheduler-log destination.
+ds_tag="${DATASET%%_*}"
+
 case "$SAMPLER" in
-    de) JOB_PREFIX="maser_de" ;;
-    mcmc) JOB_PREFIX="maser_mcmc" ;;
-    *) JOB_PREFIX="maser_mcmc" ;;
+    de) JOB_PREFIX="maser_de_${ds_tag}" ;;
+    mcmc) JOB_PREFIX="maser_mcmc_${ds_tag}" ;;
+    *) JOB_PREFIX="maser_mcmc_${ds_tag}" ;;
 esac
 
 # Local runs are tee'd to a per-run log under the galaxy's output subdir, so the
 # full transcript (sampler progress, the Reid/Pesce comparison table, JAX/XLA
 # warnings) is saved beside that galaxy's HDF5 outputs. run_maser.py writes to
-# <root_output>/<gal>/; derive root_output from config_maser.toml [io]
-# (defaults to results/Maser only when that key is absent) so it can't drift.
+# <root_output>/<dataset>/<gal>/; derive root_output from config_maser.toml [io]
+# (defaults to results/Megamaser only when that key is absent) so it can't drift.
 # root_results resolves to the repo root (local_config.toml).
 maser_root_output="$(
     awk -F'=' '
@@ -674,8 +759,10 @@ maser_root_output="$(
         }
     ' "$ROOT/scripts/megamaser/config_maser.toml" 2>/dev/null || true
 )"
-[[ -z "$maser_root_output" ]] && maser_root_output="results/Maser"
-MASER_OUT="$ROOT/$maser_root_output"
+[[ -z "$maser_root_output" ]] && maser_root_output="results/Megamaser"
+# run_maser.py/run_de_map.py namespace root_output by dataset, so mirror that
+# here or the chain and log paths below point at the wrong dataset.
+MASER_OUT="$ROOT/$maser_root_output/$DATASET"
 stamp="$(date '+%Y%m%d_%H%M%S')"
 
 if [[ "$EVIDENCE" == true ]]; then
@@ -694,7 +781,7 @@ if [[ "$EVIDENCE" == true ]]; then
                 exit 1
             fi
         fi
-        evidence_args=(--chain "$chain")
+        evidence_args=(--chain "$chain" --dataset "$DATASET")
         [[ -n "$GPU_MEM" ]] && evidence_args+=(--gpu-mem "$GPU_MEM")
         [[ -n "$SPOT_BATCH" ]] && evidence_args+=(--spot-batch "$SPOT_BATCH")
         [[ ${#PASSTHRU_ARGS[@]} -gt 0 ]] && evidence_args+=("${PASSTHRU_ARGS[@]}")
@@ -764,8 +851,15 @@ for gal in $GALAXY; do
             mkdir -p "$logdir"
             logfile="$logdir/${gal}_${SAMPLER}${variant_tag}_${stamp}.log"
             echo "[submit] tee-ing output to: $logfile"
+            term_columns="$(tput cols 2>/dev/null || true)"
+            term_lines="$(tput lines 2>/dev/null || true)"
+            term_env=()
+            if [[ "$term_columns" =~ ^[1-9][0-9]*$ \
+                  && "$term_lines" =~ ^[1-9][0-9]*$ ]]; then
+                term_env=(COLUMNS="$term_columns" LINES="$term_lines")
+            fi
             # pipefail (set at top) propagates the runner's exit status here.
-            "${cmd[@]}" 2>&1 | tee "$logfile"
+            /usr/bin/env "${term_env[@]}" "${cmd[@]}" 2>&1 | tee "$logfile"
         fi
         continue
     fi
@@ -788,9 +882,9 @@ for gal in $GALAXY; do
             submit_args+=(--gpu-count "$GPU_COUNT")
         fi
     fi
-    # MCMC CPU job: a single threaded JAX process, not MPI. --cpus (in
-    # extra_flags) requests N shared cores on one node (addqueue -s -n N); the
-    # -s -n 1xN node-form grabs a whole node on glamdring.
+    # MCMC CPU job: one process with bounded chain threads, not MPI. --cpus
+    # requests N shared cores on one node (addqueue -s -n N); the -s -n 1xN
+    # node-form grabs a whole node on glamdring.
     if [[ ${#extra_flags[@]} -gt 0 ]]; then
         submit_args+=("${extra_flags[@]}")
     fi

@@ -18,10 +18,13 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
+import astropy.units as u
 import numpy as np
+from astropy.cosmology import FlatLambdaCDM, z_at_value
 
 try:
     import tomllib
@@ -31,11 +34,20 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 fallback
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR.parent) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR.parent))
+
+from candel.pvdata.megamaser_data import (MASER_DATASETS,  # noqa: E402
+                                          maser_data_root)
+from maser_config import (add_dataset_arg, dataset_init_path,  # noqa: E402
+                          resolve_dataset)
+
 REID_DIR = ROOT / "background_info/fit_disk_Reid"
 REID_SOURCE = REID_DIR / "fit_disk_v24d_unblinded.f"
 REID_CONTROL_TEMPLATE = REID_DIR / "fit_disk_control.inp"
 DEFAULT_CONFIG = ROOT / "scripts/megamaser/config_maser.toml"
-DEFAULT_DATA = ROOT / "data/Megamaser/N4258_disk_data_MarkReid.final"
+DEFAULT_DATA_NAME = "N4258_disk_data_MarkReid.final"
+# Dataset-agnostic: one Reid run directory tree for every dataset.
 DEFAULT_RESULTS = ROOT / "results/Megamaser/reid_mcmc"
 DEFAULT_REID_INIT = ROOT / "scripts/megamaser/check_reid/reid_ngc4258_init.toml"  # noqa: E501
 MAX_CORNER_SAMPLES = 20000
@@ -118,6 +130,34 @@ def load_toml(path: Path) -> dict:
         return tomllib.load(f)
 
 
+def reid_data_path(galaxy: str, dataset: str) -> Path:
+    """Reid-format data file written by ``prepare_reid_data.py --dataset``."""
+    return Path(maser_data_root(dataset)) / f"{galaxy}_loader_reid.inp"
+
+
+def reid_control_path(galaxy, dataset):
+    """Default control path, retaining legacy names for published tables."""
+    prefix = "" if dataset == "original_published" else f"{dataset}_"
+    return SCRIPT_DIR / f"reid_control_{prefix}{galaxy}.inp"
+
+
+def reid_control_dataset(path):
+    """Dataset recorded by a control file; unlabelled legacy files are old."""
+    match = re.search(
+        r"^!\s*CANDEL dataset:\s*(\S+)\s*$", Path(path).read_text(),
+        flags=re.MULTILINE)
+    dataset = match.group(1) if match else "original_published"
+    if dataset not in MASER_DATASETS:
+        raise ValueError(f"{path} records unknown dataset {dataset!r}")
+    return dataset
+
+
+def dataset_galaxy_block(dataset: str, galaxy: str) -> dict:
+    """`galaxy`'s init blocks and r_ang_ref_* from ``init_<dataset>.toml``."""
+    cfg = load_toml(Path(dataset_init_path(dataset)))
+    return dict(cfg["model"]["galaxies"].get(galaxy, {}))
+
+
 def first_data_header(text: str) -> str | None:
     for line in text.splitlines():
         stripped = line.strip()
@@ -183,10 +223,12 @@ def radio_to_optical(v_radio: np.ndarray | float) -> np.ndarray | float:
 
 def load_reid_init(path: Path, vcor: float | None = None,
                    galaxy: str | None = None,
-                   variant: str = "init") -> ReidInit:
+                   variant: str = "init",
+                   dataset: str | None = None) -> ReidInit:
     init = load_toml(path)["globals"]
     tag = str(path)
-    if any(isinstance(v, dict) for v in init.values()):
+    merged = any(isinstance(v, dict) for v in init.values())
+    if merged:
         # Merged multi-galaxy file: [globals.<GALAXY>.<variant>].
         if not isinstance(init.get(galaxy), dict):
             available = sorted(k for k, v in init.items()
@@ -202,17 +244,27 @@ def load_reid_init(path: Path, vcor: float | None = None,
                 f"available variants: {sorted(by_variant)}")
         init = by_variant[variant]
         tag = f"{path}:{galaxy}:{variant}"
+    # Written by make_candel_globals.py; absent in hand-written, dataset-
+    # independent files such as reid_ngc4258_init.toml.
+    init_dataset = init.get("dataset")
+    if init_dataset is None and merged:
+        init_dataset = "original_published"
+    if dataset is not None and init_dataset not in (None, dataset):
+        raise ValueError(
+            f"{tag} was generated for dataset '{init_dataset}', not "
+            f"'{dataset}'")
     values = {name: float(init[name]) for name in GLOBAL_NAMES}
     if vcor is not None:
         values["Vcor_km_s"] = float(vcor)
+    r_ref = float(init.get("r_ref_mas", 0.0))
     values.update(
         {
-            "_D_c": (
-                values["Vsys_km_s"] +
-                values["Vcor_km_s"]) /
-            values["H0"],
-            "_r_ref_i": 0.0,
-            "_r_ref_PA": 0.0,
+            "_D_A": reid_D_A(
+                values["Vsys_km_s"] + values["Vcor_km_s"],
+                values["H0"]),
+            "_reid_r_ref": r_ref or None,
+            "_r_ref_i": r_ref,
+            "_r_ref_PA": r_ref,
             "_r_ref_peri": 0.0})
     return ReidInit(values=values, source=f"reid-init:{tag}")
 
@@ -230,9 +282,15 @@ def resolve_init_toml(name: str) -> Path:
     return path
 
 
-def load_galaxy_config(config_path: Path, galaxy: str) -> dict:
+def load_galaxy_config(config_path: Path, galaxy: str,
+                       dataset: str | None = None) -> dict:
     cfg = load_toml(config_path)
     gcfg = dict(cfg["model"]["galaxies"][galaxy])
+    if dataset is not None:
+        # init* and r_ang_ref_* live in init_<dataset>.toml, not in
+        # config_maser.toml. Keys present in config_path win: it may be a
+        # one-point fragment (reid_chi2) whose init must not be overwritten.
+        gcfg = {**dataset_galaxy_block(dataset, galaxy), **gcfg}
     if "v_sys_obs" in gcfg:
         return gcfg
 
@@ -242,29 +300,79 @@ def load_galaxy_config(config_path: Path, galaxy: str) -> dict:
     return default_gcfg
 
 
+def config_D_A_from_D_c(cfg: dict, D_c):
+    """Convert CANDEL config comoving distance to angular diameter distance."""
+    model = cfg.get("model", {})
+    cosmo = FlatLambdaCDM(
+        H0=float(model.get("H0_ref", 73.0)),
+        Om0=float(model.get("Om", model.get("Om0", 0.3))),
+    )
+    D_c = np.asarray(D_c, dtype=np.float64)
+    z = np.asarray(
+        z_at_value(cosmo.comoving_distance, D_c * u.Mpc).value)
+    D_A = D_c / (1.0 + z)
+    return float(D_A) if D_A.ndim == 0 else D_A
+
+
 def load_toml_init(path: Path, galaxy: str, vcor: float,
-                   variant: str = "init") -> ReidInit:
+                   variant: str = "init",
+                   dataset: str | None = None) -> ReidInit:
     cfg = load_toml(path)
     if "globals" in cfg:
-        return load_reid_init(path, vcor, galaxy=galaxy, variant=variant)
-    try:
-        cfg["model"]["galaxies"][galaxy][variant]
-    except KeyError as exc:
-        raise ValueError(
-            f"{path} must contain [globals] or "
-            f"[model.galaxies.{galaxy}.{variant}]"
-        ) from exc
-    return load_config_init(path, galaxy, vcor, variant=variant)
+        return load_reid_init(path, vcor, galaxy=galaxy, variant=variant,
+                              dataset=dataset)
+    if dataset is None:
+        # With a dataset the block may legitimately come from its init file.
+        try:
+            cfg["model"]["galaxies"][galaxy][variant]
+        except KeyError as exc:
+            raise ValueError(
+                f"{path} must contain [globals] or "
+                f"[model.galaxies.{galaxy}.{variant}]"
+            ) from exc
+    return load_config_init(path, galaxy, vcor, variant=variant,
+                            dataset=dataset)
 
 
 def load_config_init(config_path: Path, galaxy: str, vcor: float,
-                     variant: str = "init") -> ReidInit:
-    gcfg = load_galaxy_config(config_path, galaxy)
+                     variant: str = "init",
+                     dataset: str | None = None) -> ReidInit:
+    cfg = load_toml(config_path)
+    gcfg = load_galaxy_config(config_path, galaxy, dataset=dataset)
+    if variant not in gcfg:
+        where = (f"scripts/megamaser/init_{dataset}.toml"
+                 if dataset is not None else "a dataset init file (no dataset "
+                 "was selected)")
+        raise KeyError(
+            f"no [model.galaxies.{galaxy}.{variant}] in {config_path.name} "
+            f"or {where}")
     init = dict(gcfg[variant])
     v_sys = float(gcfg["v_sys_obs"]) + float(init.get("dv_sys", 0.0))
-    distance = float(init["D_c"])
-    m_bh = 10.0 ** (float(init["log_MBH"]) - 7.0)
-    h0 = (v_sys + vcor) / distance
+    if "D_A" in init:
+        distance = float(init["D_A"])
+        comoving_distance = None
+        h0 = float(reid_H0(v_sys + vcor, distance))
+    elif "D_c" in init:
+        comoving_distance = float(init["D_c"])
+        distance = config_D_A_from_D_c(cfg, comoving_distance)
+        h0 = float(reid_H0(v_sys + vcor, distance))
+    else:
+        raise KeyError(f"{variant} must contain D_A or D_c")
+
+    mass_parameterization = gcfg.get(
+        "mass_parameterization",
+        cfg.get("model", {}).get("mass_parameterization", "eta"))
+    if mass_parameterization == "eta":
+        log_mbh = (float(init["eta"]) + math.log10(distance)
+                   if "eta" in init else float(init["log_MBH"]))
+    elif mass_parameterization == "log_mbh":
+        log_mbh = (float(init["log_MBH"]) if "log_MBH" in init
+                   else float(init["eta"]) + math.log10(distance))
+    else:
+        raise ValueError(
+            "mass_parameterization must be 'eta' or 'log_mbh'; "
+            f"got {mass_parameterization!r}")
+    m_bh = 10.0 ** (log_mbh - 7.0)
 
     ecc = float(init.get("ecc", 0.0))
     peri = float(init.get("periapsis", 0.0))
@@ -285,7 +393,8 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float,
             # and d2i/dr2 warp gradients are correspondingly sign-flipped.
             "i0_deg": 180.0 - float(init.get("i0", 94.0)),
             "di_dr_deg_mas": -float(init.get("di_dr", 0.0)),
-            "d2i_dr2_deg_mas2": -float(init.get("d2i_dr2", 0.0)),
+            "d2i_dr2_deg_mas2": (
+                -float(init.get("d2i_dr2", 0.0)) or 0.0),
             "PA_deg": float(init.get("Omega0", 89.0)),
             "dPA_dr_deg_mas": float(init.get("dOmega_dr", 0.0)),
             "d2PA_dr2_deg_mas2": float(init.get("d2Omega_dr2", 0.0)),
@@ -298,7 +407,8 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float,
             "sigma_vsys_km_s": float(init.get("sigma_v_sys", 0.5)),
             "sigma_vhv_km_s": float(init.get("sigma_v_hv", 1.0)),
             "sigma_acc_km_s_yr": float(init.get("sigma_a_floor", 0.4)),
-            "_D_c": distance,
+            "_D_A": distance,
+            "_D_c": comoving_distance,
             "_r_ref_i": float(gcfg.get("r_ang_ref_i", init.get("r_ang_ref", 0.0))),  # noqa: E501
             "_r_ref_PA": float(
                 gcfg.get("r_ang_ref_Omega", init.get("r_ang_ref", 0.0))
@@ -342,12 +452,20 @@ def shift_warp_pivots(init: dict[str, float],
             + init["di_dr_deg_mas"] * dr
             + init["d2i_dr2_deg_mas2"] * dr * dr
         )
+        out["di_dr_deg_mas"] = (
+            init["di_dr_deg_mas"]
+            + 2.0 * init["d2i_dr2_deg_mas2"] * dr
+        )
     if rpa:
         dr = reid_r_ref - rpa
         out["PA_deg"] = (
             init["PA_deg"]
             + init["dPA_dr_deg_mas"] * dr
             + init["d2PA_dr2_deg_mas2"] * dr * dr
+        )
+        out["dPA_dr_deg_mas"] = (
+            init["dPA_dr_deg_mas"]
+            + 2.0 * init["d2PA_dr2_deg_mas2"] * dr
         )
     if rperi:
         out["peri_az_deg"] = init["peri_az_deg"] - \
@@ -446,7 +564,8 @@ def initial_r_phi(rows: np.ndarray,
     acc = rows[:, 7]
     if str(header["velocity_flag"]).lower().startswith("r"):
         v = radio_to_optical(v)
-    D = (init["Vsys_km_s"] + init["Vcor_km_s"]) / init["H0"]
+    D = float(reid_D_A(
+        init["Vsys_km_s"] + init["Vcor_km_s"], init["H0"]))
     bh_mass = init["Mbh_1e7Msun"] * 1e7
     vmin = float(header["Vmin"])
     vmax = float(header["Vmax"])
@@ -643,20 +762,17 @@ def _reid_dnum(v):
     directions of the mapping fall out of it -- D_A = _reid_dnum(v)/H0 and its
     inverse H0 = _reid_dnum(v)/D_A.
 
-    Vectorised: eq14int depends only on z, so it is precomputed on a shared
-    z-grid and interpolated per sample (grid error <1e-6; agrees with the
-    Fortran's per-draw D_A to ~6e-5, the residual being its integer-km/s Ez
-    rounding this deliberately smooths), keeping million-row chains
-    memory-safe."""
-    c, Om, Ol = 299792.458, 0.27, 0.73
+    Vectorised, but literal: fit_disk rounds the velocity to an integer when
+    selecting ``Ez_int`` and uses the unrounded velocity in ``1 + z``. The
+    small set of integer numerators in a chain is cached."""
     v = np.asarray(v, dtype=np.float64)
-    z = v / c
-    zmax = float(np.nanmax(z)) if z.size else 0.0
-    zg = np.linspace(0.0, zmax if zmax > 0.0 else 1e-6, 20001)
-    inv_E = 1.0 / np.sqrt(Om * (1.0 + zg) ** 3 + Ol)
-    eq14 = np.concatenate(
-        ([0.0], np.cumsum(0.5 * (inv_E[1:] + inv_E[:-1]) * np.diff(zg))))
-    return c * np.interp(z, zg, eq14) / (1.0 + z)
+    n_v = np.trunc(v + 0.5).astype(np.int64)
+    unique, inverse = np.unique(n_v, return_inverse=True)
+    numerators = np.asarray(
+        [_reid_eq14_numerator(int(n)) for n in unique])
+    return (
+        numerators[inverse].reshape(v.shape)
+        / (1.0 + v / 299792.5))
 
 
 def reid_D_A(v, H0):
@@ -666,7 +782,34 @@ def reid_D_A(v, H0):
     it to the sampled H0 gives a Reid D_A directly comparable to CANDEL's
     sampled D_A -- unlike the naive Hubble ratio v/H0, which overshoots D_A by
     the cosmological (1+z)/E(z) factor (~3% at MCP redshifts)."""
+    if np.ndim(v) == 0 and np.ndim(H0) == 0:
+        return _reid_dnum_scalar(v) / float(H0)
     return _reid_dnum(v) / np.asarray(H0, dtype=np.float64)
+
+
+@lru_cache(maxsize=None)
+def _reid_eq14_numerator(n_v):
+    """Cached ``c * eq14int`` at fit_disk's integer velocity index."""
+    if not 1 <= n_v <= 50000:
+        raise ValueError(
+            f"Reid fit_disk Ez_int index {n_v} is outside [1, 50000]")
+    c_dampc = 299792.458
+    c_model = 299792.5
+    z = n_v / c_dampc
+    dz = z / 1000.0
+    eq14 = 0.0
+    for i in range(1001):
+        zp = i * dz
+        inv_e = 1.0 / math.sqrt(0.27 * (1.0 + zp) ** 3 + 0.73)
+        eq14 += 0.5 * inv_e if i in (0, 1000) else inv_e
+    return c_model * eq14 * dz
+
+
+def _reid_dnum_scalar(v):
+    """Literal scalar distance numerator used by ``calc_warped_model``."""
+    c_model = 299792.5
+    n_v = int(float(v) + 0.5)
+    return _reid_eq14_numerator(n_v) / (1.0 + float(v) / c_model)
 
 
 def reid_H0(v, D_A):
@@ -675,6 +818,8 @@ def reid_H0(v, D_A):
     puts CANDEL's H0 on the same cosmological footing as Reid's sampled H0,
     instead of the naive v/D_A -- which overshoots the true H0 by the same
     ~3% factor."""
+    if np.ndim(v) == 0 and np.ndim(D_A) == 0:
+        return _reid_dnum_scalar(v) / float(D_A)
     return _reid_dnum(v) / np.asarray(D_A, dtype=np.float64)
 
 
@@ -1002,7 +1147,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Prepare, run, and plot Mark Reid fit_disk MCMC without editing the Reid source.")  # noqa: E501
     parser.add_argument("--galaxy", default="NGC4258")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
+    add_dataset_arg(parser)
+    parser.add_argument(
+        "--data", type=Path, default=None,
+        help=f"Reid-format data file (default: the selected dataset's "
+             f"{DEFAULT_DATA_NAME}).")
     parser.add_argument(
         "--init",
         default=DEFAULT_REID_INIT.name,
@@ -1166,17 +1315,22 @@ def main(argv: list[str] | None = None) -> int:
     if status_interval < 1:
         raise ValueError("--status-interval must be >=1, or 0 for automatic")
 
+    dataset = resolve_dataset(load_toml(args.config), args.dataset)
+    if args.data is None:
+        args.data = Path(maser_data_root(dataset)) / DEFAULT_DATA_NAME
+
     try:
         init_toml = resolve_init_toml(args.init)
         reid_init = load_toml_init(
-            init_toml, args.galaxy, args.vcor, variant=args.variant)
+            init_toml, args.galaxy, args.vcor, variant=args.variant,
+            dataset=dataset)
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
     header, data_rows = parse_data_rows(args.data)
-    run_init = shift_warp_pivots(
-        reid_init.values, compute_reid_r_ref(
-            data_rows, header, reid_init.values))
+    run_r_ref = reid_init.values.get("_reid_r_ref") or compute_reid_r_ref(
+        data_rows, header, reid_init.values)
+    run_init = shift_warp_pivots(reid_init.values, run_r_ref)
 
     h0_low = args.h0_low
     h0_high = args.h0_high
@@ -1234,6 +1388,7 @@ def main(argv: list[str] | None = None) -> int:
         "run_dir": str(run_dir),
         "reid_source": str(REID_SOURCE),
         "data_source": str(args.data),
+        "dataset": dataset,
         "init_source": reid_init.source,
         "burnin": args.burnin,
         "trials": args.trials,

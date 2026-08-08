@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate reid_control_<GALAXY>.inp for a galaxy from mystart_globals.toml
-(see make_candel_globals.py), for use as the --control-template of
-run_gibbs_comparison.py / submit_gibbs_comparison.sh.
+"""Generate a dataset-qualified Reid control for a galaxy from the matching
+start globals (see make_candel_globals.py), for use as the
+--control-template of run_gibbs_comparison.py / submit_gibbs_comparison.sh.
 
 This is write_control() with the same fixed_params/step/seed defaults
 run_reid_mcmc.py --prepare-only uses, except the H0 prior window (the only
@@ -22,48 +22,55 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from run_reid_mcmc import (ROOT, SCRIPT_DIR, compute_reid_r_ref,
-                           load_toml_init, parse_data_rows, shift_warp_pivots,
-                           write_control)
+from run_reid_mcmc import (DEFAULT_CONFIG, SCRIPT_DIR, add_dataset_arg,
+                           compute_reid_r_ref, load_toml, load_toml_init,
+                           parse_data_rows, reid_control_path, reid_data_path,
+                           resolve_dataset, shift_warp_pivots, write_control)
 
 FIXED_PARAMS = {
     "ecc", "peri_az_deg", "dperi_dr_deg_mas",  # --fix-circular default
     "d2i_dr2_deg_mas2", "d2PA_dr2_deg_mas2",  # --linear-warp default
 }
 
-DEFAULT_INIT = SCRIPT_DIR / "mystart_globals.toml"
+
+def default_init(dataset):
+    name = ("mystart_globals.toml" if dataset == "original_published" else
+            f"mystart_globals_{dataset}.toml")
+    return SCRIPT_DIR / name
 
 
-def default_data(galaxy: str) -> Path:
-    return ROOT / f"data/Megamaser/{galaxy}_loader_reid.inp"
-
-
-def default_out(galaxy: str) -> Path:
-    return SCRIPT_DIR / f"reid_control_{galaxy}.inp"
+def default_out(galaxy, dataset):
+    return reid_control_path(galaxy, dataset)
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--galaxy", required=True)
-    p.add_argument("--init", type=Path, default=DEFAULT_INIT,
-                   help="Globals TOML (default: mystart_globals.toml).")
+    add_dataset_arg(p)
+    p.add_argument("--init", type=Path, default=None,
+                   help="Globals TOML (default: "
+                        "mystart_globals_<dataset>.toml).")
     p.add_argument("--data", type=Path, default=None,
                    help="Reid-format data file (defaults to "
-                        "data/Megamaser/<GALAXY>_loader_reid.inp).")
+                        "data/Megamaser/<dataset>/<GALAXY>_loader_reid.inp).")
     p.add_argument("--h0-low", type=float, default=15.0)
     p.add_argument("--h0-high", type=float, default=210.0)
     p.add_argument("--out", type=Path, default=None,
-                   help="Default: reid_control_<GALAXY>.inp")
+                   help="Default: legacy reid_control_<GALAXY>.inp for "
+                        "original_published; otherwise a dataset-qualified "
+                        "filename.")
     args = p.parse_args(argv)
 
-    data = args.data or default_data(args.galaxy)
-    out = args.out or default_out(args.galaxy)
-    for path, label in ((args.init, "init TOML"), (data, "data file")):
+    dataset = resolve_dataset(load_toml(DEFAULT_CONFIG), args.dataset)
+    init = args.init or default_init(dataset)
+    data = args.data or reid_data_path(args.galaxy, dataset)
+    out = args.out or default_out(args.galaxy, dataset)
+    for path, label in ((init, "init TOML"), (data, "data file")):
         if not path.exists():
             p.error(f"missing {label}: {path}")
 
-    reid_init = load_toml_init(args.init, args.galaxy, vcor=0.0,
-                               variant="init")
+    reid_init = load_toml_init(init, args.galaxy, vcor=0.0,
+                               variant="init", dataset=dataset)
     header, rows = parse_data_rows(data)
     reid_r_ref = compute_reid_r_ref(rows, header, reid_init.values)
     run_init = shift_warp_pivots(reid_init.values, reid_r_ref)
@@ -77,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         fixed_params=FIXED_PARAMS,
     )
     out.write_text(
-        out.read_text().replace(
+        f"! CANDEL dataset: {dataset}\n" + out.read_text().replace(
             "!  Parameters for NGC 4258",
             f"!  Parameters for {args.galaxy} "
             "(CANDEL globals, Reid convention)",

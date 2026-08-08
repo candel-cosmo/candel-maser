@@ -26,11 +26,11 @@ import argparse
 import jax
 import jax.numpy as jnp
 import numpy as np
-import tomli
-from convergence_utils import (bruteforce_ll_fixed_r, build_model, cast_floats,
-                               ensure_grad_sample, extend_grad_params,
-                               grad_diff_report, grad_fixed_r_production,
-                               grad_fixed_r_reference, resolve_grid_for_galaxy,
+from convergence_utils import (add_dataset_arg, bruteforce_ll_fixed_r,
+                               build_model, cast_floats, ensure_grad_sample,
+                               extend_grad_params, grad_diff_report,
+                               grad_fixed_r_production, grad_fixed_r_reference,
+                               load_master_config, resolve_grid_for_galaxy,
                                vector_diff_report)
 
 
@@ -182,6 +182,7 @@ def main():
         "--grid-factors", nargs="+", type=float, default=None,
         help="Also test scaled copies of each galaxy's production phi grid. "
              "Example: --grid-factors 0.25 0.5 1 2.")
+    add_dataset_arg(parser)
     args = parser.parse_args()
     if (args.grid_factors is not None
             and any(f <= 0 for f in args.grid_factors)):
@@ -193,8 +194,7 @@ def main():
           "production=float32, reference=float64",
           flush=True)
 
-    with open(CONFIG_PATH, "rb") as f:
-        master_cfg = tomli.load(f)
+    master_cfg = load_master_config(CONFIG_PATH, args.dataset)
     galaxies_cfg = master_cfg["model"]["galaxies"]
     ref_cfg = master_cfg["convergence"]["fixed_r_reference"]
     grad_ref_cfg = master_cfg["convergence"].get(

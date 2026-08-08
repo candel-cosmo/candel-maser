@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Submit the standard megamaser MCMC sweep over the five MCP H0 galaxies:
 #   {no quadratic warp, +quadratic warp} x {init config, init reid (Pesce)}.
-# MCMC and evidence are deliberately separate: use --evidence after chains exist.
+# MCMC and the marginal-objective diagnostic are deliberately separate.
 # Thin wrapper around submit.sh: each variant runs the GALAXIES list (below),
 # so the 2x2 grid is 4 submit.sh calls -> 4 x len(GALAXIES) single-galaxy jobs.
 set -euo pipefail
@@ -40,8 +40,9 @@ script (default: $GALAXIES):
   init strategy  : config, reid   (reid = published Pesce/Reid globals)
 
 = 4 submit.sh calls, one single-galaxy job per galaxy each.
-Default mode adds --compare-reid --sampler mcmc and does not compute evidence.
---evidence mode submits only the GPU evidence jobs for existing HDF5 chains.
+Default mode adds --compare-reid --sampler mcmc and does not run the
+marginal-objective diagnostic. --evidence mode submits only those GPU
+diagnostics for existing HDF5 chains; they are not rigorous absolute evidence.
 
   --local            Run locally (submit.sh --local), one job at a time.
   -q, --queue QUEUE  Submit to the cluster queue (glamdring CPU: redwood|berg|cmb;
@@ -53,9 +54,9 @@ Default mode adds --compare-reid --sampler mcmc and does not compute evidence.
   --num-warmup N     Forwarded to submit.sh (default 10000).
   --num-samples N    Forwarded to submit.sh (default 20000).
   --num-chains N     Forwarded to submit.sh (default 10). Chains run
-                     sequentially in each job; with config/reid init they share
-                     a start point (independent seeds) and drift apart.
-  --evidence         Submit evidence jobs instead of MCMC jobs.
+                     concurrently up to the configured worker and allocated
+                     CPU limits.
+  --evidence         Submit marginal-objective diagnostics instead of MCMC.
   --skip-done        Forward submit.sh --skip-done; skip existing MCMC HDF5s.
   --gpu-mem GB       Forwarded to submit.sh --evidence.
   --dry              Forward --dry: print the runner commands without submitting.
