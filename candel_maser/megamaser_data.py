@@ -21,10 +21,9 @@ from scipy.cluster.vq import kmeans2
 
 from ..util import SPEED_OF_LIGHT, data_path, fprint
 
-# Spot-table datasets. "original_published" is the literature tables as
-# published; "fiducial" is the tables Pesce+2020 actually fitted, released with
-# their erratum. See docs/notes/megamaser_p20_clipping_audit.md for provenance.
-MASER_DATASETS = ("original_published", "fiducial")
+# Spot-table datasets. See docs/notes/megamaser_p20_clipping_audit.md for
+# provenance and the exact construction of the "unpruned" union.
+MASER_DATASETS = ("original_published", "fiducial", "unpruned")
 DEFAULT_MASER_DATASET = "fiducial"
 
 # Galaxies whose fiducial table is a Pesce+2020 erratum "p20" file; the other
@@ -186,7 +185,8 @@ def load_NGC5765b_spots(root, v_sys_obs=None):
     """Load maser spot data for NGC 5765b from Gao+2016 Table 6.
 
     The table provides velocity, position (x, y), and acceleration columns for
-    192 maser spots. Placeholder and undetected accelerations are masked.
+    all 212 published maser spots. Placeholder and undetected accelerations
+    are retained as rows but masked from the acceleration likelihood.
 
     Parameters
     ----------

@@ -17,6 +17,7 @@ and convergence checks use).
 """
 import argparse
 import concurrent.futures
+import csv
 import hashlib
 import json
 import os
@@ -541,16 +542,84 @@ def _logp_2d_terms(target, theta):
     return lp, ll, phys_args, phys_kw
 
 
-def _marginal_loglik_per_spot(target, theta):
-    """Per-spot joint ``(r_ang, phi)`` marginal at fixed globals."""
+def _grid_outlier_probability_group(
+        model, type_key, idx, r_ang, log_w_r, phys_args, phys_kw,
+        sigma=3.0):
+    """Conditional latent-posterior exceedance mass on the fixed grids."""
+    pc = model._phi_concat[type_key]
+    has_any_accel = model._group_has_any_accel(type_key)
+    r_pre = model._r_precompute(
+        r_ang, idx, *phys_args, **phys_kw,
+        has_any_accel=has_any_accel)
+    nhc = model._phi_eval(
+        r_pre, pc["sin_phi"], pc["cos_phi"],
+        pc["sin2_phi"], pc["cos2_phi"], pc["sincos_phi"])
+    rpad = (slice(None),) * r_ang.ndim + (None,)
+    dpad = (slice(None),) + (None,) * r_ang.ndim
+    X, Y, V, A = model._predict_on_grid(
+        r_pre, pc["sin_phi"], pc["cos_phi"], rpad)
+    if has_any_accel:
+        z_a = jnp.where(
+            r_pre["has_a"][dpad] > 0,
+            (r_pre["all_a"][dpad] - A)
+            / jnp.sqrt(r_pre["var_a"])[dpad],
+            jnp.nan)
+    else:
+        z_a = jnp.full_like(X, jnp.nan)
+    z = jnp.stack((
+        (r_pre["all_x"][dpad] - X)
+        / jnp.sqrt(r_pre["var_x"])[dpad],
+        (r_pre["all_y"][dpad] - Y)
+        / jnp.sqrt(r_pre["var_y"])[dpad],
+        (r_pre["all_v_rel"][dpad] - V)
+        / jnp.sqrt(r_pre["var_v"])[dpad],
+        z_a,
+    ), axis=-1)
+    exceeded = jnp.abs(z) > sigma
+    log_weight = jax.lax.optimization_barrier(
+        nhc + log_w_r[..., None] + pc["log_w_phi"])
+    log_denominator = jax.scipy.special.logsumexp(
+        log_weight, axis=(-2, -1))
+
+    def masked_mass(event):
+        masked = jax.lax.optimization_barrier(
+            jnp.where(event, log_weight, -jnp.inf))
+        return jax.scipy.special.logsumexp(masked, axis=(-2, -1))
+
+    log_coordinate = jax.lax.map(
+        masked_mass, jnp.moveaxis(exceeded, -1, 0)).T
+    log_any = jax.scipy.special.logsumexp(
+        jax.lax.optimization_barrier(jnp.where(
+            jnp.any(exceeded, axis=-1), log_weight, -jnp.inf)),
+        axis=(-2, -1))
+    return (jnp.exp(log_coordinate - log_denominator[:, None]),
+            jnp.exp(log_any - log_denominator))
+
+
+def _conditional_latent_outlier_probabilities(
+        target, theta, sigma=3.0):
+    """Per-spot outlier probability conditional on fixed global parameters."""
     theta = target.complete_params(theta)
     model = target.model
     phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
     groups = model._build_conditional_r_grids(
         phys_args[2], phys_args[3], phys_args[4], phys_args[16],
         phys_args[8], phys_args[15], phys_args, phys_kw)
-    return model._eval_phi_marginal(
-        groups, phys_args, phys_kw, spot_batch=target.spot_batch)
+    coordinate = jnp.zeros((4, model.n_spots), dtype=phys_args[2].dtype)
+    any_coordinate = jnp.zeros(model.n_spots, dtype=phys_args[2].dtype)
+    for type_key, idx, r_ang, log_w_r in groups:
+        def one_spot(values):
+            idx_i, r_i, log_w_i = values
+            p_coordinate, p_any = _grid_outlier_probability_group(
+                model, type_key, idx_i[None], r_i[None, :],
+                log_w_i[None, :], phys_args, phys_kw, sigma)
+            return p_coordinate[0], p_any[0]
+
+        p_coordinate, p_any = jax.lax.map(
+            one_spot, (idx, r_ang, log_w_r))
+        coordinate = coordinate.at[:, idx].set(p_coordinate.T)
+        any_coordinate = any_coordinate.at[idx].set(p_any)
+    return coordinate, any_coordinate
 
 
 def _make_logp(target, names, fixed=None):
@@ -1300,6 +1369,7 @@ def _init_block(gal_cfg, model):
 
 
 _DE_HISTORY_KEYS = ("history_generation", "history_logp", "history_D_A")
+_OUTLIER_COORDINATES = ("x", "y", "velocity", "acceleration")
 
 
 def _save_de_progress_plot(checkpoint_path, generation, logp, D_A):
@@ -1326,48 +1396,130 @@ def _save_de_progress_plot(checkpoint_path, generation, logp, D_A):
     return plot_path
 
 
-def _save_spot_loglik_plot(path, velocity, loglik, accel_measured):
-    """Plot individual and distributed per-spot marginal log-likelihoods."""
+def _load_pesce_clipped_mask(root, galaxy, velocity):
+    path = os.path.join(root, "provenance.csv")
+    with open(path, newline="") as f:
+        rows = [row for row in csv.DictReader(f)
+                if row["galaxy"] == galaxy]
+    rows.sort(key=lambda row: int(row["spot_index"]))
+    indices = np.array([int(row["spot_index"]) for row in rows])
+    stored_velocity = np.array(
+        [float(row["velocity_km_s"]) for row in rows])
+    flags = [row["clipped_by_pesce"] for row in rows]
+    if (not np.array_equal(indices, np.arange(len(velocity)))
+            or not np.allclose(stored_velocity, velocity, rtol=0, atol=1e-6)
+            or any(flag not in ("True", "False") for flag in flags)):
+        raise ValueError(
+            f"Pesce clipping provenance does not match {galaxy} spot data.")
+    return np.array([flag == "True" for flag in flags])
+
+
+def _save_map_outlier_table(path, data, coordinate_probability,
+                            any_probability, sigma=3.0,
+                            flag_probability=0.95):
+    coordinate_probability = np.asarray(coordinate_probability, dtype=float)
+    any_probability = np.asarray(any_probability, dtype=float)
+    n_spots = any_probability.size
+    if coordinate_probability.shape != (4, n_spots):
+        raise ValueError("Coordinate outlier probabilities must be 4 x N.")
+    measured = np.asarray(data["accel_measured"], dtype=bool)
+
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow((
+            "spot_index", "velocity_km_s",
+            "x_microarcsec", "sigma_x_microarcsec",
+            "y_microarcsec", "sigma_y_microarcsec",
+            "acceleration_km_s_yr", "sigma_acceleration_km_s_yr",
+            "acceleration_measured",
+            *(f"probability_abs_z_{key}_gt_{sigma:g}"
+              for key in _OUTLIER_COORDINATES),
+            f"probability_any_abs_z_gt_{sigma:g}",
+            f"flag_probability_ge_{flag_probability:g}"))
+        for i in range(n_spots):
+            p = coordinate_probability[:, i].tolist()
+            if not measured[i]:
+                p[3] = None
+            writer.writerow((
+                i + 1, float(data["velocity"][i]),
+                float(data["x"][i]), float(data["sigma_x"][i]),
+                float(data["y"][i]), float(data["sigma_y"][i]),
+                float(data["a"][i]) if measured[i] else None,
+                float(data["sigma_a"][i]) if measured[i] else None,
+                bool(measured[i]), *p, float(any_probability[i]),
+                bool(any_probability[i] >= flag_probability)))
+    os.replace(tmp, path)
+    return path
+
+
+def _save_map_outlier_plot(path, data, probability, sigma=3.0,
+                           flag_probability=0.95):
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
-    velocity = np.asarray(velocity, dtype=float)
-    loglik = np.asarray(loglik, dtype=float)
-    accel_measured = np.asarray(accel_measured, dtype=bool)
-    if not (velocity.shape == loglik.shape == accel_measured.shape):
-        raise ValueError("Per-spot plot arrays must have matching shapes.")
-    finite = np.isfinite(velocity) & np.isfinite(loglik)
-    if not np.any(finite):
-        raise ValueError("Per-spot marginal log-likelihoods are all non-finite.")
+    velocity = np.asarray(data["velocity"], dtype=float)
+    measured = np.asarray(data["accel_measured"], dtype=bool)
+    probability = np.asarray(probability, dtype=float)
+    if not (velocity.shape == measured.shape == probability.shape):
+        raise ValueError("Per-spot outlier plot arrays must match.")
 
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".tmp.png"
-    figure = Figure(figsize=(9.0, 4.8), constrained_layout=True)
+    figure = Figure(figsize=(8.0, 4.5), constrained_layout=True)
     FigureCanvasAgg(figure)
-    axes = figure.subplots(
-        1, 2, sharey=True, gridspec_kw={"width_ratios": [3.2, 1.0]})
-    bins = np.histogram_bin_edges(
-        loglik[finite], bins=min(40, max(10, int(np.sqrt(finite.sum())))))
-    for measured, label, color in (
+    axis = figure.subplots()
+    for has_accel, label, color in (
             (False, "no measured acceleration", "tab:blue"),
             (True, "measured acceleration", "tab:orange")):
-        use = finite & (accel_measured == measured)
-        if not np.any(use):
-            continue
-        axes[0].scatter(
-            velocity[use], loglik[use], s=16, alpha=0.75,
-            color=color, edgecolor="none", label=label)
-        axes[1].hist(
-            loglik[use], bins=bins, orientation="horizontal",
-            histtype="step", lw=1.2, color=color)
-    axes[0].set_xlabel(r"Observed velocity [km s$^{-1}$]")
-    axes[0].set_ylabel(
-        r"Per-spot $\log p(d_i\mid\hat{\theta})$, marginalised over $(r,\phi)$")
-    axes[1].set_xlabel("Count")
-    axes[0].legend(loc="best", fontsize=8)
+        use = measured == has_accel
+        if np.any(use):
+            axis.scatter(
+                velocity[use], probability[use], s=18, alpha=0.75,
+                color=color, edgecolor="none", label=label)
+    if data.get("dataset") == "unpruned":
+        clipped = np.asarray(data["clipped_by_pesce"], dtype=bool)
+        if clipped.shape != probability.shape:
+            raise ValueError("Pesce clipping mask must match plotted spots.")
+        if np.any(clipped):
+            axis.scatter(
+                velocity[clipped], probability[clipped], s=58, marker="D",
+                facecolors="none", edgecolors="black", linewidths=1.1,
+                label="clipped by Pesce", zorder=3)
+    axis.axhline(flag_probability, color="0.35", ls=":", lw=1.0,
+                 label=f"flag at {flag_probability:g}")
+    axis.axhline(0.68, color="0.55", ls="--", lw=1.0,
+                 label="reference at 0.68")
+    axis.set(
+        xlabel=r"Observed velocity [km s$^{-1}$]",
+        ylabel=rf"$P(\max_j |z_{{ij}}| > {sigma:g}\mid D,\hat{{\theta}})$")
+    axis.set_yscale("log")
+    axis.set_ylim(top=1.05)
+    axis.legend(loc="best", fontsize=8)
     figure.savefig(tmp, dpi=220)
     os.replace(tmp, path)
     return path
+
+
+def _write_map_outlier_outputs(target, theta, data, output_base,
+                               sigma=3.0, flag_probability=0.95):
+    evaluate = jax.jit(lambda point:
+                       _conditional_latent_outlier_probabilities(
+                           target, point, sigma))
+    coordinate, any_probability = jax.device_get(evaluate(theta))
+    table_path = output_base + ".csv"
+    plot_path = output_base + ".png"
+    _save_map_outlier_table(
+        table_path, data, coordinate, any_probability, sigma,
+        flag_probability)
+    _save_map_outlier_plot(
+        plot_path, data, any_probability, sigma, flag_probability)
+    fprint(f"spots with P(max |z| > {sigma:g} | MAP globals) >= "
+           f"{flag_probability:g}: "
+           f"{np.sum(any_probability >= flag_probability)}/"
+           f"{target.model.n_spots}")
+    fprint(f"saved MAP latent-posterior outlier table to {table_path}")
+    fprint(f"saved MAP latent-posterior outlier plot to {plot_path}")
+    return table_path, plot_path
 
 
 def _load_de_history(checkpoint, generation, logp, D_A):
@@ -2049,11 +2201,6 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         phase_timing["checkpoint"] += time.perf_counter() - phase_start
     report_timing("final timing")
 
-    distance_gaussian = None
-    if distance_name == "D_A":
-        distance_gaussian = _estimate_distance_gaussian(
-            exact_eval, best_solution, best_fitness, distance_idx, lo, hi)
-
     x_best = np.asarray(lo + jnp.asarray(best_solution) * scale)
     params_best = _flat_to_theta(jnp.asarray(x_best), names)
     params_best.update(fixed)
@@ -2071,7 +2218,10 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     return output, best_logp, {
         "generations": final_gen,
         "reference_logp": reference_logp,
-        "distance_gaussian": distance_gaussian,
+        "distance_slice_inputs": (
+            exact_eval, np.asarray(best_solution).copy(), float(best_fitness),
+            distance_idx, np.asarray(lo), np.asarray(hi))
+        if distance_name == "D_A" else None,
     }
 
 
@@ -2568,47 +2718,11 @@ def main(argv=None):
             required_seed_points=int(base_model_seed is not None))
         pesce_logp = run_info["reference_logp"]
         run_summary = f"generations = {run_info['generations']}"
-        try:
-            theta = {
-                name: jnp.asarray(init_params[name]) for name in target.names}
-            spot_loglik = jax.jit(
-                lambda point: _marginal_loglik_per_spot(target, point))(theta)
-            spot_loglik = np.asarray(jax.device_get(spot_loglik))
-            spot_plot_path = (
-                os.path.splitext(ckpt_path)[0] + "_spot_loglik.png")
-            _save_spot_loglik_plot(
-                spot_plot_path, data["velocity"], spot_loglik,
-                data["accel_measured"])
-        except Exception as error:
-            fprint("WARNING: per-spot marginal log-likelihood plot failed: "
-                   f"{error}")
-        else:
-            fprint("saved per-spot marginal log-likelihood plot to "
-                   f"{spot_plot_path}")
     dt = time.time() - t0
 
     fsection(f"MAP results ({args.galaxy}, {dt:.0f}s)")
     label = "logL" if args.fix_globals_pesce else "logP"
     fprint(f"best {label} = {best_logp:.2f}; {run_summary}")
-    if not fixed_globals:
-        fsection("Local D_A Gaussian approximation")
-        distance_gaussian = run_info["distance_gaussian"]
-        if distance_gaussian is None:
-            fprint("unavailable: the symmetric finite-difference slice was "
-                   "not locally convex above numerical resolution")
-        else:
-            fprint(
-                "conditional on all other MAP coordinates: "
-                f"sigma(D_A) = {distance_gaussian['sigma']:.4g} Mpc")
-            fprint(
-                f"dlogP/dD_A = {distance_gaussian['gradient']:.4g} "
-                f"Mpc^-1; -d2logP/dD_A2 = "
-                f"{distance_gaussian['precision']:.4g} Mpc^-2")
-            fprint(
-                f"finite-difference step = {distance_gaussian['step']:.4g} "
-                f"Mpc; mean Delta(-logP) = "
-                f"{distance_gaussian['rise']:.4g}; local mode offset = "
-                f"{distance_gaussian['mode_offset']:.4g} Mpc")
     if pesce_logp is not None and not fixed_globals:
         delta = best_logp - pesce_logp
         fprint(f"DE - Pesce/Reid baseline = {delta:.2f}")
@@ -2640,6 +2754,46 @@ def main(argv=None):
     fprint(f"MAP init (copy into init_{dataset}.toml manually if desired):")
     print("\n".join(lines), flush=True)
 
+    if fixed_globals:
+        return
+
+    fsection("Conditional latent posterior at MAP")
+    fprint("Integrating the three-sigma statistic over the deterministic "
+           "conditional (r_ang, phi) grids; no latent sampling.")
+    theta = {name: jnp.asarray(init_params[name]) for name in target.names}
+    if dataset == "unpruned":
+        data["clipped_by_pesce"] = _load_pesce_clipped_mask(
+            maser_data_root(dataset), args.galaxy, data["velocity"])
+    outlier_base = (
+        os.path.splitext(ckpt_path)[0] + "_posterior_outliers")
+    _write_map_outlier_outputs(target, theta, data, outlier_base)
+
+    distance_inputs = run_info["distance_slice_inputs"]
+    distance_gaussian = None
+    fsection("Conditional local D_A slice")
+    fprint("This holds every other sampled MAP coordinate fixed; it is not "
+           "a marginal posterior uncertainty.")
+    try:
+        if distance_inputs is not None:
+            distance_gaussian = _estimate_distance_gaussian(*distance_inputs)
+    except Exception as error:
+        fprint(f"WARNING: conditional D_A slice failed: {error}")
+    if distance_gaussian is None:
+        fprint("unavailable: the symmetric finite-difference slice was not "
+               "locally convex above numerical resolution")
+    else:
+        fprint(
+            "conditional Gaussian scale: "
+            f"sigma(D_A) = {distance_gaussian['sigma']:.4g} Mpc")
+        fprint(
+            f"dlogP/dD_A = {distance_gaussian['gradient']:.4g} "
+            f"Mpc^-1; -d2logP/dD_A2 = "
+            f"{distance_gaussian['precision']:.4g} Mpc^-2")
+        fprint(
+            f"finite-difference step = {distance_gaussian['step']:.4g} "
+            f"Mpc; mean Delta(-logP) = "
+            f"{distance_gaussian['rise']:.4g}; local mode offset = "
+            f"{distance_gaussian['mode_offset']:.4g} Mpc")
 
 if __name__ == "__main__":
     main()

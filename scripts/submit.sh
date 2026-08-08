@@ -69,7 +69,7 @@ Required:
                          (glamdring CPU: redwood|berg|cmb;
                          glamdring GPU: gpulong|cmbgpu|optgpu;
                          arc: short|medium|long).
-  --dataset original_published|fiducial
+  --dataset original_published|fiducial|unpruned
                          Spot-table dataset. Default: [io].dataset from
                          config_maser.toml (currently fiducial). Selects the tables,
                          the init_<dataset>.toml best points, and the
@@ -439,8 +439,8 @@ if [[ -z "$GALAXY" ]]; then
 fi
 [[ -z "$DATASET" ]] && DATASET="$(config_value io dataset)"
 [[ -z "$DATASET" ]] && DATASET="fiducial"
-if [[ "$DATASET" != "original_published" && "$DATASET" != "fiducial" ]]; then
-    echo "[ERROR] --dataset must be original_published or fiducial"
+if [[ "$DATASET" != "original_published" && "$DATASET" != "fiducial" && "$DATASET" != "unpruned" ]]; then
+    echo "[ERROR] --dataset must be original_published, fiducial, or unpruned"
     exit 1
 fi
 if [[ "$SAMPLER" != "mcmc" && "$SAMPLER" != "de" ]]; then

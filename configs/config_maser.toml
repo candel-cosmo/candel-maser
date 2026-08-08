@@ -399,7 +399,8 @@ max_tree_depth = 10
 
 [io]
 root_output = "results/Megamaser"
-# Spot-table dataset: "original_published" | "fiducial". Selects both the
+# Spot-table dataset: "original_published" | "fiducial" | "unpruned".
+# Selects both the
 # tables under data/Megamaser/<dataset>/ and the matching init_<dataset>.toml
 # best points, and namespaces root_output. Override with --dataset. The
 # fiducial linear DE MAP init set is complete, so the erratum tables are the

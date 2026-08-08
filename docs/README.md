@@ -40,7 +40,7 @@ the other entry points below are either thin sweep wrappers or diagnostics.
 | File or directory | Use |
 |---|---|
 | `config_maser.toml` | Authoritative sampler, optimiser, prior, grid, and default-dataset settings. |
-| `init_fiducial.toml`, `init_original_published.toml` | Dataset-specific MAP initial points, per-spot radii, and warp pivots. |
+| `init_fiducial.toml`, `init_original_published.toml`, `init_unpruned.toml` | Dataset-specific MAP initial points, per-spot radii, and warp pivots. |
 | `maser_config.py`, `joint_H0_helpers.py` | Shared support modules; they are imported, not run directly. |
 | `convergence/` | Independent phi/radius convergence and gradient diagnostics. Use the matching `.sh` wrapper for cluster submission. |
 | `check_reid/` | Reid `fit_disk` preparation, profiling, MCMC, Gibbs comparisons, and their specialist submit wrappers. |
@@ -264,6 +264,14 @@ bash scripts/megamaser/watch_and_resubmit.sh --marker "saved samples to" -- \
 Short galaxy aliases are accepted by `submit.sh`: `5765b`, `6264`, `6323`, `3789`, and `4258`.
 
 MCMC jobs also write `*_log_density.png` beside the HDF5 and corner plots.
+After a DE MAP run, `run_de_map.py` writes
+`<checkpoint>_posterior_outliers.csv` and `.png`. At the MAP globals it
+integrates over each spot's existing deterministic conditional `(r_ang, phi)`
+grids and reports the posterior probability that at least one measured,
+floor-inflated coordinate residual in x, y, velocity or acceleration exceeds
+3 sigma. The CSV also reports coordinate-wise probabilities and marks
+`P >= 0.95` as a diagnostic flag. No latent sampling is used, and MCMC does
+not run this diagnostic.
 Pass `--compare-reid` to additionally print the slow compact
 Pesce/Reid-reported/config/MCMC-median comparison table scored with the same
 2D marginal disk likelihood used by the DE objective; per-spot
@@ -278,22 +286,29 @@ The main config is `config_maser.toml`.
 
 ### Datasets
 
-Two spot-table datasets coexist and are selected end to end with `--dataset`,
+Three spot-table datasets coexist and are selected end to end with `--dataset`,
 accepted by `submit.sh` and by every runner (`run_maser.py`, `run_de_map.py`,
 `run_map.py`, `run_joint_H0.py`, `evidence_single_galaxy.py`, the convergence
 scripts and `check_reid/prepare_reid_data.py`):
 
 | dataset | what it is |
 |---|---|
-| `original_published` | the literature tables as published; what this repository fitted before 2026-08-05 |
+| `original_published` | the complete literature tables, including NGC5765b's 20 systemic rows without measured accelerations |
 | `fiducial` | the tables Pesce et al. (2020) actually fitted, released with their erratum — **the default** |
+| `unpruned` | published astrometry, fiducial accelerations where available, plus 19 Kuo et al. (2011) NGC6323 spots |
 
 They differ for NGC5765b, NGC6264, NGC6323 and UGC3789 (spots removed in MCP
 vetting, NGC6323 augmented, NGC6264 acceleration uncertainties replaced).
-CGCG074-064 and NGC4258 are byte-identical in both. Full provenance is in
+CGCG074-064 and NGC4258 are byte-identical in all three. Full provenance is in
 `docs/notes/megamaser_p20_clipping_audit.md`.
 
-Layout, both namespaced by dataset so nothing can be mixed silently:
+Build the clipping-test input with
+`venv_candel/bin/python scripts/megamaser/build_unpruned_dataset.py`. The unpruned
+dataset intentionally starts without MAP blocks: run a fresh linear-warp DE
+search before config-started MCMC or quadratic-warp DE.
+
+All inputs and outputs are namespaced by dataset so nothing can be mixed
+silently:
 
 ```
 data/Megamaser/<dataset>/       spot tables (+ generated *_loader_reid.inp)
@@ -308,8 +323,8 @@ from the MCP `fiducial_tables.zip` response and are not part of this checkout.
 sampler and scheduler logs follow the corresponding dataset namespace.
 
 The per-galaxy DE MAP best points (`[model.galaxies.<G>.init*]`) and the warp
-pivots (`r_ang_ref_*`) live in `init_original_published.toml` and
-`init_fiducial.toml`, not in `config_maser.toml`. They are dataset-specific by
+pivots (`r_ang_ref_*`) live in `init_<dataset>.toml`, not in
+`config_maser.toml`. They are dataset-specific by
 construction: each init carries a per-spot `r_ang` array whose length is that
 dataset's spot count. `maser_config.apply_dataset` merges the selected file
 and appends the dataset to `[io].root_output`.
@@ -321,7 +336,8 @@ explicitly with `--dataset original_published`.
 
 The four re-vetted galaxies use their own fiducial DE MAP points and per-spot
 `r_ang` arrays. Config-started MCMC and `--fix-globals --init-strategy config`
-are therefore available for both datasets.
+are available for `original_published` and `fiducial`; `unpruned` needs fresh DE
+points first.
 
 The all-galaxy validated DE default is `phi_integration = "peak-partition"`.
 The legacy dense fixed grid remains available for controlled comparisons:

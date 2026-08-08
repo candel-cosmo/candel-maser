@@ -1,8 +1,8 @@
 # P20 spot clipping: forensics, and how to treat the outliers
 
-Status as of 2026-08-06. Written to be picked up after the MCP (Dom) answers
-the open questions at the bottom. Nothing here has been implemented; this is
-analysis plus a design.
+Status as of 2026-08-08. Dom has since clarified that the vetting used an
+iterative approximately 3-sigma cut on per-coordinate normalised residuals,
+sometimes removing coherent emission regions rather than independent spots.
 
 Source material: MCP response PDF (`~/Downloads/response.pdf`, 2026-08-03) and
 `fiducial_tables.zip`, already unpacked into `data/Megamaser/fiducial/`.
@@ -18,15 +18,16 @@ Matched spot-by-spot on velocity (exact in every table) using the repo loaders.
 |---|---|---|---|
 | CGCG074-064 | 165 | 165 | byte-identical |
 | NGC4258 | 358 | 358 | byte-identical |
-| NGC5765b | 192 | 169 | 23 removed |
+| NGC5765b | 212 | 169 | 20 placeholders excluded, 23 removed in vetting |
 | NGC6264 | 66 | 61 | 5 removed, sigma_a replaced |
 | NGC6323 | 68 | 87 | 19 added, **and all 68 originals modified** |
 | UGC3789 | 156 | 153 | 3 removed |
 
-Every count in Dom's letter reproduces exactly. `NGC5765b_Gao2016_table6_tex.dat`
+Every count in Dom's letter now reproduces exactly. Gao et al. (2016) Table 6
 has 212 rows, 20 of which carry the `a = 1.000 +/- 1.000` placeholder (all
-systemic, 8241-8346 km/s) and were already absent when the 192-row `.dat` was
-built; 212 - 20 - 23 = 169.
+systemic, 8241-8346 km/s); the journal's electronic table omitted those rows
+and retained only 192. `original_published` restores the 20 printed rows while
+masking their accelerations, so 212 - 20 - 23 = 169 for the P20 fit.
 
 Non-issues, checked and dismissed: UGC3789's matched-row differences are pure
 tabulation rounding; NGC5765b's sigma_a differs on 51/54 accelerating rows but
@@ -44,11 +45,30 @@ Real, and **not mentioned in Dom's letter**:
 - NGC6264's sigma_a replacement is large: 33/34 rows changed, median ratio
   2.9x, range 0.34-16.5x.
 
-Correction owed to `data/Megamaser/README`: it claims the original_published
-loader "independently declines to treat [the 20 placeholder rows] as
-measurements". It does not — those rows are absent from the 192-row `.dat`
-altogether. The loader does independently flag the 123 `a = 0.000 +/- 0.200`
-rows as unmeasured, which is a different thing.
+### Unpruned table for clipping tests
+
+`scripts/megamaser/build_unpruned_dataset.py` constructs the `unpruned`
+dataset as the spot-wise union of the two tables. It keeps every
+`original_published` row
+and its published astrometry, replaces acceleration fields from `fiducial`
+where the velocity matches, and retains the published acceleration for a spot
+absent from `fiducial`. For NGC6323 it appends exactly the 19 fiducial-only
+spot identities, but takes their astrometry directly from Kuo et al. (2011)
+Table 3 rather than the modified fiducial values. The resulting counts are
+165, 358, 212, 66, 87 and 156 for CGCG074-064, NGC4258, NGC5765b, NGC6264,
+NGC6323 and UGC3789, respectively. A generated `provenance.csv` records the
+source of the astrometry and acceleration for every row, plus a
+`clipped_by_pesce` flag for published velocities absent from the fiducial
+table.
+
+The loader now retains and masks the 20 `1.000 +/- 1.000` systemic placeholder
+rows. It separately masks the 123 high-velocity `a = 0.000 +/- 0.200` rows;
+neither convention contributes an acceleration likelihood term.
+
+The quantitative NGC5765b diagnostics below were computed before that
+restoration, on the journal's 192-row electronic table. They must be rerun
+before being quoted as results for the complete 212-row `original_published`
+dataset.
 
 
 ## 2. Are the removed spots special?
@@ -106,7 +126,8 @@ individuals are not outliers by P20's own converged standard.
 
 ## 3. Why hard clipping fails here specifically
 
-- **The arithmetic refuses the noise-tail reading.** NGC5765b has ~192 spots x
+- **The arithmetic refuses the noise-tail reading.** The NGC5765b electronic
+  table used for this calculation has 192 spots x
   ~3.3 channels ~ 640 measurements; a two-sided 3 sigma clip on calibrated
   Gaussians expects ~1.7 excursions. Twenty-three were removed. The clip was
   removing structure the model cannot represent — which is exactly the MCP's
@@ -285,7 +306,7 @@ any admissible floor, f bounded below 0.5.
 
 ## 5. The warp-order degeneracy
 
-**The heart of the matter.** On the full NGC5765b table (192) there is a
+**The heart of the matter.** On the 192-row NGC5765b electronic table there is a
 significant preference for a quadratic warp (negative d2i/dr2). On P20's
 clipped table (169) it vanishes by every measure they computed, and permitting
 it shifts D by only +1.4 Mpc there.
@@ -404,7 +425,7 @@ forensic and motivates the mixture; the mixture is inferential and is the
 answer. That is also the order they should appear in the paper.
 
 
-## 8. The residual statistic — the open technical question
+## 8. The residual statistic
 
 `reid_chi2.neg_half_chi2` gives per-spot -0.5 chi^2 from Reid's
 `calc_warped_model` + `add_error_floors` at fixed (r_ang, phi), i.e. four
@@ -429,6 +450,31 @@ Candidates:
 | D | position only | 3 | see below |
 | E | velocity only | 3 | |
 | F | studentized version of any | — | corrects latent leverage |
+
+Dom's follow-up selects A as the closest literal reconstruction: inspect each
+coordinate's normalised residual at approximately 3 sigma. The historical
+procedure was iterative and sometimes removed coherent regions, so it still
+cannot be reconstructed as a deterministic spot-wise rule from this statement
+alone.
+
+### Conditional latent-posterior diagnostic now implemented
+
+After DE, `run_de_map.py` fixes the globals to their MAP values and integrates
+the Dom-style statistic over each spot's existing deterministic conditional
+`(r_ang, phi)` grids:
+
+    z_ij(r, phi) = (d_ij - m_ij(theta_MAP, r, phi))
+                   / sqrt(sigma_ij^2 + sigma_floor,j,MAP^2)
+    P_i = integral L_i(r, phi | theta_MAP) I[max_j |z_ij(r, phi)| > 3] dr dphi
+          / integral L_i(r, phi | theta_MAP) dr dphi
+
+Only measured coordinates enter the maximum; acceleration is omitted where it
+was not measured. Each DE run writes the coordinate-wise probabilities and
+`P_i` beside its checkpoint as `*_posterior_outliers.csv` and `.png`, marking
+`P_i >= 0.95` as a diagnostic flag. This averages the exceedance indicator,
+not the signed residual, so latent-posterior sign changes do not cancel. It
+uses no latent sampling, is not run by MCMC, and is deliberately not an
+automatic clip-and-refit loop.
 
 **Why the channel choice is the whole ballgame.** Positions are *angular*, so a
 position residual genuinely carries no distance information. But the velocity
@@ -461,29 +507,22 @@ rejection explicitly, which would replace the whole reconstruction with a
 citation.
 
 
-## 9. Open questions for Dom
+## 9. Remaining open questions for Dom
 
-1. **Which channels entered the clip statistic** (position only, or velocity
-   and acceleration too), and its exact form — max per-channel |z|, per-spot
-   chi^2, or something else? This decides whether "blinded to distance" is
-   strong or vacuous (section 8).
-2. **Was the threshold applied per channel or on a joint statistic, and was it
-   calibrated** for the two fitted latents per spot, or applied as a nominal
-   3 sigma on raw standardized residuals?
-3. **Were removed spots ever re-tested** against later fits, or was removal
+1. **Were removed spots ever re-tested** against later fits, or was removal
    one-way? (Directly explains our 7 reinstatable NGC5765b spots.)
-4. **Were the error floors refitted between clip rounds?** If so the
+2. **Were the error floors refitted between clip rounds?** If so the
    shrinking-floor cascade applies.
-5. **What model was used for the vetting fits** — which warp order, and was it
+3. **What model was used for the vetting fits** — which warp order, and was it
    the same parameterisation as P20?
-6. **NGC6323: why were the 68 published spots' positions and uncertainties
+4. **NGC6323: why were the 68 published spots' positions and uncertainties
    modified**, not merely augmented with 19 Kuo+2011 spots? This is not
    mentioned in the letter (section 1).
-7. **NGC6264: what is the internal acceleration analysis** that replaced the
+5. **NGC6264: what is the internal acceleration analysis** that replaced the
    published sigma_a (median 2.9x, up to 16.5x)?
-8. Are the pre-2019 vetting fits or logs archived, and can the clip code be
+6. Are the pre-2019 vetting fits or logs archived, and can the clip code be
    shared?
-9. Do the earlier MCP papers document this rejection, and if so where?
+7. Do the earlier MCP papers document this rejection, and if so where?
 
 Also outstanding from their side, unrelated to clipping: whether our 2M++
 peculiar velocities match theirs (their Table 4 mean is positive and moves H0
@@ -492,8 +531,9 @@ peculiar velocities match theirs (their Table 4 mean is positive and moves H0
 
 ## 10. Where things stand
 
-Nothing implemented. Analysis scripts used for this note were scratch only and
-were not committed; the numbers above are reproducible from
+The `unpruned` dataset builder and MAP-conditional latent-posterior 3-sigma
+diagnostic are implemented. The mixture likelihood and forensic iterative
+fit-and-clip sweep remain proposals. The numbers above are reproducible from
 `load_megamaser_spots` on the two datasets plus
 `candel.model.maser_map.evaluate_at_globals` at the DE MAP points in
 `scripts/megamaser/init_original_published.toml`.
