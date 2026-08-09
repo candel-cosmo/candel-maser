@@ -1,8 +1,10 @@
 # P20 spot clipping: forensics, and how to treat the outliers
 
-Status as of 2026-08-08. Dom has since clarified that the vetting used an
+Status as of 2026-08-09. Dom has since clarified that the vetting used an
 iterative approximately 3-sigma cut on per-coordinate normalised residuals,
 sometimes removing coherent emission regions rather than independent spots.
+A subsequent broad Gaussian outlier-mixture implementation was rejected after
+empirical testing and is not part of either the DE or MCMC model.
 
 Source material: MCP response PDF (`~/Downloads/response.pdf`, 2026-08-03) and
 `fiducial_tables.zip`, already unpacked into `data/Megamaser/fiducial/`.
@@ -48,13 +50,19 @@ Real, and **not mentioned in Dom's letter**:
 ### Unpruned table for clipping tests
 
 `scripts/megamaser/build_unpruned_dataset.py` constructs the `unpruned`
-dataset as the spot-wise union of the two tables. It keeps every
-`original_published` row
-and its published astrometry, replaces acceleration fields from `fiducial`
-where the velocity matches, and retains the published acceleration for a spot
-absent from `fiducial`. For NGC6323 it appends exactly the 19 fiducial-only
-spot identities, but takes their astrometry directly from Kuo et al. (2011)
-Table 3 rather than the modified fiducial values. The resulting counts are
+dataset as the spot-wise union of the two tables. For NGC5765b and NGC6264 it
+keeps every `original_published` row and its published astrometry, replaces
+acceleration fields from `fiducial` where the velocity matches, and retains
+the published acceleration for a spot absent from `fiducial`. UGC3789 uses the
+complete fiducial row for each of its 153 matches and the published row for
+each of the three spots absent from the fiducial table.
+
+NGC6323 is deliberately different. Dom's response reports 19 added spots but
+no clipped spots, so its `unpruned` table is now field-for-field and row-order
+identical to the 87-row `fiducial` table. The earlier hybrid of Kuo et al.
+(2015) rows, raw Kuo et al. (2011) astrometry and fiducial accelerations was
+internally inconsistent with that provenance and also misaligned a fiducial
+`r_ang` initialisation with the reordered rows. The resulting counts are
 165, 358, 212, 66, 87 and 156 for CGCG074-064, NGC4258, NGC5765b, NGC6264,
 NGC6323 and UGC3789, respectively. A generated `provenance.csv` records the
 source of the astrometry and acceleration for every row, plus a
@@ -150,7 +158,11 @@ individuals are not outliers by P20's own converged standard.
   quality, then priced at zero. Post-selection inference (Berk et al. 2013).
 
 
-## 4. The proposed treatment: per-spot good/bad mixture
+## 4. Rejected treatment: per-spot good/bad mixture
+
+This section records the mixture model that was considered and later tested.
+It did not work adequately on the megamaser data and was removed; it is not a
+current recommendation or an implemented inference option.
 
 Box & Tiao (1968); Hogg, Bovy & Lang (2010). Per spot, marginalise a Bernoulli
 label analytically:
@@ -445,8 +457,6 @@ Candidates:
 | # | statistic | clip at | comment |
 |---|---|---|---|
 | A | max(\|z_x\|,\|z_y\|,\|z_v\|,\|z_a\|) | 3 | most literal reading |
-| B | per-spot chi^2 (all channels) | 9 | joint, ignores dof |
-| C | chi^2 against its dof | 9.0 (1 dof), 11.8 (2 dof) | the correct version of B |
 | D | position only | 3 | see below |
 | E | velocity only | 3 | |
 | F | studentized version of any | — | corrects latent leverage |
@@ -465,16 +475,19 @@ the Dom-style statistic over each spot's existing deterministic conditional
 
     z_ij(r, phi) = (d_ij - m_ij(theta_MAP, r, phi))
                    / sqrt(sigma_ij^2 + sigma_floor,j,MAP^2)
-    P_i = integral L_i(r, phi | theta_MAP) I[max_j |z_ij(r, phi)| > 3] dr dphi
-          / integral L_i(r, phi | theta_MAP) dr dphi
+    S_i = integral L_xyv,i(r, phi | theta_MAP)
+                   max_(j in {x,y,v}) |z_ij(r, phi)| dr dphi
+          / integral L_xyv,i(r, phi | theta_MAP) dr dphi
 
-Only measured coordinates enter the maximum; acceleration is omitted where it
-was not measured. Each DE run writes the coordinate-wise probabilities and
-`P_i` beside its checkpoint as `*_posterior_outliers.csv` and `.png`, marking
-`P_i >= 0.95` as a diagnostic flag. This averages the exceedance indicator,
-not the signed residual, so latent-posterior sign changes do not cancel. It
-uses no latent sampling, is not run by MCMC, and is deliberately not an
-automatic clip-and-refit loop.
+Acceleration never enters either the maximum or the latent-posterior weights.
+Each DE run writes the x, y and velocity posterior mean absolute residuals and
+`S_i` beside its checkpoint as
+`*_posterior_outliers.csv` and `.png`, marking `S_i >= 3` as a diagnostic
+flag. This averages the residual magnitude, not the signed residual or a
+three-sigma exceedance indicator, so latent-posterior sign changes do not
+cancel. It uses no latent sampling and is not run by MCMC. Ordinary DE only
+reports it; clipping and refitting require the explicit iterative-clipping
+flag.
 
 **Why the channel choice is the whole ballgame.** Positions are *angular*, so a
 position residual genuinely carries no distance information. But the velocity
@@ -482,7 +495,7 @@ residual depends on M/D and the acceleration residual on M/D^2 — and D is
 determined precisely by the consistency between those two. So **a statistic
 using both v and a is clipping directly on the comparison that determines the
 distance**: blinded in Dom's sense (no D in the formula), and not blind at all
-in the sense that matters. A, B, C, F have this property; D does not. Which
+in the sense that matters. A and F have this property; D does not. Which
 channels entered therefore decides whether the blindness claim is strong or
 vacuous — and it is empirically testable.
 
@@ -531,10 +544,16 @@ peculiar velocities match theirs (their Table 4 mean is positive and moves H0
 
 ## 10. Where things stand
 
-The `unpruned` dataset builder and MAP-conditional latent-posterior 3-sigma
-diagnostic are implemented. The mixture likelihood and forensic iterative
-fit-and-clip sweep remain proposals. The numbers above are reproducible from
-`load_megamaser_spots` on the two datasets plus
+The `unpruned` dataset builder, MAP-conditional posterior-mean sigma
+diagnostic, and cumulative iterative DE fit-and-clip loop are implemented.
+The loop is launched with `--dataset unpruned --iterative-clip-sigma`, using
+2.5 sigma by default, and stops on an unchanged mask or a maximum attempt
+count. A stabilised mask is installed for the `clipped` dataset, which filters
+the unpruned rows without modifying source tables; last-attempt flags from an
+unstabilised run remain explicitly pending. The mixture
+likelihood was tested and removed; calibration of the clipping threshold and a
+reinstating variant remain proposals. The numbers above are reproducible from
+`load_megamaser_spots` on the datasets plus
 `candel.model.maser_map.evaluate_at_globals` at the DE MAP points in
 `scripts/megamaser/init_original_published.toml`.
 
@@ -542,8 +561,9 @@ Suggested order when picking this up:
 
 1. Literature check on stated outlier rejection in the MCP source papers
    (section 8, last paragraph) — may moot much of section 7.
-2. Per-channel residual decomposition and fingerprint the six candidate
-   statistics against the known removed sets (section 8) — cheap, high value.
-3. Tier 0 mixture on DE (section 4.1-4.2) plus the run trio (section 5).
-4. NUTS on the globals-only marginal for production posteriors (section 4.5).
-5. The fit_disk multiverse sweep (section 7), scoped by what step 1 and 2 find.
+2. Compare the posterior-mean sigma ranking against the known removed sets
+   (section 8) — cheap, high value.
+3. Calibrate its three-sigma threshold with fitted-model simulations.
+4. If clipping is retained, add a reinstating comparison and report distance
+   sensitivity to the threshold.
+5. The fit_disk multiverse sweep (section 7), scoped by what steps 1-3 find.

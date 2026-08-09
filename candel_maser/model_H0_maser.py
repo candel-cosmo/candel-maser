@@ -803,7 +803,8 @@ class MaserDiskModel(ModelBase):
 
     def _scan_on_global_grid(self, type_key, idx, r_global,
                              phys_args, phys_kw, r_chunk=32,
-                             spot_chunk=None, cache_scan=False):
+                             spot_chunk=None, cache_scan=False,
+                             include_acceleration=True):
         """Per-spot argmax on the phi-marginalised global radius grid."""
         n = int(idx.shape[0])
         if n == 0:
@@ -812,7 +813,8 @@ class MaserDiskModel(ModelBase):
         if self.phi_integration == "peak-partition":
             r_chunk = n_r
         pc = self._phi_concat[type_key]
-        has_any_accel = self._group_has_any_accel(type_key)
+        has_any_accel = (include_acceleration
+                         and self._group_has_any_accel(type_key))
         if spot_chunk is None:
             spot_chunk = n
         spot_chunk = max(1, int(spot_chunk))
@@ -884,10 +886,12 @@ class MaserDiskModel(ModelBase):
 
     def _compute_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2,
                        i0, var_v_hv, phys_args, phys_kw, r_global,
-                       cache_scan=False):
+                       cache_scan=False, include_acceleration=True):
         """Per-spot seed and fallback width for conditional r-MAP."""
         r_est, s_prop, r_min, r_max = self._closed_form_seeds(
             D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+        if not include_acceleration and self._n_sys:
+            r_est = r_est.at[self._idx_sys].set(jnp.sqrt(r_min * r_max))
         scan_cache = {}
         for type_key, idx in [("sys", self._idx_sys),
                               ("red", self._idx_red),
@@ -896,13 +900,15 @@ class MaserDiskModel(ModelBase):
                 self._scan_on_global_grid(
                     type_key, idx, r_global, phys_args, phys_kw,
                     spot_chunk=self._conditional_spot_batch,
-                    cache_scan=cache_scan))
+                    cache_scan=cache_scan,
+                    include_acceleration=include_acceleration))
             if r_scan is None:
                 continue
             if cache_scan:
                 scan_cache[type_key] = ll_scan
             r_cf = r_est[idx]
-            has_any_accel = self._group_has_any_accel(type_key)
+            has_any_accel = (include_acceleration
+                             and self._group_has_any_accel(type_key))
             r_pre_cf = self._r_precompute(
                 r_cf, idx, *phys_args, **phys_kw,
                 has_any_accel=has_any_accel)
@@ -920,18 +926,21 @@ class MaserDiskModel(ModelBase):
             r_best = jnp.where(scan_wins, r_scan, r_cf)
             r_est = r_est.at[idx].set(r_best)
             s_prop = s_prop.at[idx].set(jnp.maximum(s_prop[idx], s_scan))
-        if self._n_sys_uncons > 0:
+        width_idx = (self._idx_sys if not include_acceleration
+                     else self._idx_sys_uncons)
+        if width_idx.shape[0] > 0:
             log_bin = ((jnp.log(r_global[-1]) - jnp.log(r_global[0]))
                        / (r_global.shape[0] - 1))
-            s_uc = jnp.full((self._n_sys_uncons,), 3.0 * log_bin,
+            s_uc = jnp.full((width_idx.shape[0],), 3.0 * log_bin,
                             dtype=r_est.dtype)
-            s_prop = s_prop.at[self._idx_sys_uncons].set(s_uc)
+            s_prop = s_prop.at[width_idx].set(s_uc)
         return r_est, s_prop, r_min, r_max, scan_cache
 
     def _build_conditional_r_grids(self, D_A, M_BH, v_sys, sigma_a_floor2,
                                    i0, var_v_hv,
                                    phys_args=None, phys_kw=None,
-                                   return_scan_cache=False):
+                                   return_scan_cache=False,
+                                   include_acceleration=True):
         """Build conditional r-grid objects for phi/r diagnostics.
 
         ``return_scan_cache`` also returns the global-radius phi marginals
@@ -957,7 +966,8 @@ class MaserDiskModel(ModelBase):
 
         r_est, s_fallback, r_min, r_max, scan_values = self._compute_seeds(
             D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
-            phys_args, phys_kw, r_global, cache_scan=return_scan_cache)
+            phys_args, phys_kw, r_global, cache_scan=return_scan_cache,
+            include_acceleration=include_acceleration)
 
         def _refine(type_key, idx):
             r0 = r_est[idx]
@@ -966,7 +976,8 @@ class MaserDiskModel(ModelBase):
                 return r0, s0
             return self._refine_r_center_group(
                 type_key, idx, r0, s0, r_min, r_max,
-                phys_args, phys_kw)
+                phys_args, phys_kw,
+                include_acceleration=include_acceleration)
 
         def _group(type_key, idx, n):
             if n == 0:
@@ -1116,7 +1127,8 @@ class MaserDiskModel(ModelBase):
 
     def _refine_r_center_group(self, type_key, idx, r_est_group,
                                s_fallback, r_min, r_max,
-                               phys_args, phys_kw, with_width=True):
+                               phys_args, phys_kw, with_width=True,
+                               include_acceleration=True):
         """Refine the fixed-grid centre via Brent's method in log(r)."""
         if self.phi_integration == "peak-partition":
             # The shared global scan is intentionally coarse. Narrow a small
@@ -1139,7 +1151,8 @@ class MaserDiskModel(ModelBase):
             b0 = jnp.minimum(ell_est + bracket_half, ell_hi)
             fractions = jnp.linspace(
                 0.0, 1.0, self._peak_r_refine_order, dtype=dtype)
-            has_any_accel = self._group_has_any_accel(type_key)
+            has_any_accel = (include_acceleration
+                             and self._group_has_any_accel(type_key))
 
             def narrow(_, state):
                 a, b = state
@@ -1243,7 +1256,8 @@ class MaserDiskModel(ModelBase):
         sin_phi = pc["sin_phi"]
         cos_phi = pc["cos_phi"]
         log_w_phi = pc["log_w_phi"]
-        has_any_accel = self._group_has_any_accel(type_key)
+        has_any_accel = (include_acceleration
+                         and self._group_has_any_accel(type_key))
 
         (x0, y0, D_A, M_BH, v_sys,
          r_ang_ref_i, r_ang_ref_Omega, r_ang_ref_periapsis,

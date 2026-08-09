@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -51,6 +52,12 @@ if _HERE not in sys.path:
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
 with open(_CONFIG_PATH, "rb") as f:
     _MASTER_CFG = tomli.load(f)
+
+_CLIP_CHILD_ENV = "CANDEL_DE_CLIP_CHILD"
+_CLIP_INDICES_ENV = "CANDEL_DE_CLIP_INDICES"
+_CLIP_ATTEMPT_ENV = "CANDEL_DE_CLIP_ATTEMPT"
+_CLIP_TAG_ENV = "CANDEL_DE_CLIP_TAG"
+_CLIP_COMPLETE_MARKER = "iterative clipping complete"
 
 
 def _required_inference(cfg, key):
@@ -542,30 +549,17 @@ def _logp_2d_terms(target, theta):
     return lp, ll, phys_args, phys_kw
 
 
-def _grid_outlier_probability_group(
-        model, type_key, idx, r_ang, log_w_r, phys_args, phys_kw,
-        sigma=3.0):
-    """Conditional latent-posterior exceedance mass on the fixed grids."""
+def _grid_posterior_sigma_group(
+        model, type_key, idx, r_ang, log_w_r, phys_args, phys_kw):
+    """Acceleration-free posterior mean absolute x-y-v residuals."""
     pc = model._phi_concat[type_key]
-    has_any_accel = model._group_has_any_accel(type_key)
     r_pre = model._r_precompute(
         r_ang, idx, *phys_args, **phys_kw,
-        has_any_accel=has_any_accel)
-    nhc = model._phi_eval(
-        r_pre, pc["sin_phi"], pc["cos_phi"],
-        pc["sin2_phi"], pc["cos2_phi"], pc["sincos_phi"])
+        has_any_accel=False)
     rpad = (slice(None),) * r_ang.ndim + (None,)
     dpad = (slice(None),) + (None,) * r_ang.ndim
-    X, Y, V, A = model._predict_on_grid(
+    X, Y, V, _ = model._predict_on_grid(
         r_pre, pc["sin_phi"], pc["cos_phi"], rpad)
-    if has_any_accel:
-        z_a = jnp.where(
-            r_pre["has_a"][dpad] > 0,
-            (r_pre["all_a"][dpad] - A)
-            / jnp.sqrt(r_pre["var_a"])[dpad],
-            jnp.nan)
-    else:
-        z_a = jnp.full_like(X, jnp.nan)
     z = jnp.stack((
         (r_pre["all_x"][dpad] - X)
         / jnp.sqrt(r_pre["var_x"])[dpad],
@@ -573,53 +567,44 @@ def _grid_outlier_probability_group(
         / jnp.sqrt(r_pre["var_y"])[dpad],
         (r_pre["all_v_rel"][dpad] - V)
         / jnp.sqrt(r_pre["var_v"])[dpad],
-        z_a,
     ), axis=-1)
-    exceeded = jnp.abs(z) > sigma
+    log_likelihood_xyv = -0.5 * jnp.sum(jnp.square(z), axis=-1)
     log_weight = jax.lax.optimization_barrier(
-        nhc + log_w_r[..., None] + pc["log_w_phi"])
+        log_likelihood_xyv + log_w_r[..., None] + pc["log_w_phi"])
     log_denominator = jax.scipy.special.logsumexp(
         log_weight, axis=(-2, -1))
-
-    def masked_mass(event):
-        masked = jax.lax.optimization_barrier(
-            jnp.where(event, log_weight, -jnp.inf))
-        return jax.scipy.special.logsumexp(masked, axis=(-2, -1))
-
-    log_coordinate = jax.lax.map(
-        masked_mass, jnp.moveaxis(exceeded, -1, 0)).T
-    log_any = jax.scipy.special.logsumexp(
-        jax.lax.optimization_barrier(jnp.where(
-            jnp.any(exceeded, axis=-1), log_weight, -jnp.inf)),
-        axis=(-2, -1))
-    return (jnp.exp(log_coordinate - log_denominator[:, None]),
-            jnp.exp(log_any - log_denominator))
+    weight = jnp.exp(log_weight - log_denominator[:, None, None])
+    abs_z = jnp.abs(z)
+    mean_abs_z = jnp.sum(weight[..., None] * abs_z, axis=(-3, -2))
+    max_abs_z = jnp.max(abs_z, axis=-1)
+    mean_max_abs_z = jnp.sum(weight * max_abs_z, axis=(-2, -1))
+    return mean_abs_z, mean_max_abs_z
 
 
-def _conditional_latent_outlier_probabilities(
-        target, theta, sigma=3.0):
-    """Per-spot outlier probability conditional on fixed global parameters."""
+def _conditional_latent_diagnostics(target, theta):
+    """Per-spot grid diagnostics conditional on fixed global parameters."""
     theta = target.complete_params(theta)
     model = target.model
     phys_args, phys_kw = model.phys_from_params_jax(theta, target.h)
     groups = model._build_conditional_r_grids(
         phys_args[2], phys_args[3], phys_args[4], phys_args[16],
-        phys_args[8], phys_args[15], phys_args, phys_kw)
-    coordinate = jnp.zeros((4, model.n_spots), dtype=phys_args[2].dtype)
-    any_coordinate = jnp.zeros(model.n_spots, dtype=phys_args[2].dtype)
+        phys_args[8], phys_args[15], phys_args, phys_kw,
+        include_acceleration=False)
+    mean_abs_z = jnp.zeros((3, model.n_spots), dtype=phys_args[2].dtype)
+    mean_max_abs_z = jnp.zeros(model.n_spots, dtype=phys_args[2].dtype)
     for type_key, idx, r_ang, log_w_r in groups:
         def one_spot(values):
             idx_i, r_i, log_w_i = values
-            p_coordinate, p_any = _grid_outlier_probability_group(
+            coordinate_z, max_z = _grid_posterior_sigma_group(
                 model, type_key, idx_i[None], r_i[None, :],
-                log_w_i[None, :], phys_args, phys_kw, sigma)
-            return p_coordinate[0], p_any[0]
+                log_w_i[None, :], phys_args, phys_kw)
+            return coordinate_z[0], max_z[0]
 
-        p_coordinate, p_any = jax.lax.map(
+        coordinate_z, max_z = jax.lax.map(
             one_spot, (idx, r_ang, log_w_r))
-        coordinate = coordinate.at[:, idx].set(p_coordinate.T)
-        any_coordinate = any_coordinate.at[idx].set(p_any)
-    return coordinate, any_coordinate
+        mean_abs_z = mean_abs_z.at[:, idx].set(coordinate_z.T)
+        mean_max_abs_z = mean_max_abs_z.at[idx].set(max_z)
+    return mean_abs_z, mean_max_abs_z
 
 
 def _make_logp(target, names, fixed=None):
@@ -1369,7 +1354,7 @@ def _init_block(gal_cfg, model):
 
 
 _DE_HISTORY_KEYS = ("history_generation", "history_logp", "history_D_A")
-_OUTLIER_COORDINATES = ("x", "y", "velocity", "acceleration")
+_OUTLIER_COORDINATES = ("x", "y", "velocity")
 
 
 def _save_de_progress_plot(checkpoint_path, generation, logp, D_A):
@@ -1396,72 +1381,87 @@ def _save_de_progress_plot(checkpoint_path, generation, logp, D_A):
     return plot_path
 
 
-def _load_pesce_clipped_mask(root, galaxy, velocity):
+def _load_pesce_clipped_mask(root, galaxy, data):
     path = os.path.join(root, "provenance.csv")
     with open(path, newline="") as f:
         rows = [row for row in csv.DictReader(f)
                 if row["galaxy"] == galaxy]
     rows.sort(key=lambda row: int(row["spot_index"]))
+    velocity = np.asarray(data["velocity"])
+    source_indices = data.get("unpruned_spot_index")
+    if source_indices is None:
+        if len(velocity) != len(rows):
+            raise ValueError(
+                f"Pesce clipping provenance does not match {galaxy} spot "
+                "data.")
+        source_indices = np.arange(len(velocity))
+    source_indices = np.asarray(source_indices, dtype=int)
     indices = np.array([int(row["spot_index"]) for row in rows])
     stored_velocity = np.array(
         [float(row["velocity_km_s"]) for row in rows])
-    flags = [row["clipped_by_pesce"] for row in rows]
-    if (not np.array_equal(indices, np.arange(len(velocity)))
-            or not np.allclose(stored_velocity, velocity, rtol=0, atol=1e-6)
+    flags = np.array([row["clipped_by_pesce"] for row in rows])
+    if (not np.array_equal(indices, np.arange(len(rows)))
+            or source_indices.shape != velocity.shape
+            or len(np.unique(source_indices)) != len(source_indices)
+            or np.any((source_indices < 0)
+                      | (source_indices >= len(rows)))
             or any(flag not in ("True", "False") for flag in flags)):
         raise ValueError(
             f"Pesce clipping provenance does not match {galaxy} spot data.")
-    return np.array([flag == "True" for flag in flags])
+    if not np.allclose(
+            stored_velocity[source_indices], velocity, rtol=0, atol=1e-6):
+        raise ValueError(
+            f"Pesce clipping provenance does not match {galaxy} spot data.")
+    return flags[source_indices] == "True"
 
 
-def _save_map_outlier_table(path, data, coordinate_probability,
-                            any_probability, sigma=3.0,
-                            flag_probability=0.95):
-    coordinate_probability = np.asarray(coordinate_probability, dtype=float)
-    any_probability = np.asarray(any_probability, dtype=float)
-    n_spots = any_probability.size
-    if coordinate_probability.shape != (4, n_spots):
-        raise ValueError("Coordinate outlier probabilities must be 4 x N.")
+def _save_map_outlier_table(path, data, mean_abs_z, mean_max_abs_z,
+                            mean_sigma_threshold=3.0):
+    mean_abs_z = np.asarray(mean_abs_z, dtype=float)
+    mean_max_abs_z = np.asarray(mean_max_abs_z, dtype=float)
+    n_spots = mean_max_abs_z.size
+    if mean_abs_z.shape != (3, n_spots):
+        raise ValueError("Coordinate posterior mean |z| must be 3 x N.")
     measured = np.asarray(data["accel_measured"], dtype=bool)
 
     tmp = path + ".tmp"
     with open(tmp, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow((
-            "spot_index", "velocity_km_s",
+            "spot_index", "unpruned_spot_index", "velocity_km_s",
             "x_microarcsec", "sigma_x_microarcsec",
             "y_microarcsec", "sigma_y_microarcsec",
             "acceleration_km_s_yr", "sigma_acceleration_km_s_yr",
             "acceleration_measured",
-            *(f"probability_abs_z_{key}_gt_{sigma:g}"
+            *(f"posterior_mean_abs_z_{key}"
               for key in _OUTLIER_COORDINATES),
-            f"probability_any_abs_z_gt_{sigma:g}",
-            f"flag_probability_ge_{flag_probability:g}"))
+            "posterior_mean_max_abs_z",
+            f"flag_posterior_mean_max_abs_z_ge_{mean_sigma_threshold:g}"))
         for i in range(n_spots):
-            p = coordinate_probability[:, i].tolist()
-            if not measured[i]:
-                p[3] = None
+            coordinate_z = mean_abs_z[:, i].tolist()
+            source_index = data.get("unpruned_spot_index")
+            source_index = i if source_index is None else source_index[i]
             writer.writerow((
-                i + 1, float(data["velocity"][i]),
+                i + 1, int(source_index) + 1, float(data["velocity"][i]),
                 float(data["x"][i]), float(data["sigma_x"][i]),
                 float(data["y"][i]), float(data["sigma_y"][i]),
                 float(data["a"][i]) if measured[i] else None,
                 float(data["sigma_a"][i]) if measured[i] else None,
-                bool(measured[i]), *p, float(any_probability[i]),
-                bool(any_probability[i] >= flag_probability)))
+                bool(measured[i]), *coordinate_z,
+                float(mean_max_abs_z[i]),
+                bool(mean_max_abs_z[i] >= mean_sigma_threshold)))
     os.replace(tmp, path)
     return path
 
 
-def _save_map_outlier_plot(path, data, probability, sigma=3.0,
-                           flag_probability=0.95):
+def _save_map_outlier_plot(path, data, mean_max_abs_z, threshold=3.0):
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
     velocity = np.asarray(data["velocity"], dtype=float)
     measured = np.asarray(data["accel_measured"], dtype=bool)
-    probability = np.asarray(probability, dtype=float)
-    if not (velocity.shape == measured.shape == probability.shape):
+    mean_max_abs_z = np.asarray(mean_max_abs_z, dtype=float)
+    if not (velocity.shape == measured.shape == mean_max_abs_z.shape):
         raise ValueError("Per-spot outlier plot arrays must match.")
 
     tmp = path + ".tmp.png"
@@ -1474,52 +1474,198 @@ def _save_map_outlier_plot(path, data, probability, sigma=3.0,
         use = measured == has_accel
         if np.any(use):
             axis.scatter(
-                velocity[use], probability[use], s=18, alpha=0.75,
+                velocity[use], mean_max_abs_z[use], s=18, alpha=0.75,
                 color=color, edgecolor="none", label=label)
     if data.get("dataset") == "unpruned":
         clipped = np.asarray(data["clipped_by_pesce"], dtype=bool)
-        if clipped.shape != probability.shape:
+        if clipped.shape != mean_max_abs_z.shape:
             raise ValueError("Pesce clipping mask must match plotted spots.")
         if np.any(clipped):
             axis.scatter(
-                velocity[clipped], probability[clipped], s=58, marker="D",
+                velocity[clipped], mean_max_abs_z[clipped], s=58, marker="D",
                 facecolors="none", edgecolors="black", linewidths=1.1,
                 label="clipped by Pesce", zorder=3)
-    axis.axhline(flag_probability, color="0.35", ls=":", lw=1.0,
-                 label=f"flag at {flag_probability:g}")
-    axis.axhline(0.68, color="0.55", ls="--", lw=1.0,
-                 label="reference at 0.68")
+    axis.axhline(threshold, color="0.35", ls=":", lw=1.0,
+                 label=rf"reference at ${threshold:g}\sigma$")
     axis.set(
         xlabel=r"Observed velocity [km s$^{-1}$]",
-        ylabel=rf"$P(\max_j |z_{{ij}}| > {sigma:g}\mid D,\hat{{\theta}})$")
-    axis.set_yscale("log")
-    axis.set_ylim(top=1.05)
+        ylabel=(r"$\langle\max_{j\in\{x,y,v\}} |z_{ij}|\rangle_"
+                r"{p(r,\phi\mid D,\hat{\theta})}$"))
     axis.legend(loc="best", fontsize=8)
     figure.savefig(tmp, dpi=220)
     os.replace(tmp, path)
     return path
 
 
-def _write_map_outlier_outputs(target, theta, data, output_base,
-                               sigma=3.0, flag_probability=0.95):
-    evaluate = jax.jit(lambda point:
-                       _conditional_latent_outlier_probabilities(
-                           target, point, sigma))
-    coordinate, any_probability = jax.device_get(evaluate(theta))
-    table_path = output_base + ".csv"
-    plot_path = output_base + ".png"
+def _write_map_diagnostic_outputs(target, theta, data, checkpoint_base,
+                                  mean_sigma_threshold=3.0):
+    evaluate = jax.jit(
+        lambda point: _conditional_latent_diagnostics(target, point))
+    mean_abs_z, mean_max_abs_z = jax.device_get(evaluate(theta))
+    table_path = checkpoint_base + "_posterior_outliers.csv"
+    mean_sigma_plot_path = checkpoint_base + "_posterior_outliers.png"
     _save_map_outlier_table(
-        table_path, data, coordinate, any_probability, sigma,
-        flag_probability)
+        table_path, data, mean_abs_z, mean_max_abs_z,
+        mean_sigma_threshold)
     _save_map_outlier_plot(
-        plot_path, data, any_probability, sigma, flag_probability)
-    fprint(f"spots with P(max |z| > {sigma:g} | MAP globals) >= "
-           f"{flag_probability:g}: "
-           f"{np.sum(any_probability >= flag_probability)}/"
+        mean_sigma_plot_path, data, mean_max_abs_z, mean_sigma_threshold)
+    fprint(f"spots with posterior mean max |z| >= "
+           f"{mean_sigma_threshold:g}: "
+           f"{np.sum(mean_max_abs_z >= mean_sigma_threshold)}/"
            f"{target.model.n_spots}")
-    fprint(f"saved MAP latent-posterior outlier table to {table_path}")
-    fprint(f"saved MAP latent-posterior outlier plot to {plot_path}")
-    return table_path, plot_path
+    fprint(f"saved MAP latent-posterior residual table to {table_path}")
+    fprint("saved MAP posterior-mean sigma plot to "
+           f"{mean_sigma_plot_path}")
+    return table_path, mean_sigma_plot_path
+
+
+def _subset_spot_data(data, excluded_indices):
+    """Return the loaded spot data with selected unpruned rows removed."""
+    n_spots = int(data["n_spots"])
+    keep = np.ones(n_spots, dtype=bool)
+    excluded_indices = np.asarray(excluded_indices, dtype=int)
+    if np.any((excluded_indices < 0) | (excluded_indices >= n_spots)):
+        raise ValueError("Clipped spot index is outside the unpruned table.")
+    keep[excluded_indices] = False
+    if not np.any(keep):
+        raise ValueError("Iterative clipping removed every spot.")
+    subset = {
+        key: (value[keep] if isinstance(value, np.ndarray)
+              and value.shape[:1] == (n_spots,) else value)
+        for key, value in data.items()
+    }
+    subset["n_spots"] = int(keep.sum())
+    subset["unpruned_spot_index"] = np.flatnonzero(keep)
+    return subset
+
+
+def _read_clip_diagnostic(path, sigma):
+    """Read newly flagged unpruned rows and their scores from one DE fit."""
+    flag_key = f"flag_posterior_mean_max_abs_z_ge_{sigma:g}"
+    flagged, scores = set(), {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            index = int(row["unpruned_spot_index"]) - 1
+            scores[index] = float(row["posterior_mean_max_abs_z"])
+            if row[flag_key] == "True":
+                flagged.add(index)
+    return flagged, scores
+
+
+def _save_clip_manifest(path, data, clipped_at, pending, scores, sigma,
+                        stabilised):
+    """Save the final unpruned-row mask for a later clipped dataset."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow((
+            "unpruned_spot_index", "velocity_km_s", "clip",
+            "pending_clip", "clipped_at_attempt",
+            "posterior_mean_max_abs_z", "sigma", "stabilised"))
+        for i, velocity in enumerate(data["velocity"]):
+            writer.writerow((
+                i + 1, float(velocity), bool(clipped_at[i]),
+                i in pending, int(clipped_at[i]) or None,
+                scores.get(i), sigma,
+                bool(stabilised)))
+    os.replace(tmp, path)
+
+
+def _clip_run_tag(args, seed):
+    """Stable namespace for one clipping objective and numerical model."""
+    model = dict(_MASTER_CFG["model"])
+    galaxies = model.pop("galaxies")
+    payload = {
+        "model": model,
+        "galaxy": galaxies[args.galaxy],
+        "overrides": {
+            key: getattr(args, key) for key in (
+                "f64", "no_ecc", "add_ecc", "no_quadratic_warp",
+                "add_quadratic_warp", "mass_parameterization",
+                "phi_integration", "fix_floors_pesce")},
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode()).hexdigest()[:10]
+    return f"sigma{float(args.iterative_clip_sigma):g}_seed{seed}_{digest}"
+
+
+def _run_iterative_clipping(args, argv):
+    """Relaunch DE while cumulatively removing MAP residual outliers."""
+    sigma = float(args.iterative_clip_sigma)
+    seed = (args.seed if args.seed is not None else
+            _required_inference(_MASTER_CFG["inference"], "seed"))
+    tag = _clip_run_tag(args, seed)
+    root = results_path(
+        _MASTER_CFG["io"].get("root_output", "results/Megamaser"),
+        "de_checkpoints", args.galaxy, "iterative_clip", tag)
+    os.makedirs(root, exist_ok=True)
+    data = load_megamaser_spots(
+        maser_data_root("unpruned"), args.galaxy,
+        v_sys_obs=_MASTER_CFG["model"]["galaxies"][args.galaxy]["v_sys_obs"])
+    clipped_at = np.zeros(data["n_spots"], dtype=int)
+    scores = {}
+    clipped = set()
+    pending = set()
+    stabilised = False
+
+    for attempt in range(1, args.clip_max_attempts + 1):
+        fsection(f"Iterative clipping attempt {attempt}/"
+                 f"{args.clip_max_attempts}")
+        fprint(f"fitting {data['n_spots'] - len(clipped)} unpruned spots; "
+               f"{len(clipped)} currently clipped at {sigma:g} sigma")
+        env = os.environ.copy()
+        env[_CLIP_CHILD_ENV] = "1"
+        env[_CLIP_ATTEMPT_ENV] = str(attempt)
+        env[_CLIP_INDICES_ENV] = json.dumps(sorted(clipped))
+        env[_CLIP_TAG_ENV] = tag
+        subprocess.run(
+            [sys.executable, os.path.abspath(__file__), *argv],
+            check=True, env=env)
+
+        attempt_dir = os.path.join(root, f"attempt_{attempt:02d}")
+        tables = [
+            os.path.join(attempt_dir, name)
+            for name in os.listdir(attempt_dir)
+            if name.endswith("_posterior_outliers.csv")]
+        if len(tables) != 1:
+            raise RuntimeError(
+                f"Expected one outlier table in {attempt_dir}, found "
+                f"{len(tables)}.")
+        flagged, attempt_scores = _read_clip_diagnostic(tables[0], sigma)
+        scores.update(attempt_scores)
+        new = flagged - clipped
+        if not new:
+            stabilised = True
+            fprint(f"clipping stabilised after {attempt} DE attempt(s)")
+            break
+        if attempt == args.clip_max_attempts:
+            pending = new
+            fprint(f"attempt limit reached with {len(new)} pending clip(s)")
+            break
+        for index in new:
+            clipped_at[index] = attempt
+        clipped.update(new)
+        fprint(f"newly clipped spots: {len(new)}; total: {len(clipped)}")
+
+    manifest = os.path.join(root, "clipped_spots.csv")
+    _save_clip_manifest(
+        manifest, data, clipped_at, pending, scores, sigma, stabilised)
+    if not stabilised:
+        fprint(f"WARNING: clipping did not stabilise in "
+               f"{args.clip_max_attempts} DE attempts")
+    fprint(f"saved clipped-dataset mask to {manifest}")
+    if stabilised:
+        canonical_dir = maser_data_root("clipped")
+        os.makedirs(canonical_dir, exist_ok=True)
+        canonical = os.path.join(
+            canonical_dir, f"{args.galaxy}_clipped_spots.csv")
+        tmp = canonical + ".tmp"
+        with open(manifest, "rb") as source, open(tmp, "wb") as target:
+            target.write(source.read())
+        os.replace(tmp, canonical)
+        fprint(f"updated clipped dataset mask at {canonical}")
+    fprint(f"{_CLIP_COMPLETE_MARKER}: stabilised={stabilised}")
+    return manifest
 
 
 def _load_de_history(checkpoint, generation, logp, D_A):
@@ -2267,6 +2413,7 @@ def _pesce_init(target, galaxy, master):
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         description="Run 2D-marginal MAP optimisation for one megamaser disk.")
     parser.add_argument("galaxy", type=str)
@@ -2276,6 +2423,15 @@ def main(argv=None):
         help="DE random seed. Different seeds use independent checkpoint, "
              "and progress-plot files.")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--iterative-clip-sigma", type=float, nargs="?", const=2.5,
+        default=None, metavar="SIGMA",
+        help="On --dataset unpruned, repeatedly run DE and remove spots whose "
+             "MAP posterior-mean max |x,y,v| residual reaches SIGMA. "
+             "Omit SIGMA to use 2.5.")
+    parser.add_argument(
+        "--clip-max-attempts", type=int, default=5,
+        help="Maximum total DE fits for --iterative-clip-sigma (default: 5).")
     parser.add_argument("--fix-globals", action="store_true",
                         help="Skip the DE search: hold the disc globals at "
                              "the config [init] point, compute the per-spot "
@@ -2375,7 +2531,22 @@ def main(argv=None):
     galaxies = master_cfg["model"]["galaxies"]
     if args.galaxy not in galaxies:
         raise SystemExit(
-            f"Unknown galaxy {args.galaxy!r}. Available: {list(galaxies)}")
+            f"Unknown galaxy {args.galaxy!r}. Available: "
+            f"{list(galaxies)}")
+    if args.iterative_clip_sigma is not None:
+        if (not np.isfinite(args.iterative_clip_sigma)
+                or args.iterative_clip_sigma <= 0):
+            raise SystemExit("--iterative-clip-sigma must be positive.")
+        if args.clip_max_attempts < 1:
+            raise SystemExit("--clip-max-attempts must be at least 1.")
+        if dataset != "unpruned":
+            raise SystemExit(
+                "--iterative-clip-sigma requires --dataset unpruned.")
+        if args.fix_globals or args.fix_globals_pesce:
+            raise SystemExit(
+                "--iterative-clip-sigma requires a real DE search.")
+        if not os.environ.get(_CLIP_CHILD_ENV):
+            return _run_iterative_clipping(args, argv)
     if galaxies[args.galaxy].get("force_f64", False):
         args.f64 = True
         _late_f64_reason = f"forced for {args.galaxy}"
@@ -2410,6 +2581,13 @@ def main(argv=None):
     data = load_megamaser_spots(
         maser_data_root(dataset), args.galaxy,
         v_sys_obs=gcfg["v_sys_obs"])
+    if dataset == "unpruned":
+        data["clipped_by_pesce"] = _load_pesce_clipped_mask(
+            maser_data_root(dataset), args.galaxy, data)
+    if os.environ.get(_CLIP_CHILD_ENV):
+        excluded = json.loads(os.environ.get(_CLIP_INDICES_ENV, "[]"))
+        data = _subset_spot_data(data, excluded)
+        fprint(f"iterative clipping attempt keeps {data['n_spots']} spots")
     distance_bounds = _distance_bounds(gcfg)
     if distance_bounds is not None:
         data["D_lo"], data["D_hi"], source = distance_bounds
@@ -2593,6 +2771,12 @@ def main(argv=None):
         ckpt_dir = results_path(
             master_cfg["io"].get("root_output", "results/Megamaser"),
             "de_checkpoints", args.galaxy)
+        if os.environ.get(_CLIP_CHILD_ENV):
+            sigma = float(args.iterative_clip_sigma)
+            attempt = int(os.environ[_CLIP_ATTEMPT_ENV])
+            ckpt_dir = os.path.join(
+                ckpt_dir, "iterative_clip",
+                os.environ[_CLIP_TAG_ENV], f"attempt_{attempt:02d}")
         os.makedirs(ckpt_dir, exist_ok=True)
         ckpt_path = os.path.join(
             ckpt_dir, _de_checkpoint_filename(
@@ -2757,16 +2941,16 @@ def main(argv=None):
     if fixed_globals:
         return
 
-    fsection("Conditional latent posterior at MAP")
-    fprint("Integrating the three-sigma statistic over the deterministic "
-           "conditional (r_ang, phi) grids; no latent sampling.")
+    fsection("Per-spot diagnostics at MAP")
+    fprint("Averaging max_(j in x,y,v) |z_ij| over the acceleration-free "
+           "conditional (r_ang, phi) posterior grids; no latent sampling.")
     theta = {name: jnp.asarray(init_params[name]) for name in target.names}
-    if dataset == "unpruned":
-        data["clipped_by_pesce"] = _load_pesce_clipped_mask(
-            maser_data_root(dataset), args.galaxy, data["velocity"])
-    outlier_base = (
-        os.path.splitext(ckpt_path)[0] + "_posterior_outliers")
-    _write_map_outlier_outputs(target, theta, data, outlier_base)
+    checkpoint_base = os.path.splitext(ckpt_path)[0]
+    _write_map_diagnostic_outputs(
+        target, theta, data, checkpoint_base,
+        mean_sigma_threshold=(args.iterative_clip_sigma
+                              if args.iterative_clip_sigma is not None
+                              else 3.0))
 
     distance_inputs = run_info["distance_slice_inputs"]
     distance_gaussian = None

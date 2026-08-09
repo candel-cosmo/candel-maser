@@ -13,8 +13,9 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 """Megamaser spot data loading from AAS machine-readable tables."""
+import csv
 import re
-from os.path import basename, join, normpath
+from os.path import basename, dirname, join, normpath
 
 import numpy as np
 from scipy.cluster.vq import kmeans2
@@ -23,7 +24,7 @@ from ..util import SPEED_OF_LIGHT, data_path, fprint
 
 # Spot-table datasets. See docs/notes/megamaser_p20_clipping_audit.md for
 # provenance and the exact construction of the "unpruned" union.
-MASER_DATASETS = ("original_published", "fiducial", "unpruned")
+MASER_DATASETS = ("original_published", "fiducial", "unpruned", "clipped")
 DEFAULT_MASER_DATASET = "fiducial"
 
 # Galaxies whose fiducial table is a Pesce+2020 erratum "p20" file; the other
@@ -58,6 +59,41 @@ def maser_dataset_of_root(root):
             f"{list(MASER_DATASETS)}. Resolve it with "
             f"maser_data_root(dataset).")
     return dataset
+
+
+def _apply_clipped_mask(data, path):
+    """Apply one stabilised unpruned-row mask to loaded spot data."""
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    if len(rows) != data["n_spots"]:
+        raise ValueError(
+            f"{path} has {len(rows)} rows but the unpruned table has "
+            f"{data['n_spots']}.")
+    indices = np.array([int(row["unpruned_spot_index"]) - 1 for row in rows])
+    velocity = np.array([float(row["velocity_km_s"]) for row in rows])
+    if (not np.array_equal(indices, np.arange(data["n_spots"]))
+            or not np.allclose(velocity, data["velocity"], atol=1e-8,
+                               rtol=0.0)):
+        raise ValueError(f"{path} does not match the current unpruned table.")
+    for key in ("clip", "pending_clip", "stabilised"):
+        if any(row.get(key) not in ("True", "False") for row in rows):
+            raise ValueError(f"{path} has invalid {key} values.")
+    if any(row["stabilised"] != "True" or
+           row["pending_clip"] == "True" for row in rows):
+        raise ValueError(f"{path} is not a stabilised clipping mask.")
+    keep = np.array([row["clip"] != "True" for row in rows])
+    if not np.any(keep):
+        raise ValueError(f"{path} clips every spot.")
+    n_spots = data["n_spots"]
+    clipped = {
+        key: (value[keep] if isinstance(value, np.ndarray)
+              and value.shape[:1] == (n_spots,) else value)
+        for key, value in data.items()
+    }
+    clipped["n_spots"] = int(keep.sum())
+    clipped["unpruned_spot_index"] = np.flatnonzero(keep)
+    clipped["dataset"] = "clipped"
+    return clipped
 
 
 # Velocity reference frame of the spot data for each galaxy.
@@ -632,6 +668,17 @@ def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
     and the ``dataset`` the spots came from.
     """
     dataset = maser_dataset_of_root(root)
+
+    if dataset == "clipped":
+        data = load_megamaser_spots(
+            join(dirname(normpath(root)), "unpruned"), galaxy,
+            v_sys_obs=v_sys_obs)
+        path = join(root, f"{galaxy}_clipped_spots.csv")
+        n_spots = data["n_spots"]
+        data = _apply_clipped_mask(data, path)
+        fprint(f"applied stabilised clipping mask '{path}': "
+               f"kept {data['n_spots']}/{n_spots} spots.")
+        return data
 
     if dataset == "fiducial" and galaxy in _P20_GALAXIES:
         data = _load_p20_table(root, galaxy, v_sys_obs=v_sys_obs)

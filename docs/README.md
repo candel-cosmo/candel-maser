@@ -40,7 +40,7 @@ the other entry points below are either thin sweep wrappers or diagnostics.
 | File or directory | Use |
 |---|---|
 | `config_maser.toml` | Authoritative sampler, optimiser, prior, grid, and default-dataset settings. |
-| `init_fiducial.toml`, `init_original_published.toml`, `init_unpruned.toml` | Dataset-specific MAP initial points, per-spot radii, and warp pivots. |
+| `init_fiducial.toml`, `init_original_published.toml`, `init_unpruned.toml`, `init_clipped.toml` | Dataset-specific MAP initial points, per-spot radii, and warp pivots; the mask-dependent clipped file starts empty. |
 | `maser_config.py`, `joint_H0_helpers.py` | Shared support modules; they are imported, not run directly. |
 | `convergence/` | Independent phi/radius convergence and gradient diagnostics. Use the matching `.sh` wrapper for cluster submission. |
 | `check_reid/` | Reid `fit_disk` preparation, profiling, MCMC, Gibbs comparisons, and their specialist submit wrappers. |
@@ -267,11 +267,26 @@ MCMC jobs also write `*_log_density.png` beside the HDF5 and corner plots.
 After a DE MAP run, `run_de_map.py` writes
 `<checkpoint>_posterior_outliers.csv` and `.png`. At the MAP globals it
 integrates over each spot's existing deterministic conditional `(r_ang, phi)`
-grids and reports the posterior probability that at least one measured,
-floor-inflated coordinate residual in x, y, velocity or acceleration exceeds
-3 sigma. The CSV also reports coordinate-wise probabilities and marks
-`P >= 0.95` as a diagnostic flag. No latent sampling is used, and MCMC does
-not run this diagnostic.
+grids and reports the posterior mean of the largest measured, floor-inflated
+absolute coordinate residual in x, y or velocity. The CSV also
+reports the coordinate-wise posterior mean absolute residuals and marks a mean
+maximum residual of at least 3 sigma as a diagnostic flag. Acceleration enters
+neither the statistic nor the conditional latent weights. The plot marks
+Pesce-clipped spots for the `unpruned` dataset. No latent sampling is used, and
+MCMC does not run this diagnostic.
+Pass `--dataset unpruned --iterative-clip-sigma` to turn the same
+diagnostic into a cumulative fit-and-clip loop. The first DE uses every
+unpruned spot; each later attempt starts a fresh DE after removing spots at or
+above the threshold. The threshold defaults to 2.5 sigma and accepts an
+explicit value after the flag. The loop stops when no new spot is flagged or
+after `--clip-max-attempts` fits (default 5). Attempt-specific checkpoints and
+the final `clipped_spots.csv` manifest are saved below
+`results/Megamaser/unpruned/de_checkpoints/<galaxy>/iterative_clip/`; the mask
+records whether the loop stabilised. Only a stabilised mask is copied to
+`data/Megamaser/clipped/<galaxy>_clipped_spots.csv`; flags first found on the
+last allowed fit are marked `pending_clip` and are not treated as fitted
+clips. The `clipped` dataset applies these masks to `unpruned` without copying
+or modifying the source tables.
 Pass `--compare-reid` to additionally print the slow compact
 Pesce/Reid-reported/config/MCMC-median comparison table scored with the same
 2D marginal disk likelihood used by the DE objective; per-spot
@@ -286,7 +301,7 @@ The main config is `config_maser.toml`.
 
 ### Datasets
 
-Three spot-table datasets coexist and are selected end to end with `--dataset`,
+Four spot-table datasets coexist and are selected end to end with `--dataset`,
 accepted by `submit.sh` and by every runner (`run_maser.py`, `run_de_map.py`,
 `run_map.py`, `run_joint_H0.py`, `evidence_single_galaxy.py`, the convergence
 scripts and `check_reid/prepare_reid_data.py`):
@@ -295,17 +310,19 @@ scripts and `check_reid/prepare_reid_data.py`):
 |---|---|
 | `original_published` | the complete literature tables, including NGC5765b's 20 systemic rows without measured accelerations |
 | `fiducial` | the tables Pesce et al. (2020) actually fitted, released with their erratum — **the default** |
-| `unpruned` | published astrometry, fiducial accelerations where available, plus 19 Kuo et al. (2011) NGC6323 spots |
+| `unpruned` | published rows restored for clipping tests; UGC3789 prefers complete fiducial rows where matched, and NGC6323 is identical to `fiducial` |
+| `clipped` | the `unpruned` tables filtered by each galaxy's stabilised iterative-DE mask |
 
 They differ for NGC5765b, NGC6264, NGC6323 and UGC3789 (spots removed in MCP
 vetting, NGC6323 augmented, NGC6264 acceleration uncertainties replaced).
-CGCG074-064 and NGC4258 are byte-identical in all three. Full provenance is in
+CGCG074-064 and NGC4258 are byte-identical in all three source datasets. Full provenance is in
 `docs/notes/megamaser_p20_clipping_audit.md`.
 
 Build the clipping-test input with
 `venv_candel/bin/python scripts/megamaser/build_unpruned_dataset.py`. The unpruned
-dataset intentionally starts without MAP blocks: run a fresh linear-warp DE
-search before config-started MCMC or quadratic-warp DE.
+tables with restored spots need dataset-specific MAP blocks and `r_ang` arrays.
+NGC6323 can instead reuse its fiducial initialisation because its unpruned table
+has the same values and row order.
 
 All inputs and outputs are namespaced by dataset so nothing can be mixed
 silently:

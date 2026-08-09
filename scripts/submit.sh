@@ -46,6 +46,7 @@ VARIANT_ARGS=()       # --add-ecc/--add-quadratic-warp: valid for single + joint
 MCMC_JOINT_ARGS=()
 MCMC_ARGS=()
 DE_ARGS=()
+ITERATIVE_CLIP=false
 JOINT_ARGS=()
 PASSTHRU_ARGS=()
 SUBMIT_GALS="CGCG074-064 NGC5765b NGC6264 NGC6323 UGC3789"
@@ -69,7 +70,7 @@ Required:
                          (glamdring CPU: redwood|berg|cmb;
                          glamdring GPU: gpulong|cmbgpu|optgpu;
                          arc: short|medium|long).
-  --dataset original_published|fiducial|unpruned
+  --dataset original_published|fiducial|unpruned|clipped
                          Spot-table dataset. Default: [io].dataset from
                          config_maser.toml (currently fiducial). Selects the tables,
                          the init_<dataset>.toml best points, and the
@@ -184,6 +185,11 @@ DE optimiser options passed to run_maser.py --sampler de:
   --peak-candidates-per-wave 1|2|4|8
                          Concurrent candidates per GPU for peak-partition.
                          Default: 8; try 2 or 4 when calibrating throughput.
+  --iterative-clip-sigma [SIGMA]
+                         On the unpruned dataset, rerun DE and cumulatively
+                         remove MAP x/y/velocity residual outliers. SIGMA
+                         defaults to 2.5; writes the canonical clipped mask.
+  --clip-max-attempts N  Maximum DE fits in the clipping loop (default: 5).
 Cluster options:
   MCMC jobs submit as CPU-only jobs. DE and --evidence request GPU.
   Joint H0 follows the selected node/queue: GPU queues request GPU; CPU queues
@@ -217,7 +223,7 @@ Retries:
   --max-retries N       Launch this submit command through the detached
                          retry watcher.
   --poll S              Retry watcher poll interval in seconds (default: 120).
-  DE marker:   "MAP init"
+  DE marker:   "MAP init" ("iterative clipping complete" for clipping loops)
   MCMC marker: "saved samples to"
   Example:
     $0 -q cmbgpu --galaxy all --sampler de --max-retries 4
@@ -382,6 +388,15 @@ while [[ $# -gt 0 ]]; do
         --peak-candidates-per-wave)
             PEAK_CANDIDATES_PER_WAVE="$2"
             DE_ARGS+=("$1" "$2"); shift 2 ;;
+        --iterative-clip-sigma)
+            ITERATIVE_CLIP=true
+            if [[ $# -gt 1 && "$2" != -* ]]; then
+                DE_ARGS+=("$1" "$2"); shift 2
+            else
+                DE_ARGS+=("$1" "2.5"); shift
+            fi ;;
+        --clip-max-attempts)
+            DE_ARGS+=("$1" "$2"); shift 2 ;;
         --add-ecc|--add-quadratic-warp)
             case "$1" in
                 --add-ecc) ADD_ECC=true ;;
@@ -439,12 +454,18 @@ if [[ -z "$GALAXY" ]]; then
 fi
 [[ -z "$DATASET" ]] && DATASET="$(config_value io dataset)"
 [[ -z "$DATASET" ]] && DATASET="fiducial"
-if [[ "$DATASET" != "original_published" && "$DATASET" != "fiducial" && "$DATASET" != "unpruned" ]]; then
-    echo "[ERROR] --dataset must be original_published, fiducial, or unpruned"
+if [[ "$DATASET" != "original_published" && "$DATASET" != "fiducial" && "$DATASET" != "unpruned" && "$DATASET" != "clipped" ]]; then
+    echo "[ERROR] --dataset must be original_published, fiducial, unpruned, or clipped"
     exit 1
 fi
 if [[ "$SAMPLER" != "mcmc" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler must be mcmc or de"; exit 1
+fi
+if [[ "$ITERATIVE_CLIP" == true && "$SAMPLER" != "de" ]]; then
+    echo "[ERROR] --iterative-clip-sigma requires --sampler de"; exit 1
+fi
+if [[ "$ITERATIVE_CLIP" == true && "$DATASET" != "unpruned" ]]; then
+    echo "[ERROR] --iterative-clip-sigma requires --dataset unpruned"; exit 1
 fi
 if [[ -n "$PHI_INTEGRATION" && "$PHI_INTEGRATION" != "fixed-grid" \
       && "$PHI_INTEGRATION" != "peak-partition" ]]; then
@@ -573,6 +594,7 @@ fi
 if [[ -n "$MAX_RETRIES" && -z "${CANDEL_WATCH_ACTIVE:-}" ]]; then
     marker="saved samples to"
     [[ "$SAMPLER" != "mcmc" ]] && marker="MAP init"
+    [[ "$ITERATIVE_CLIP" == true ]] && marker="iterative clipping complete"
     [[ "$JOINT_H0_MODE" == true ]] && marker="saved samples to"
     watcher=("$ROOT/scripts/megamaser/watch_and_resubmit.sh"
              --marker "$marker" --max-retries "$MAX_RETRIES")

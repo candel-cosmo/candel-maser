@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """Build the unpruned megamaser spot-table dataset.
 
-The published tables define the spot list and astrometry. Fiducial
-accelerations replace published values for velocity-matched spots, and the 19
-NGC6323 spots added by P20 take their astrometry from Kuo et al. (2011).
+The published tables define the spot list and astrometry, and fiducial
+accelerations replace published values for velocity-matched spots. UGC3789
+also takes matched astrometry from the fiducial table. NGC6323 is copied from
+the fiducial table because no NGC6323 spots were clipped by P20.
 """
 import csv
 import shutil
@@ -36,6 +37,18 @@ def _rows(galaxy):
     if len(fid_index) != fiducial["n_spots"]:
         raise ValueError(f"{galaxy}: duplicate velocity in fiducial table")
 
+    if galaxy == "NGC6323":
+        rows = []
+        for i in range(fiducial["n_spots"]):
+            row = {key: fiducial[key][i] for key in
+                   ("velocity", "x", "sigma_x", "y", "sigma_y", "a",
+                    "sigma_a", "accel_measured")}
+            row.update(astrometry_source="fiducial",
+                       acceleration_source="fiducial",
+                       clipped_by_pesce=False)
+            rows.append(row)
+        return rows
+
     rows = []
     for i, velocity in enumerate(published["velocity"]):
         row = {key: published[key][i] for key in
@@ -43,55 +56,22 @@ def _rows(galaxy):
                 "sigma_a", "accel_measured")}
         if velocity in fid_index:
             j = fid_index[velocity]
+            if galaxy == "UGC3789":
+                for key in ("x", "sigma_x", "y", "sigma_y"):
+                    row[key] = fiducial[key][j]
             for key in ("a", "sigma_a", "accel_measured"):
                 row[key] = fiducial[key][j]
             row["acceleration_source"] = "fiducial"
         else:
             row["acceleration_source"] = "original_published"
-        row["astrometry_source"] = "original_published"
+        row["astrometry_source"] = (
+            "fiducial" if galaxy == "UGC3789" and velocity in fid_index
+            else "original_published")
         row["clipped_by_pesce"] = velocity not in fid_index
         rows.append(row)
 
-    if galaxy == "NGC6323":
-        published_velocities = set(published["velocity"])
-        kuo = _load_kuo2011_ngc6323()
-        for j, velocity in enumerate(fiducial["velocity"]):
-            if velocity in published_velocities:
-                continue
-            if velocity not in kuo:
-                raise ValueError(
-                    f"NGC6323: fiducial-only velocity {velocity} is absent "
-                    "from Kuo et al. (2011) Table 3")
-            row = dict(kuo[velocity])
-            for key in ("a", "sigma_a", "accel_measured"):
-                row[key] = fiducial[key][j]
-            row["astrometry_source"] = "Kuo2011_table3"
-            row["acceleration_source"] = "fiducial"
-            row["clipped_by_pesce"] = False
-            rows.append(row)
-
     if len({row["velocity"] for row in rows}) != len(rows):
         raise ValueError(f"{galaxy}: duplicate velocity in unpruned table")
-    return rows
-
-
-def _load_kuo2011_ngc6323():
-    path = (Path(maser_data_root("original_published")).parent /
-            "Kuo2011_MCP_III_table3.dat")
-    rows = {}
-    with path.open() as f:
-        for line in f:
-            if not line.startswith("NGC 6323"):
-                continue
-            _, _, velocity, x, sigma_x, y, sigma_y, *_ = line.split()
-            velocity = float(velocity)
-            rows[velocity] = {
-                "velocity": velocity,
-                "x": 1000.0 * float(x),
-                "sigma_x": 1000.0 * float(sigma_x),
-                "y": 1000.0 * float(y),
-                "sigma_y": 1000.0 * float(sigma_y),
-            }
     return rows
 
 
@@ -165,18 +145,19 @@ def main():
     with (output_root / "README.md").open("w") as f:
         f.write(
             "# Unpruned megamaser dataset\n\n"
-            "This dataset preserves every `original_published` spot and its "
-            "published astrometry. For velocity-matched rows, acceleration, "
+            "This dataset preserves every `original_published` spot. By "
+            "default it keeps published astrometry. For velocity-matched "
+            "rows, acceleration, "
             "acceleration uncertainty, and measurement status come from the "
             "fiducial table. Published accelerations are retained when a spot "
-            "was pruned from the fiducial table.\n\n"
-            "NGC6323 additionally contains the 19 fiducial-only spots "
-            "identified in the MCP response. Their astrometry is taken "
-            "directly from Kuo et al. (2011), Table 3, while their acceleration "
-            "fields come from the fiducial table. No other Kuo et al. (2011) "
-            "spots are added. `provenance.csv` records the source used for "
-            "every row and whether its published velocity was absent from "
-            "the Pesce fiducial table (`clipped_by_pesce`).\n\n"
+            "was pruned from the fiducial table. UGC3789 also uses fiducial "
+            "astrometry for matched rows, while retaining the three published "
+            "rows absent from the fiducial table. NGC6323 is the exception: "
+            "because P20 clipped none of its spots, its unpruned table is an "
+            "exact, row-order-preserving copy of the 87-spot fiducial table.\n\n"
+            "`provenance.csv` records the source used for every row and "
+            "whether its published velocity was absent from the Pesce "
+            "fiducial table (`clipped_by_pesce`).\n\n"
             "Spot counts: " + ", ".join(
                 f"{galaxy}={count}" for galaxy, count in counts.items()) +
             ".\n")
