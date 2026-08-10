@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare linear-warp distance posteriors between the two spot datasets.
+"""Compare four linear-warp CANDEL datasets with Dom's archived P20 posteriors.
 
 Reads the config-initialised, non-eccentric, non-quadratic MCMC chain for each
 of the five MCP H0 galaxies and writes one five-panel PDF.
@@ -28,12 +28,22 @@ GALAXY_LABELS = {
     "NGC6323": "NGC 6323",
     "UGC3789": "UGC 3789",
 }
-DATASETS = ("original_published", "fiducial")
+DATASETS = ("original_published", "fiducial", "unpruned", "clipped")
 DATASET_LABELS = {
     "original_published": "Original published",
     "fiducial": "Fiducial",
+    "unpruned": "Unpruned",
+    "clipped": "Clipped",
 }
-COLORS = {"original_published": "C0", "fiducial": "C3"}
+COLORS = {
+    "original_published": "#0077BB",
+    "fiducial": "#EE7733",
+    "unpruned": "#00A650",
+    "clipped": "#EE3377",
+}
+DOM_ROOT = ROOT / "data" / "Megamaser" / "external" / "Dom_data"
+DOM_LABEL = "P20 (Dom)"
+DOM_COLOR = "#111111"
 
 
 def _chain_path(results_root, dataset, galaxy):
@@ -58,6 +68,16 @@ def _load_distance(path, dataset):
     return samples
 
 
+def _load_dom_distance(galaxy):
+    path = DOM_ROOT / f"D_archivedP20_{galaxy}.txt"
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing Dom posterior: {path}")
+    samples = np.asarray(np.loadtxt(path), dtype=float).ravel()
+    if samples.size < 2 or not np.all(np.isfinite(samples)):
+        raise ValueError(f"Invalid D_A samples in {path}")
+    return samples
+
+
 def _interval(samples):
     q16, q50, q84 = np.percentile(samples, [16, 50, 84])
     return q16, q50, q84
@@ -67,8 +87,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--results-root", default=ROOT / "results" / "Megamaser",
-        help="Directory containing the original_published/ and fiducial/ "
-             "result namespaces.")
+        help="Directory containing the four dataset result namespaces.")
     parser.add_argument(
         "--output",
         default=ROOT / "output" / "pdf" /
@@ -82,6 +101,8 @@ def main(argv=None):
             _chain_path(results_root, dataset, galaxy), dataset)
         for galaxy in GALAXIES for dataset in DATASETS
     }
+    dom_chains = {galaxy: _load_dom_distance(galaxy)
+                  for galaxy in GALAXIES}
 
     print(f"{'Galaxy':14} {'Dataset':19} {'D_A [Mpc] (16, 50, 84%)':>31}")
     for galaxy in GALAXIES:
@@ -89,6 +110,9 @@ def main(argv=None):
             q16, q50, q84 = _interval(chains[dataset, galaxy])
             print(f"{GALAXY_LABELS[galaxy]:14} {dataset:19} "
                   f"{q50:7.2f}  -{q50 - q16:6.2f}  +{q84 - q50:6.2f}")
+        q16, q50, q84 = _interval(dom_chains[galaxy])
+        print(f"{GALAXY_LABELS[galaxy]:14} {DOM_LABEL:19} "
+              f"{q50:7.2f}  -{q50 - q16:6.2f}  +{q84 - q50:6.2f}")
 
     import matplotlib.pyplot as plt
     import scienceplots  # noqa: F401  (registers the science style)
@@ -98,6 +122,7 @@ def main(argv=None):
         for i, (ax, galaxy) in enumerate(zip(axes, GALAXIES)):
             limits = [np.percentile(chains[dataset, galaxy], [0.1, 99.9])
                       for dataset in DATASETS]
+            limits.append(np.percentile(dom_chains[galaxy], [0.1, 99.9]))
             lo = min(x[0] for x in limits)
             hi = max(x[1] for x in limits)
             pad = 0.04 * (hi - lo)
@@ -111,6 +136,12 @@ def main(argv=None):
                         lw=1.3, label=label)
                 ax.axvline(np.median(samples), color=color, lw=0.8, ls="--")
 
+            samples = dom_chains[galaxy]
+            ax.plot(grid, gaussian_kde(samples)(grid), color=DOM_COLOR,
+                    lw=1.8, label=DOM_LABEL if i == 0 else None, zorder=5)
+            ax.axvline(np.median(samples), color=DOM_COLOR, lw=1.0,
+                       ls="--", zorder=5)
+
             ax.text(0.96, 0.95, GALAXY_LABELS[galaxy], transform=ax.transAxes,
                     ha="right", va="top", fontsize=8)
             ax.set_xlabel(r"$D_\mathrm{A}\ [\mathrm{Mpc}]$")
@@ -120,7 +151,7 @@ def main(argv=None):
         axes[0].set_ylabel("Posterior density")
 
         handles, labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc="upper center", ncol=2,
+        fig.legend(handles, labels, loc="upper center", ncol=5,
                    frameon=False, bbox_to_anchor=(0.5, 1.01))
         fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90), w_pad=0.6)
         output.parent.mkdir(parents=True, exist_ok=True)

@@ -15,7 +15,7 @@ the other entry points below are either thin sweep wrappers or diagnostics.
 | `run_joint_H0.py` | Runs the stage-2 joint-H0 model from saved per-galaxy `D_A` chains. |
 | `submit.sh` | Standard local/cluster front end for MCMC, DE, joint H0 (`--infer-H0`), and the post-MCMC marginal-objective diagnostic (`--evidence`). |
 | `submit_sweep.sh` | Submits the standard linear/quadratic-warp by config/Reid-init MCMC sweep over the five MCP H0 galaxies. |
-| `submit_sweep_H0.sh` | Submits the joint-H0 selection, reconstruction, and warp grid; it also provides the general leave-one-out mode. |
+| `submit_sweep_H0.sh` | Submits the eight joint-H0 selection, velocity-field, and distance-prior combinations; it also provides the general leave-one-out mode. |
 | `submit_loo_H0.sh` | Preset leave-one-out wrapper using redshift selection and ManticoreLocalCOLA. |
 | `watch_and_resubmit.sh` | Watches submitted jobs for a completion marker and retries incomplete jobs; DE retries use `--resume`. `submit.sh --max-retries N` is the usual shortcut. |
 
@@ -30,7 +30,7 @@ the other entry points below are either thin sweep wrappers or diagnostics.
 | `chi2_evidence_table.py` | Builds the paper comparison table from posterior-median profile chi-squared values and saved comparison logs. |
 | `dm2lnL_pesce.py` | Repeats that comparison with the Gaussian normalisation retained in `-2 ln L`. |
 | `warp_model_comparison.py` | Compares linear and quadratic warps using existing chains, profile chi-squared, and the nested Savage-Dickey test. |
-| `plot_dataset_distances.py` | Overlays the linear-warp `D_A` posteriors from the original-published and fiducial spot tables in one five-panel PDF. |
+| `plot_dataset_distances.py` | Overlays the linear-warp `D_A` posteriors from all four spot-table datasets and Dom's archived P20 posteriors in one five-panel PDF. |
 | `plot_fiducial_warp_distances.py` | Overlays the fiducial linear- and quadratic-warp `D_A` posteriors in one five-panel PDF. |
 | `plot_rphi_bimodality.py` | Produces per-spot `(r_ang, phi)` likelihood maps for the NGC5765b bimodality figure. |
 | `extract_vext_prior.py` | Fits a static Gaussian `Vext` prior from external reconstruction chains and prints a TOML block. |
@@ -78,7 +78,8 @@ for all flags. The standard sweep wrappers can also be inspected safely:
 
 ```bash
 bash scripts/megamaser/submit_sweep.sh -q cmb --dry
-bash scripts/megamaser/submit_sweep_H0.sh -q cmbgpu --dry
+bash scripts/megamaser/submit_sweep_H0.sh --local \
+    --dataset original_published,fiducial,unpruned,clipped --dry
 bash scripts/megamaser/submit_loo_H0.sh -q cmbgpu --dry
 ```
 
@@ -283,10 +284,12 @@ after `--clip-max-attempts` fits (default 5). Attempt-specific checkpoints and
 the final `clipped_spots.csv` manifest are saved below
 `results/Megamaser/unpruned/de_checkpoints/<galaxy>/iterative_clip/`; the mask
 records whether the loop stabilised. Only a stabilised mask is copied to
-`data/Megamaser/clipped/<galaxy>_clipped_spots.csv`; flags first found on the
-last allowed fit are marked `pending_clip` and are not treated as fitted
-clips. The `clipped` dataset applies these masks to `unpruned` without copying
-or modifying the source tables.
+`data/Megamaser/clipped/`, using `<galaxy>_clipped_spots.csv` for the linear
+model and `_ecc`, `_qw`, or `_ecc_qw` before `.csv` for expanded models. The
+`clipped` dataset prefers a matching model-variant mask when present and
+otherwise falls back to the linear mask. Flags first found on the last allowed
+fit are marked `pending_clip` and are not treated as fitted clips. The masks
+filter `unpruned` without copying or modifying the source tables.
 Pass `--compare-reid` to additionally print the slow compact
 Pesce/Reid-reported/config/MCMC-median comparison table scored with the same
 2D marginal disk likelihood used by the DE objective; per-spot
@@ -311,7 +314,7 @@ scripts and `check_reid/prepare_reid_data.py`):
 | `original_published` | the complete literature tables, including NGC5765b's 20 systemic rows without measured accelerations |
 | `fiducial` | the tables Pesce et al. (2020) actually fitted, released with their erratum — **the default** |
 | `unpruned` | published rows restored for clipping tests; UGC3789 prefers complete fiducial rows where matched, and NGC6323 is identical to `fiducial` |
-| `clipped` | the `unpruned` tables filtered by each galaxy's stabilised iterative-DE mask |
+| `clipped` | the `unpruned` tables filtered by the matching stabilised iterative-DE model-variant mask, falling back to the linear mask |
 
 They differ for NGC5765b, NGC6264, NGC6323 and UGC3789 (spots removed in MCP
 vetting, NGC6323 augmented, NGC6264 acceleration uncertainties replaced).
@@ -329,7 +332,8 @@ silently:
 
 ```
 data/Megamaser/<dataset>/       spot tables (+ generated *_loader_reid.inp)
-results/Megamaser/<dataset>/    chains, DE checkpoints, joint-H0 outputs
+results/Megamaser/<dataset>/    per-galaxy chains and DE checkpoints
+results/Megamaser/<dataset>/H0/ joint-H0 chains, plots, and scheduler logs
 ```
 
 `data/` is intentionally ignored by Git. Provision the selected spot-table

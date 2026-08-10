@@ -140,7 +140,10 @@ def _build_target(galaxy, master_cfg, data_root, attrs, *, grid_scale, dtype,
                 if k in d:
                     d[k] = int(round(int(d[k]) * grid_scale))
 
-    data = load_megamaser_spots(data_root, galaxy, v_sys_obs=gblk["v_sys_obs"])
+    data = load_megamaser_spots(
+        data_root, galaxy, v_sys_obs=gblk["v_sys_obs"],
+        use_ecc=gblk.get("use_ecc", False),
+        use_quadratic_warp=gblk.get("use_quadratic_warp", False))
     if "D_lo" in gblk and "D_hi" in gblk:
         data["D_lo"] = float(gblk["D_lo"])
         data["D_hi"] = float(gblk["D_hi"])

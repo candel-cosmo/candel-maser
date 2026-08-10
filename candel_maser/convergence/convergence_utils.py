@@ -309,7 +309,11 @@ def build_model(galaxy, master_cfg, dtype=None, **overrides):
 
     data = load_megamaser_spots(
         maser_data_root(master_cfg["io"]["dataset"]), galaxy=galaxy,
-        v_sys_obs=master_cfg["model"]["galaxies"][galaxy]["v_sys_obs"])
+        v_sys_obs=master_cfg["model"]["galaxies"][galaxy]["v_sys_obs"],
+        use_ecc=gblk.get("use_ecc", cfg["model"].get("use_ecc", False)),
+        use_quadratic_warp=gblk.get(
+            "use_quadratic_warp",
+            cfg["model"].get("use_quadratic_warp", False)))
     for key in ("D_lo", "D_hi"):
         if key in master_cfg["model"]["galaxies"][galaxy]:
             data[key] = float(master_cfg["model"]["galaxies"][galaxy][key])

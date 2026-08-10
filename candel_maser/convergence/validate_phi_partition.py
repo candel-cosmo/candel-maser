@@ -574,7 +574,8 @@ def _build_case(galaxy, variant, args, seed):
             "phi_integration", "fixed-grid"))
     data = de.load_megamaser_spots(
         de.maser_data_root(master["io"]["dataset"]), galaxy,
-        v_sys_obs=gcfg["v_sys_obs"])
+        v_sys_obs=gcfg["v_sys_obs"], use_ecc=VARIANTS[variant][0],
+        use_quadratic_warp=VARIANTS[variant][1])
     distance_bounds = de._distance_bounds(gcfg)
     if distance_bounds is not None:
         data["D_lo"], data["D_hi"] = distance_bounds[:2]

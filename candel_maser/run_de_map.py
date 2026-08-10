@@ -106,7 +106,7 @@ from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
 from candel.pvdata.megamaser_data import (  # noqa: E402
-    load_megamaser_spots, maser_data_root)
+    clipped_mask_path, load_megamaser_spots, maser_data_root)
 from candel.util import (fprint, fsection, get_nested,  # noqa: E402
                          results_path)
 from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
@@ -1618,15 +1618,23 @@ def _run_iterative_clipping(args, argv):
         env[_CLIP_ATTEMPT_ENV] = str(attempt)
         env[_CLIP_INDICES_ENV] = json.dumps(sorted(clipped))
         env[_CLIP_TAG_ENV] = tag
-        subprocess.run(
-            [sys.executable, os.path.abspath(__file__), *argv],
-            check=True, env=env)
-
         attempt_dir = os.path.join(root, f"attempt_{attempt:02d}")
-        tables = [
-            os.path.join(attempt_dir, name)
-            for name in os.listdir(attempt_dir)
-            if name.endswith("_posterior_outliers.csv")]
+        tables = []
+        if args.resume and os.path.isdir(attempt_dir):
+            tables = [
+                os.path.join(attempt_dir, name)
+                for name in os.listdir(attempt_dir)
+                if name.endswith("_posterior_outliers.csv")]
+        if len(tables) == 1:
+            fprint(f"--resume: reusing completed clipping attempt {attempt}")
+        else:
+            subprocess.run(
+                [sys.executable, os.path.abspath(__file__), *argv],
+                check=True, env=env)
+            tables = [
+                os.path.join(attempt_dir, name)
+                for name in os.listdir(attempt_dir)
+                if name.endswith("_posterior_outliers.csv")]
         if len(tables) != 1:
             raise RuntimeError(
                 f"Expected one outlier table in {attempt_dir}, found "
@@ -1657,13 +1665,42 @@ def _run_iterative_clipping(args, argv):
     if stabilised:
         canonical_dir = maser_data_root("clipped")
         os.makedirs(canonical_dir, exist_ok=True)
-        canonical = os.path.join(
-            canonical_dir, f"{args.galaxy}_clipped_spots.csv")
+        gcfg = _MASTER_CFG["model"]["galaxies"][args.galaxy]
+        use_ecc = args.add_ecc or (
+            gcfg.get("use_ecc", False) and not args.no_ecc)
+        use_qw = args.add_quadratic_warp or (
+            gcfg.get("use_quadratic_warp", False)
+            and not args.no_quadratic_warp)
+        canonical = clipped_mask_path(
+            canonical_dir, args.galaxy, use_ecc=use_ecc,
+            use_quadratic_warp=use_qw)
         tmp = canonical + ".tmp"
         with open(manifest, "rb") as source, open(tmp, "wb") as target:
             target.write(source.read())
         os.replace(tmp, canonical)
         fprint(f"updated clipped dataset mask at {canonical}")
+    fsection("Iterative clipping summary")
+    fprint(
+        f"removed={len(clipped)}/{data['n_spots']}, "
+        f"retained={data['n_spots'] - len(clipped)}/{data['n_spots']}, "
+        f"pending={len(pending)}, threshold={sigma:g} sigma, "
+        f"stabilised={stabilised}")
+    if clipped:
+        fprint("removed spots:")
+        for index in sorted(clipped):
+            fprint(
+                f"  unpruned spot {index + 1}: "
+                f"v={float(data['velocity'][index]):g} km/s, "
+                f"posterior mean max |z|={scores[index]:.3f}, "
+                f"attempt={clipped_at[index]}")
+    if pending:
+        fprint("pending flags (not removed):")
+        for index in sorted(pending):
+            fprint(
+                f"  unpruned spot {index + 1}: "
+                f"v={float(data['velocity'][index]):g} km/s, "
+                f"posterior mean max |z|={scores[index]:.3f}, "
+                f"attempt={args.clip_max_attempts}")
     fprint(f"{_CLIP_COMPLETE_MARKER}: stabilised={stabilised}")
     return manifest
 
@@ -2578,9 +2615,15 @@ def main(argv=None):
                    f"over {n_dev} same-node GPU(s).")
 
     fsection(f"Loading {args.galaxy} data")
+    use_ecc = args.add_ecc or (
+        gcfg.get("use_ecc", False) and not args.no_ecc)
+    use_qw = args.add_quadratic_warp or (
+        gcfg.get("use_quadratic_warp", False)
+        and not args.no_quadratic_warp)
     data = load_megamaser_spots(
         maser_data_root(dataset), args.galaxy,
-        v_sys_obs=gcfg["v_sys_obs"])
+        v_sys_obs=gcfg["v_sys_obs"], use_ecc=use_ecc,
+        use_quadratic_warp=use_qw)
     if dataset == "unpruned":
         data["clipped_by_pesce"] = _load_pesce_clipped_mask(
             maser_data_root(dataset), args.galaxy, data)

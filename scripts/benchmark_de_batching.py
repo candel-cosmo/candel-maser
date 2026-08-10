@@ -209,7 +209,9 @@ def _build_target(de, galaxy, spot_batch, seed, phi_integration=None):
     gcfg = galaxies[galaxy]
     data = de.load_megamaser_spots(
         de.maser_data_root(master["io"]["dataset"]), galaxy,
-        v_sys_obs=gcfg["v_sys_obs"])
+        v_sys_obs=gcfg["v_sys_obs"],
+        use_ecc=gcfg.get("use_ecc", False),
+        use_quadratic_warp=gcfg.get("use_quadratic_warp", False))
     distance_bounds = de._distance_bounds(gcfg)
     if distance_bounds is not None:
         data["D_lo"], data["D_hi"] = distance_bounds[:2]

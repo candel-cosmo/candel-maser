@@ -548,11 +548,13 @@ The `unpruned` dataset builder, MAP-conditional posterior-mean sigma
 diagnostic, and cumulative iterative DE fit-and-clip loop are implemented.
 The loop is launched with `--dataset unpruned --iterative-clip-sigma`, using
 2.5 sigma by default, and stops on an unchanged mask or a maximum attempt
-count. A stabilised mask is installed for the `clipped` dataset, which filters
-the unpruned rows without modifying source tables; last-attempt flags from an
-unstabilised run remain explicitly pending. The mixture
-likelihood was tested and removed; calibration of the clipping threshold and a
-reinstating variant remain proposals. The numbers above are reproducible from
+count. A stabilised mask is installed for the `clipped` dataset under the
+linear, eccentric, quadratic-warp, or combined model variant. A clipped run
+prefers its matching mask when available and otherwise uses the linear mask;
+all variants filter the unpruned rows without modifying source tables.
+Last-attempt flags from an unstabilised run remain explicitly pending. The
+mixture likelihood was tested and removed; calibration of the clipping
+threshold and a reinstating variant remain proposals. The numbers above are reproducible from
 `load_megamaser_spots` on the datasets plus
 `candel.model.maser_map.evaluate_at_globals` at the DE MAP points in
 `scripts/megamaser/init_original_published.toml`.

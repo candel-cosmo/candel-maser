@@ -1,14 +1,8 @@
 #!/bin/bash -l
-# Submit the joint-H0 megamaser sweep: the GALAXIES set analysed jointly with a
-# shared H0, over
-#   selection     : none, distance, redshift   (--selection)
-#   reconstruction: none, Carrick2015, ManticoreLocalCOLA  (--reconstruction)
-#   quad. warp    : off, on                     (--add-quadratic-warp)
-# Every job uses the r^2 (uniform-in-volume) distance prior: selection!=none gets
-# it automatically, and selection=none is forced to it via --distance-prior volume.
-# Thin wrapper around submit.sh --infer-H0: each variant is
-# ONE joint NUTS chain over the GALAXIES list, so the default 3x3x2 grid is 18
-# submit.sh calls.
+# Submit the eight joint-H0 measurements: distance/redshift selection with no
+# velocity field, Carrick, or Manticore (six), plus no-selection baselines with
+# uniform-in-volume and uniform-in-distance priors (two). Each variant is one
+# joint NUTS chain over GALAXIES, routed through submit.sh --infer-H0.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +28,7 @@ NUM_WARMUP="3000"
 NUM_SAMPLES="15000"
 NUM_CHAINS="1"
 MAX_TREE_DEPTH=""
+DATASETS=""
 DRY=false
 YES=false
 EXTRA=()
@@ -46,18 +41,17 @@ usage() {
     cat <<EOF
 Usage: $0 (--local | -q QUEUE) [--galaxy GAL,GAL,...|all] [--cpus N] [--mem GB] \\
           [--gpu-mem GB] [--num-warmup N] [--num-samples N] [--num-chains N] \\
-          [--max-tree-depth N] [--reconstruction LIST] [--dry] [-y] \\
+          [--max-tree-depth N] [--dataset NAME[,NAME,...]] [--reconstruction LIST] \\
+          [--dry] [-y] \\
           [-- extra submit.sh args]
 
 Runs the joint-H0 sweep over the GALAXIES set (default: $GALAXIES),
 all galaxies analysed jointly with a shared H0:
 
-  selection      : none, distance, redshift        (--selection)
-  reconstruction : $RECONSTRUCTIONS                (--reconstruction)
-                   non-none variants also add --Vext
-  quad. warp     : off, on                          (--add-quadratic-warp)
+  selected       : distance, redshift x $RECONSTRUCTIONS
+  no selection   : uniform-in-volume, uniform-in-distance (no velocities)
 
-= 3 x N_reconstruction x 2 submit.sh joint-H0 calls, one joint NUTS chain each.
+= 2 x N_reconstruction + 2 submit.sh calls per dataset (eight with the defaults).
 
 With --leave-one-out the grid is replaced by one joint job per dropped galaxy
 and reconstruction at a fixed selection/warp config. The dropped galaxy is
@@ -72,6 +66,7 @@ visible in each output filename.
                      Comma list of reconstruction variants. Choices:
                      none,Carrick2015,ManticoreLocalCOLA. Default: $RECONSTRUCTIONS.
                      Non-none variants automatically sample --Vext.
+                     Manticore uses the configured which_MAS field product.
   --cpus N           Forwarded to submit.sh; glamdring CPU joint uses -n 1xN.
   --mem GB           Forwarded to submit.sh; omit for the backend-aware default.
   --gpu-mem GB       Forwarded to submit.sh (GPU queues only).
@@ -79,8 +74,9 @@ visible in each output filename.
   --num-samples N    Forwarded to submit.sh; omit for the config default.
   --num-chains N     Forwarded to submit.sh; omit for the config default.
   --max-tree-depth N Forwarded to submit.sh (NUTS max tree depth).
+  --dataset LIST     Comma-separated spot-table/distance-chain datasets.
   --leave-one-out    LOO mode: one joint job per dropped galaxy at a single
-                     fixed config, instead of the 3x2 sweep. Needs >=2 galaxies
+                     fixed config, instead of the eight-run sweep. Needs >=2 galaxies
                      (--galaxy all expands to the five MCP galaxies).
   --selection SEL    LOO only: none|distance|redshift for the fixed config
                      (default redshift).
@@ -106,6 +102,7 @@ while [[ $# -gt 0 ]]; do
         --num-samples) NUM_SAMPLES="$2"; shift 2 ;;
         --num-chains) NUM_CHAINS="$2"; shift 2 ;;
         --max-tree-depth) MAX_TREE_DEPTH="$2"; shift 2 ;;
+        --dataset) DATASETS="$2"; shift 2 ;;
         --leave-one-out) LEAVE_ONE_OUT=true; shift ;;
         --selection) SELECTION="$2"; SEL_EXPLICIT=true; shift 2 ;;
         --add-quadratic-warp) ADD_QW=true; shift ;;
@@ -126,7 +123,7 @@ fi
 if [[ "$LEAVE_ONE_OUT" == false
       && ( "$SEL_EXPLICIT" == true || "$ADD_QW" == true ) ]]; then
     echo "[ERROR] --selection/--add-quadratic-warp are only valid with --leave-one-out"
-    echo "        (without it the sweep covers all selections and both warp settings)"
+    echo "        (without it the fixed eight-run configuration is used)"
     exit 1
 fi
 if [[ "$LEAVE_ONE_OUT" == true ]]; then
@@ -144,6 +141,19 @@ for recon in ${RECONSTRUCTIONS//,/ }; do
 done
 if [[ ${#recon_arr[@]} -eq 0 ]]; then
     echo "[ERROR] --reconstruction list is empty"; exit 1
+fi
+dataset_arr=("__default__")
+if [[ -n "$DATASETS" ]]; then
+    if [[ "$DATASETS" == ,* || "$DATASETS" == *, || "$DATASETS" == *,,* ]]; then
+        echo "[ERROR] --dataset contains an empty entry"; exit 1
+    fi
+    IFS=',' read -ra dataset_arr <<< "$DATASETS"
+    for dataset in "${dataset_arr[@]}"; do
+        case "$dataset" in
+            original_published|fiducial|unpruned|clipped) ;;
+            *) echo "[ERROR] --dataset must contain only original_published,fiducial,unpruned,clipped"; exit 1 ;;
+        esac
+    done
 fi
 
 if [[ "$LOCAL" == true ]]; then
@@ -164,7 +174,8 @@ common=("--infer-H0")
 [[ "$DRY" == true ]] && common+=(--dry)
 [[ ${#EXTRA[@]} -gt 0 ]] && common+=("${EXTRA[@]}")
 
-# Build the job list. Each entry is "GALSET<TAB>SELECTION<TAB>RECON<TAB>WARPFLAG".
+# Build the job list. Each entry is
+# DATASET<US>GALSET<US>SELECTION<US>RECON<US>PRIOR<US>WARPFLAG<US>DROPPED.
 jobs=()
 if [[ "$LEAVE_ONE_OUT" == true ]]; then
     base="$GALAXIES"
@@ -176,45 +187,50 @@ if [[ "$LEAVE_ONE_OUT" == true ]]; then
     fi
     warp_flag=""
     [[ "$ADD_QW" == true ]] && warp_flag="--add-quadratic-warp"
-    for recon in "${recon_arr[@]}"; do
-        for ((i = 0; i < n; i++)); do
-            sub=()
-            for ((j = 0; j < n; j++)); do
-                if [[ $j -ne $i ]]; then sub+=("${gal_arr[j]}"); fi
+    for dataset in "${dataset_arr[@]}"; do
+        for recon in "${recon_arr[@]}"; do
+            for ((i = 0; i < n; i++)); do
+                sub=()
+                for ((j = 0; j < n; j++)); do
+                    if [[ $j -ne $i ]]; then sub+=("${gal_arr[j]}"); fi
+                done
+                sub_csv="$(IFS=,; echo "${sub[*]}")"
+                jobs+=("${dataset}"$'\x1f'"${sub_csv}"$'\x1f'"${SELECTION}"$'\x1f'"${recon}"$'\x1f'"volume"$'\x1f'"${warp_flag}"$'\x1f'"${gal_arr[i]}")
             done
-            sub_csv="$(IFS=,; echo "${sub[*]}")"
-            jobs+=("${sub_csv}"$'\x1f'"${SELECTION}"$'\x1f'"${recon}"$'\x1f'"${warp_flag}"$'\x1f'"${gal_arr[i]}")
         done
     done
 else
-    for sel in none distance redshift; do
-        for recon in "${recon_arr[@]}"; do
-            for warp in "" "--add-quadratic-warp"; do
-                jobs+=("${GALAXIES}"$'\x1f'"${sel}"$'\x1f'"${recon}"$'\x1f'"${warp}")
+    for dataset in "${dataset_arr[@]}"; do
+        for sel in distance redshift; do
+            for recon in "${recon_arr[@]}"; do
+                jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"${sel}"$'\x1f'"${recon}"$'\x1f'"volume"$'\x1f')
             done
         done
+        jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"none"$'\x1f'"volume"$'\x1f')
+        jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"none"$'\x1f'"distance"$'\x1f')
     done
 fi
 
 echo "[sweep] target: ${target[*]} | joint H0"
+echo "[sweep] datasets: ${DATASETS:-config default}"
 if [[ "$LEAVE_ONE_OUT" == true ]]; then
     echo "[sweep] mode: leave-one-out (single config per dropped galaxy)"
     echo "[sweep] config: selection=$SELECTION" \
          "warp=$([[ "$ADD_QW" == true ]] && echo on || echo off)" \
          "reconstruction=$RECONSTRUCTIONS"
-    echo "[sweep] jobs: drop-one subsets x ${#recon_arr[@]} reconstruction(s) = ${#jobs[@]} joint jobs"
+    echo "[sweep] jobs: drop-one subsets x ${#recon_arr[@]} reconstruction(s) x ${#dataset_arr[@]} dataset(s) = ${#jobs[@]} joint jobs"
     echo "[sweep] base galaxies: $base"
 else
-    echo "[sweep] jobs: 3 selection x ${#recon_arr[@]} reconstruction(s) x 2 warp = ${#jobs[@]} joint jobs"
+    echo "[sweep] jobs: (2 selections x ${#recon_arr[@]} velocity choices + 2 no-selection priors) x ${#dataset_arr[@]} dataset(s) = ${#jobs[@]} joint jobs"
     echo "[sweep] galaxies (joint): $GALAXIES"
 fi
 echo "[sweep] will run:"
 for spec in "${jobs[@]}"; do
-    IFS=$'\x1f' read -r galset sel recon warp dropped <<< "$spec"
+    IFS=$'\x1f' read -r dataset galset sel recon prior warp dropped <<< "$spec"
     args=("${common[@]}" --galaxy "$galset" --selection "$sel"
-          --reconstruction "$recon")
+          --reconstruction "$recon" --distance-prior "$prior")
+    [[ "$dataset" != "__default__" ]] && args+=(--dataset "$dataset")
     [[ "$recon" != "none" ]] && args+=(--Vext)
-    [[ "$sel" == "none" ]] && args+=(--distance-prior volume)   # always r^2
     [[ -n "$warp" ]] && args+=("$warp")
     [[ -n "$dropped" ]] && args+=(--leave-one-out-dropped "$dropped")
     printf '  bash %q' "$SUBMIT"
@@ -232,15 +248,15 @@ fi
 
 fail=0
 for spec in "${jobs[@]}"; do
-    IFS=$'\x1f' read -r galset sel recon warp dropped <<< "$spec"
+    IFS=$'\x1f' read -r dataset galset sel recon prior warp dropped <<< "$spec"
     args=("${common[@]}" --galaxy "$galset" --selection "$sel"
-          --reconstruction "$recon")
+          --reconstruction "$recon" --distance-prior "$prior")
+    [[ "$dataset" != "__default__" ]] && args+=(--dataset "$dataset")
     [[ "$recon" != "none" ]] && args+=(--Vext)
-    [[ "$sel" == "none" ]] && args+=(--distance-prior volume)   # always r^2
     [[ -n "$warp" ]] && args+=("$warp")
     [[ -n "$dropped" ]] && args+=(--leave-one-out-dropped "$dropped")
     echo
-    echo "[sweep] === galaxy=$galset selection=$sel reconstruction=$recon vext=$([[ "$recon" != "none" ]] && echo on || echo off) warp=${warp:-off} ==="
+    echo "[sweep] === dataset=${dataset/__default__/config-default} galaxy=$galset selection=$sel prior=$prior reconstruction=$recon vext=$([[ "$recon" != "none" ]] && echo on || echo off) warp=${warp:-off} ==="
     if ! bash "$SUBMIT" "${target[@]}" "${args[@]}"; then
         echo "[sweep] WARNING: (galaxy=$galset selection=$sel" \
              "reconstruction=$recon warp=${warp:-off}) failed" >&2

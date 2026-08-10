@@ -409,7 +409,10 @@ def main():
             load_megamaser_spots(
                 maser_data_root(master_cfg["io"]["dataset"]),
                 galaxy=args.galaxy,
-                v_sys_obs=galaxies_cfg[args.galaxy]["v_sys_obs"]),
+                v_sys_obs=galaxies_cfg[args.galaxy]["v_sys_obs"],
+                use_ecc=galaxies_cfg[args.galaxy].get("use_ecc", False),
+                use_quadratic_warp=galaxies_cfg[args.galaxy].get(
+                    "use_quadratic_warp", False)),
             n_total=_N_CHECKB_SPOTS)
         model_B = build_model_from_data(
             args.galaxy, master_cfg, data_sub, **kw)

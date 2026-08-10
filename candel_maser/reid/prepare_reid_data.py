@@ -43,6 +43,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("galaxy")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--add-ecc", action="store_true")
+    ap.add_argument("--add-quadratic-warp", action="store_true")
     add_dataset_arg(ap)
     args = ap.parse_args(argv)
 
@@ -54,7 +56,8 @@ def main(argv=None):
 
     d = load_megamaser_spots(
         maser_data_root(dataset), args.galaxy,
-        v_sys_obs=gcfg["v_sys_obs"])
+        v_sys_obs=gcfg["v_sys_obs"], use_ecc=args.add_ecc,
+        use_quadratic_warp=args.add_quadratic_warp)
 
     v = np.asarray(d["velocity"])
     x = np.asarray(d["x"]) / 1000.0

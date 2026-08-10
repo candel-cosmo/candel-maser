@@ -61,7 +61,7 @@ Usage: $0 (--local | -q QUEUE) --galaxy GAL[,GAL,...]|all \\
 
 Required:
   --local                Run in the current terminal instead of submitting
-                         to a batch backend.  Local runs are also tee'd to
+                         to a batch backend.  Single-galaxy local runs are tee'd to
                          <root_output>/<dataset>/<gal>/logs/
                          <gal>_<sampler><variant>_<stamp>.log
                          (root_output from config_maser.toml [io], e.g.
@@ -92,7 +92,8 @@ Required:
                          per galaxy using KDE distance likelihoods from the
                          saved single-galaxy MCMC chains.  --galaxy takes the
                          comma list (or all = the five MCP H0 galaxies; NGC4258
-                         rejected).
+                         rejected). Automatic outputs go below
+                         <root_output>/<dataset>/H0/.
   --evidence             Submit the single-galaxy harmonic marginal-objective
                          diagnostic for an existing MCMC HDF5 chain. The chain
                          path is resolved from --galaxy, --init-strategy, and
@@ -721,13 +722,12 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
             pycmd="/usr/bin/env JAX_PLATFORMS=cpu $CANDEL_PYTHON -u $runner --galaxy $GALAXY"
         fi
         [[ ${#RUN_ARGS[@]} -gt 0 ]] && pycmd+=" ${RUN_ARGS[*]}"
-        # Joint output is flat within the dataset namespace (no per-galaxy
-        # directory), so keep its scheduler log in the same namespace.
+        # Keep stage-2 outputs and scheduler logs below the dataset's H0 folder.
         joint_root="$(config_value io root_output)"
         [[ -z "$joint_root" ]] && joint_root="results/Megamaser"
         submit_args=(--queue "$QUEUE" --mem "$MEM"
                      --name "$job_name"
-                     --logdir "$ROOT/$joint_root/$DATASET/logs")
+                     --logdir "$ROOT/$joint_root/$DATASET/H0/logs")
         if [[ "$joint_gpu" == true ]]; then
             submit_args=(--gpu "${submit_args[@]}")
         fi

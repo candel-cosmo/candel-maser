@@ -976,7 +976,9 @@ def _grid_scaled_target(model, h, init, galaxy, data_root, spot_batch, scale):
     # Silence the data-load + model-build chatter from the rebuild.
     with contextlib.redirect_stdout(io.StringIO()):
         data = load_megamaser_spots(
-            data_root, galaxy, v_sys_obs=gcfg["v_sys_obs"])
+            data_root, galaxy, v_sys_obs=gcfg["v_sys_obs"],
+            use_ecc=model.use_ecc,
+            use_quadratic_warp=model.use_quadratic_warp)
         if "D_lo" in gcfg and "D_hi" in gcfg:
             data["D_lo"] = float(gcfg["D_lo"])
             data["D_hi"] = float(gcfg["D_hi"])
@@ -1033,7 +1035,8 @@ _REID_GLOBAL_INIT_KEYS = (
 _REID_SCATTER_DRAWS = 20
 
 
-def _reid_loglik_context(galaxy, n_spots, dataset=None):
+def _reid_loglik_context(galaxy, n_spots, dataset=None, *, use_ecc=False,
+                         use_quadratic_warp=False):
     """Import the f2py Reid likelihood and build its data once.
 
     Returns ``(rp, rr, d, dataset)`` or None if the Reid likelihood (reidlik)
@@ -1063,7 +1066,12 @@ def _reid_loglik_context(galaxy, n_spots, dataset=None):
         # Without forwarding the dataset this regenerates the .inp from
         # whichever one the config defaults to, silently scoring against the
         # wrong table.
-        prepare_reid_data.main([galaxy, "--out", inp, "--dataset", dataset])
+        prepare_args = [galaxy, "--out", inp, "--dataset", dataset]
+        if use_ecc:
+            prepare_args.append("--add-ecc")
+        if use_quadratic_warp:
+            prepare_args.append("--add-quadratic-warp")
+        prepare_reid_data.main(prepare_args)
         d = rp.build_data(inp)
     finally:
         os.unlink(inp)
@@ -1203,7 +1211,9 @@ def _make_reid_loglik_scatter(galaxy, model, target, result, path):
         fprint("skipping Reid scatter: no per-spot (r_ang, phi) in samples.")
         return None
     fprint("Reid log-likelihood scatter: preparing Reid likelihood context...")
-    ctx = _reid_loglik_context(galaxy, model.n_spots)
+    ctx = _reid_loglik_context(
+        galaxy, model.n_spots, use_ecc=model.use_ecc,
+        use_quadratic_warp=model.use_quadratic_warp)
     if ctx is None:
         return None
 
@@ -1619,8 +1629,14 @@ def main(argv=None):
         latent_burnin = 0
 
     fsection(f"Loading {args.galaxy} data")
+    use_ecc = args.add_ecc or (
+        gcfg_master.get("use_ecc", False) and not args.no_ecc)
+    use_qw = args.add_quadratic_warp or (
+        gcfg_master.get("use_quadratic_warp", False)
+        and not args.no_quadratic_warp)
     data = load_megamaser_spots(
-        args.data_root, args.galaxy, v_sys_obs=gcfg_master["v_sys_obs"])
+        args.data_root, args.galaxy, v_sys_obs=gcfg_master["v_sys_obs"],
+        use_ecc=use_ecc, use_quadratic_warp=use_qw)
     if "D_lo" in gcfg_master and "D_hi" in gcfg_master:
         data["D_lo"] = float(gcfg_master["D_lo"])
         data["D_hi"] = float(gcfg_master["D_hi"])
@@ -1854,7 +1870,9 @@ def main(argv=None):
             corner_map = map_res["point"]
             chi2_line = f"MAP (DE globals): chi2_CANDEL={map_res['chi2']:.3f}"
             if args.compare_reid:
-                ctx = _reid_loglik_context(args.galaxy, model.n_spots)
+                ctx = _reid_loglik_context(
+                    args.galaxy, model.n_spots, use_ecc=model.use_ecc,
+                    use_quadratic_warp=model.use_quadratic_warp)
                 if ctx is not None:
                     reid_nh = _reid_neg_half_chi2(
                         ctx, args.galaxy, map_res["point"], map_res["r_ang"],

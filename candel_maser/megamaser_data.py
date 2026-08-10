@@ -15,7 +15,7 @@
 """Megamaser spot data loading from AAS machine-readable tables."""
 import csv
 import re
-from os.path import basename, dirname, join, normpath
+from os.path import basename, dirname, isfile, join, normpath
 
 import numpy as np
 from scipy.cluster.vq import kmeans2
@@ -59,6 +59,18 @@ def maser_dataset_of_root(root):
             f"{list(MASER_DATASETS)}. Resolve it with "
             f"maser_data_root(dataset).")
     return dataset
+
+
+def clipped_mask_path(root, galaxy, use_ecc=False,
+                      use_quadratic_warp=False):
+    """Path for one disc-model variant's stabilised clipping mask."""
+    parts = []
+    if use_ecc:
+        parts.append("ecc")
+    if use_quadratic_warp:
+        parts.append("qw")
+    suffix = "_" + "_".join(parts) if parts else ""
+    return join(root, f"{galaxy}_clipped_spots{suffix}.csv")
 
 
 def _apply_clipped_mask(data, path):
@@ -648,7 +660,8 @@ def _load_p20_table(root, galaxy, v_sys_obs=None):
     return data
 
 
-def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
+def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None, *,
+                         use_ecc=False, use_quadratic_warp=False):
     """Load individual maser spot data for a megamaser galaxy.
 
     Parameters
@@ -661,6 +674,9 @@ def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
     v_sys_obs : float or None
         Fixed velocity reference used to centre residual arithmetic, km/s.
         Required except for NGC4258, where a default is supplied.
+    use_ecc, use_quadratic_warp : bool
+        For the ``clipped`` dataset, prefer the matching model-variant mask.
+        If it is absent, use the linear-model mask.
 
     Returns
     -------
@@ -673,7 +689,14 @@ def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None):
         data = load_megamaser_spots(
             join(dirname(normpath(root)), "unpruned"), galaxy,
             v_sys_obs=v_sys_obs)
-        path = join(root, f"{galaxy}_clipped_spots.csv")
+        path = clipped_mask_path(
+            root, galaxy, use_ecc=use_ecc,
+            use_quadratic_warp=use_quadratic_warp)
+        if (use_ecc or use_quadratic_warp) and not isfile(path):
+            fallback = clipped_mask_path(root, galaxy)
+            fprint(f"clipping mask '{path}' not found; falling back to "
+                   f"linear mask '{fallback}'.")
+            path = fallback
         n_spots = data["n_spots"]
         data = _apply_clipped_mask(data, path)
         fprint(f"applied stabilised clipping mask '{path}': "

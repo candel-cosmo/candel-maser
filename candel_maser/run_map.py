@@ -115,7 +115,9 @@ def _build_target(galaxy, gcfg, spot_batch, dataset):
     config["model"]["galaxies"] = {
         g: dict(blk) for g, blk in _MASTER_CFG["model"]["galaxies"].items()}
     data = load_megamaser_spots(
-        maser_data_root(dataset), galaxy, v_sys_obs=gcfg["v_sys_obs"])
+        maser_data_root(dataset), galaxy, v_sys_obs=gcfg["v_sys_obs"],
+        use_ecc=gcfg.get("use_ecc", False),
+        use_quadratic_warp=gcfg.get("use_quadratic_warp", False))
     if "D_de_lo" in gcfg and "D_de_hi" in gcfg:
         data["D_lo"] = float(gcfg["D_de_lo"])
         data["D_hi"] = float(gcfg["D_de_hi"])

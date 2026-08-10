@@ -668,11 +668,11 @@ def _result_path(galaxies, selection, reconstruction, flat_dist,
         "_".join(g.replace("-", "") for g in galaxies))
     stem = "joint_H0_toy" if toy else "joint_H0"
     prior_tag = "flat" if flat_dist else "r2"
-    # root_output is dataset-namespaced by apply_dataset, so the two datasets'
-    # joint runs cannot overwrite each other.
+    # root_output is dataset-namespaced by apply_dataset; keep stage-2 products
+    # separate from the per-galaxy distance chains consumed by this runner.
     root = MASTER_CFG.get("io", {}).get("root_output", "results/Megamaser")
     return results_path(
-        root,
+        root, "H0",
         f"{stem}_{gal_tag}_{selection}"
         f"_{reconstruction}_{prior_tag}{variant}.hdf5")
 

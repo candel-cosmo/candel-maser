@@ -28,7 +28,7 @@ from palette import PALETTE, PLANCK_C, RED, SELECTION, SHOES_C, TEAL
 
 ROOT = Path(__file__).resolve().parents[2]
 DATASET = "original_published"
-RESULTS = ROOT / "results" / "Megamaser" / DATASET
+RESULTS = ROOT / "results" / "Megamaser" / DATASET / "H0"
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
 
 # (value, sigma) reference H0 measurements, all symmetric.

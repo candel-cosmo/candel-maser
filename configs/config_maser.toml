@@ -353,7 +353,7 @@ los_nside = 2
 # key matches any reconstruction whose name starts with it.
 [joint.selection.volume_subsample_fraction]
 default = 1.0
-Carrick2015 = 0.25
+Carrick2015 = 0.1
 manticorelocal = 0.1
 
 [joint.priors.sigma_pec]
