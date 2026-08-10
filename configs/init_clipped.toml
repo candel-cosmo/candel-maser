@@ -2,6 +2,11 @@
 
 
 
+[model.galaxies.NGC6323]
+r_ang_ref_i = 0.398971
+r_ang_ref_Omega = 0.398971
+r_ang_ref_periapsis = 0.199486
+
 [model.galaxies.NGC6323.init]
 # Updated on August 10
 D_A = 109.3823
@@ -21,6 +26,11 @@ sigma_y_floor = 2.0279
 x0 = 15.5026
 y0 = 6.6041
 
+[model.galaxies.UGC3789]
+r_ang_ref_i = 0.579550
+r_ang_ref_Omega = 0.579550
+r_ang_ref_periapsis = 0.289775
+
 [model.galaxies.UGC3789.init]
 D_A = 49.7178
 Omega0 = 221.3543
@@ -38,6 +48,11 @@ sigma_x_floor = 2.9667
 sigma_y_floor = 4.5141
 x0 = -401.1939
 y0 = -461.1962
+
+[model.galaxies.CGCG074-064]
+r_ang_ref_i = 0.416615
+r_ang_ref_Omega = 0.416615
+r_ang_ref_periapsis = 0.208308
 
 [model.galaxies.CGCG074-064.init]
 D_A = 84.7194
@@ -57,6 +72,11 @@ sigma_y_floor = 1.6743
 x0 = 1.3108
 y0 = 4.5386
 
+[model.galaxies.NGC6264]
+r_ang_ref_i = 0.572839
+r_ang_ref_Omega = 0.572839
+r_ang_ref_periapsis = 0.286420
+
 [model.galaxies.NGC6264.init]
 D_A = 132.0115
 Omega0 = 94.2352
@@ -74,6 +94,11 @@ sigma_x_floor = 0.5001
 sigma_y_floor = 4.799
 x0 = 4.7672
 y0 = 7.0961
+
+[model.galaxies.NGC5765b]
+r_ang_ref_i = 0.969575
+r_ang_ref_Omega = 0.969575
+r_ang_ref_periapsis = 0.484787
 
 [model.galaxies.NGC5765b.init]
 D_A = 117.8067

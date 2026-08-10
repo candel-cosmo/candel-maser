@@ -38,6 +38,7 @@ The module does not import BlackJAX at import time.  This keeps the rest of the
 package usable while BlackJAX is an optional dependency.
 """
 import os
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -1488,15 +1489,22 @@ def run_blackjax_mcmc(model, init_params, rng_key, *,
 
     chain_keys = jax.random.split(rng_key, num_chains)
     worker_count = _chain_worker_count(num_chains, chain_workers)
+    n_phase_blocks = sum(
+        int(steps) > 0
+        for steps in (num_latent_burnin, num_warmup, num_samples))
+    terminal_rows = shutil.get_terminal_size(fallback=(80, 20)).lines
+    compact_progress = n_phase_blocks * (num_chains + 1) > terminal_rows
 
     def run_chain(item):
         i, chain_key = item
-        # Keep each phase in its own row block, with one blank row between.
+        # Reuse each chain's row if separated phase blocks do not fit.
         positions = []
         block = 0
         for steps in (num_latent_burnin, num_warmup, num_samples):
             if int(steps) > 0:
-                positions.append(block * (num_chains + 1) + i)
+                positions.append(
+                    i if compact_progress
+                    else block * (num_chains + 1) + i)
                 block += 1
             else:
                 positions.append(None)
