@@ -189,6 +189,9 @@ bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC6264 \
     --max-generations 5000 --patience 500
 ```
 
+`submit.sh` also accepts `--patience N` directly, anywhere among its options;
+raise it to allow more generations without a 0.1 improvement in log posterior.
+
 For a development-only batching benchmark inside an existing two-GPU
 allocation, run:
 

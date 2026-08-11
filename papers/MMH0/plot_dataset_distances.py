@@ -133,12 +133,14 @@ def main(argv=None):
                 color = COLORS[dataset]
                 label = DATASET_LABELS[dataset] if i == 0 else None
                 ax.plot(grid, gaussian_kde(samples)(grid), color=color,
-                        lw=1.3, label=label)
+                        lw=1.3, ls=":" if dataset == "fiducial" else "-",
+                        label=label)
                 ax.axvline(np.median(samples), color=color, lw=0.8, ls="--")
 
             samples = dom_chains[galaxy]
             ax.plot(grid, gaussian_kde(samples)(grid), color=DOM_COLOR,
-                    lw=1.8, label=DOM_LABEL if i == 0 else None, zorder=5)
+                    lw=1.8, ls="--", label=DOM_LABEL if i == 0 else None,
+                    zorder=5)
             ax.axvline(np.median(samples), color=DOM_COLOR, lw=1.0,
                        ls="--", zorder=5)
 

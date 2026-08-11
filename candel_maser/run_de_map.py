@@ -2540,7 +2540,10 @@ def main(argv=None):
                              "the generation ceiling and patience. This is "
                              "not an NFE stopping criterion.")
     parser.add_argument("--max-generations", type=int, default=None)
-    parser.add_argument("--patience", type=int, default=None)
+    parser.add_argument(
+        "--patience", type=int, default=None,
+        help="Stop after N generations without a >0.1 logP improvement. "
+             "Default: [optimise].patience from config_maser.toml.")
     parser.add_argument("--log-every", type=int, default=None)
     parser.add_argument("--n-devices", type=int, default=None,
                         help="Same-node GPUs for adaptive weighted round-"
@@ -2552,6 +2555,8 @@ def main(argv=None):
 
     if args.no_ecc and args.add_ecc:
         raise SystemExit("--no-ecc and --add-ecc are mutually exclusive.")
+    if args.patience is not None and args.patience < 1:
+        raise SystemExit("--patience must be at least 1.")
     if args.no_quadratic_warp and args.add_quadratic_warp:
         raise SystemExit(
             "--no-quadratic-warp and --add-quadratic-warp are mutually "

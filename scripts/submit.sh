@@ -191,6 +191,9 @@ DE optimiser options passed to run_maser.py --sampler de:
                          remove MAP x/y/velocity residual outliers. SIGMA
                          defaults to 2.5; writes the canonical clipped mask.
   --clip-max-attempts N  Maximum DE fits in the clipping loop (default: 5).
+  --patience N           Stop DE after N generations without a >0.1 logP
+                         improvement (default: [optimise].patience from the
+                         config). Raise this to tolerate more stale generations.
 Cluster options:
   MCMC jobs submit as CPU-only jobs. DE and --evidence request GPU.
   Joint H0 follows the selected node/queue: GPU queues request GPU; CPU queues
@@ -397,6 +400,8 @@ while [[ $# -gt 0 ]]; do
                 DE_ARGS+=("$1" "2.5"); shift
             fi ;;
         --clip-max-attempts)
+            DE_ARGS+=("$1" "$2"); shift 2 ;;
+        --patience)
             DE_ARGS+=("$1" "$2"); shift 2 ;;
         --add-ecc|--add-quadratic-warp)
             case "$1" in
@@ -896,7 +901,7 @@ for gal in $GALAXY; do
         pycmd+=" ${RUN_ARGS[*]}"
     fi
     logdir="$MASER_OUT/$gal/logs"
-    submit_args=(--queue "$QUEUE" --mem "$MEM" --name "${JOB_PREFIX}_${gal}"
+    submit_args=(--queue "$QUEUE" --mem "$MEM" --name "${JOB_PREFIX}_${gal}${variant_tag}"
                  --logdir "$logdir")
     if [[ "$SAMPLER" != "mcmc" ]]; then
         submit_args=(--gpu "${submit_args[@]}")
