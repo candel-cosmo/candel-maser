@@ -1539,6 +1539,21 @@ def _subset_spot_data(data, excluded_indices):
     return subset
 
 
+def _subset_iterative_init_radii(gal_cfg, source_indices, source_n_spots):
+    """Apply an iterative attempt's unpruned-row mask to every init block."""
+    for name, init_cfg in tuple(gal_cfg.items()):
+        if not name.startswith("init") or "r_ang" not in init_cfg:
+            continue
+        if len(init_cfg["r_ang"]) != source_n_spots:
+            raise ValueError(
+                f"{name}.r_ang has {len(init_cfg['r_ang'])} values but the "
+                f"complete unpruned table has {source_n_spots}.")
+        active_init = dict(init_cfg)
+        active_init["r_ang"] = np.asarray(
+            init_cfg["r_ang"])[source_indices].tolist()
+        gal_cfg[name] = active_init
+
+
 def _read_clip_diagnostic(path, sigma):
     """Read newly flagged unpruned rows and their scores from one DE fit."""
     flag_key = f"flag_posterior_mean_max_abs_z_ge_{sigma:g}"
@@ -2632,10 +2647,15 @@ def main(argv=None):
     if dataset == "unpruned":
         data["clipped_by_pesce"] = _load_pesce_clipped_mask(
             maser_data_root(dataset), args.galaxy, data)
+    iterative_source_n_spots = None
     if os.environ.get(_CLIP_CHILD_ENV):
+        iterative_source_n_spots = int(data["n_spots"])
         excluded = json.loads(os.environ.get(_CLIP_INDICES_ENV, "[]"))
         data = _subset_spot_data(data, excluded)
-        fprint(f"iterative clipping attempt keeps {data['n_spots']} spots")
+        fprint(
+            f"iterative clipping attempt keeps {data['n_spots']}/"
+            f"{iterative_source_n_spots} unpruned rows; dataset remains "
+            "'unpruned'")
     distance_bounds = _distance_bounds(gcfg)
     if distance_bounds is not None:
         data["D_lo"], data["D_hi"], source = distance_bounds
@@ -2664,6 +2684,9 @@ def main(argv=None):
     config["model"]["galaxies"] = {
         g: dict(blk) for g, blk in master_cfg["model"]["galaxies"].items()}
     gal_blk = config["model"]["galaxies"][args.galaxy]
+    if iterative_source_n_spots is not None:
+        _subset_iterative_init_radii(
+            gal_blk, data["unpruned_spot_index"], iterative_source_n_spots)
     if args.phi_integration is not None:
         gal_blk["phi_integration"] = args.phi_integration
     selected_phi_integration = gal_blk.get(

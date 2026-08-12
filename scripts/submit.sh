@@ -37,6 +37,7 @@ MATCH_REID=false
 FIX_FLOORS_PESCE=false
 FIX_GLOBALS=false
 LOO_DROPPED=""
+DISTANCE_SOURCE="candel"
 
 DATASET=""
 ALWAYS_ARGS=()
@@ -102,10 +103,16 @@ Required:
 Joint H0 options (with --infer-H0), passed to run_joint_H0.py:
   --selection none|distance|redshift
                          Default: redshift (selection ON by default).
-  --distance-prior distance|volume
+  --distance-prior distance|volume|log-distance
                          Default flips with --selection: distance when
                          selection=none, else volume.  distance is rejected
                          when selection is active (volume prior required).
+                         log-distance is uniform in log(D_A) and also requires
+                         selection=none.
+  --distance-source candel|p20
+                         Stage-1 distance posteriors (default: candel). p20
+                         reads the archived Dom text files and removes their
+                         uniform-in-log(D_A) prior.
   --reconstruction none|Carrick2015|ManticoreLocalCOLA
   --field-config PATH
   --Vext                 Sample external bulk flow Vext (off by default).
@@ -368,6 +375,8 @@ while [[ $# -gt 0 ]]; do
             LOO_DROPPED="$2"; JOINT_ARGS+=("$1" "$2"); shift 2 ;;
         --distance-prior|--field-config)
             JOINT_ARGS+=("$1" "$2"); shift 2 ;;
+        --distance-source)
+            DISTANCE_SOURCE="$2"; JOINT_ARGS+=("$1" "$2"); shift 2 ;;
         --init-strategy)
             INIT_STRATEGY="$2"; INIT_ARGS+=("$1" "$2"); shift 2 ;;
         --num-chains)
@@ -696,6 +705,7 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
     # reconstruction, matching the joint_H0 result-file convention; defaults
     # mirror run_joint_H0.py (redshift / none).
     job_name="maser_jointh0_${ds_tag}_${gal_tag}_${SELECTION:-redshift}_${RECONSTRUCTION:-none}"
+    [[ "$DISTANCE_SOURCE" == "p20" ]] && job_name="${job_name}_p20"
     [[ -n "$LOO_DROPPED" ]] && job_name="${job_name}_loo${LOO_DROPPED}"
     if [[ "$LOCAL" == true ]]; then
         echo "Running $joint_label ($GALAXY) locally"

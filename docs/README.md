@@ -15,7 +15,7 @@ the other entry points below are either thin sweep wrappers or diagnostics.
 | `run_joint_H0.py` | Runs the stage-2 joint-H0 model from saved per-galaxy `D_A` chains. |
 | `submit.sh` | Standard local/cluster front end for MCMC, DE, joint H0 (`--infer-H0`), and the post-MCMC marginal-objective diagnostic (`--evidence`). |
 | `submit_sweep.sh` | Submits the standard linear/quadratic-warp by config/Reid-init MCMC sweep over the five MCP H0 galaxies. |
-| `submit_sweep_H0.sh` | Submits the eight joint-H0 selection, velocity-field, and distance-prior combinations; it also provides the general leave-one-out mode. |
+| `submit_sweep_H0.sh` | Submits the eleven default joint-H0 selection, velocity-field, and distance-prior combinations; it also provides the general leave-one-out mode. |
 | `submit_loo_H0.sh` | Preset leave-one-out wrapper using redshift selection and ManticoreLocalCOLA. |
 | `watch_and_resubmit.sh` | Watches submitted jobs for a completion marker and retries incomplete jobs; DE retries use `--resume`. `submit.sh --max-retries N` is the usual shortcut. |
 
@@ -80,8 +80,16 @@ for all flags. The standard sweep wrappers can also be inspected safely:
 bash scripts/megamaser/submit_sweep.sh -q cmb --dry
 bash scripts/megamaser/submit_sweep_H0.sh --local \
     --dataset original_published,fiducial,unpruned,clipped --dry
+bash scripts/megamaser/submit_sweep_H0.sh --local \
+    --dataset fiducial --distance-source p20 --dry
 bash scripts/megamaser/submit_loo_H0.sh -q cmbgpu --dry
 ```
+
+`--distance-source p20` replaces the CANDEL stage-1 chains with Dom's archived
+P20 `D_A` samples under `data/Megamaser/external/Dom_data/`. Because those
+posteriors used a uniform-in-`log(D_A)` prior, the runner multiplies their KDE
+densities by `D_A` to recover the distance likelihood before applying the
+requested joint-H0 distance prior. P20 outputs are tagged `_p20`.
 
 ## Production Sampling
 
@@ -249,7 +257,7 @@ bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --infer-H0 
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy all --infer-H0 --selection redshift --distance-prior volume
 ```
 
-Common forwarded options are `--seed`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. `--init-strategy` controls MCMC/evidence initial points; real DE searches ignore both that option and `[inference].init_strategy` and use the seed policy described above. Only `--fix-globals`, which skips DE, uses `median|config`. MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit the single-galaxy finite-support marginal-objective diagnostic with `submit.sh --evidence` after the chain exists; it is not a rigorous absolute evidence because the saved explicit-latent chain and finite-radius marginal objective do not define exactly the same posterior measure. Joint H0 accepts `--distance-prior distance|volume`; selection runs require the volume prior. The joint H0 run (`--infer-H0`) requires matching saved per-galaxy `samples/D_A` chains with a recorded `uniform_D_A` stage-1 prior, uses them as KDE distance likelihoods, and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
+Common forwarded options are `--seed`, `--spot-batch`, `--f64`, `--add-ecc`, `--add-quadratic-warp`, and `--fix-floors-pesce`. `--init-strategy` controls MCMC/evidence initial points; real DE searches ignore both that option and `[inference].init_strategy` and use the seed policy described above. Only `--fix-globals`, which skips DE, uses `median|config`. MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`, `--compare-reid`, `--match-reid`, and `--compare-reid-2x`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit the single-galaxy finite-support marginal-objective diagnostic with `submit.sh --evidence` after the chain exists; it is not a rigorous absolute evidence because the saved explicit-latent chain and finite-radius marginal objective do not define exactly the same posterior measure. Joint H0 accepts `--distance-prior distance|volume|log-distance`; `log-distance` samples uniformly in `log(D_A)`, while selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses either matching saved per-galaxy `samples/D_A` chains with a recorded `uniform_D_A` stage-1 prior or `--distance-source p20`, which removes the archived chains' uniform-in-`log(D_A)` prior. It then builds KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
 
 Automatic retries use the watcher wrapper. The `--max-retries` shortcut
 launches the watcher in a detached `screen`/`tmux` session and prints the

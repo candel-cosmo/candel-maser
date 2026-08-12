@@ -73,20 +73,20 @@ def _split_galaxies(value):
 
 
 def _resolve_distance_prior(selection, choice):
-    """Resolve --distance-prior to the flat_dist boolean.
+    """Resolve --distance-prior, including its selection compatibility.
 
     With no explicit choice the prior is uniform-in-distance when selection is
     off and uniform-in-volume when selection is modelled.  A selected
     population is volume-distributed, so selection requires the volume prior;
-    an explicit 'distance' choice with selection on is rejected.
+    other choices with selection on are rejected.
     """
     prior = choice or ("distance" if selection == "none" else "volume")
-    if selection != "none" and prior == "distance":
+    if selection != "none" and prior != "volume":
         raise ValueError(
             "selection modelling requires the uniform-in-volume distance "
-            "prior; --distance-prior distance is incompatible with "
+            f"prior; --distance-prior {prior} is incompatible with "
             f"--selection {selection}.")
-    return prior == "distance"
+    return prior
 
 
 def _required_inference(cfg, key):
@@ -173,35 +173,36 @@ def _toy_ad2redshift():
     return _TOY_AD2Z
 
 
-def _load_toy_distance_samples(path, dataset=None):
-    """Return stage-1 D_A samples (samples/D_A from a uniform_D_A chain).  The
-    toy reuses the stage-1 distance posterior as a likelihood, which is only
-    valid under stage-1's uniform-D_A prior; anything else would double-count
-    the stage-1 prior on top of the stage-2 distance prior."""
+def _load_toy_distance_samples(path, dataset=None, source="candel"):
+    """Return stage-1 D_A samples from CANDEL HDF5 or archived P20 text."""
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    with H5File(path, "r") as f:
-        prior = f.attrs.get("D_c_prior", None)
-        prior_str = None if prior is None else str(prior)
-        if prior_str != "uniform_D_A":
-            raise ValueError(
-                f"{path} has D_c_prior={prior_str!r}; the toy distance "
-                f"likelihood requires a uniform_D_A stage-1 chain.")
-        if dataset is not None:
-            check_chain_dataset(f.attrs, dataset, path)
-        if "samples/D_A" not in f:
-            raise KeyError(f"{path} has no samples/D_A dataset")
-        samples = np.asarray(f["samples/D_A"][...], dtype=np.float64)
+    if source == "p20":
+        samples = np.asarray(np.loadtxt(path), dtype=np.float64)
+    else:
+        with H5File(path, "r") as f:
+            prior = f.attrs.get("D_c_prior", None)
+            prior_str = None if prior is None else str(prior)
+            if prior_str != "uniform_D_A":
+                raise ValueError(
+                    f"{path} has D_c_prior={prior_str!r}; the toy distance "
+                    f"likelihood requires a uniform_D_A stage-1 chain.")
+            if dataset is not None:
+                check_chain_dataset(f.attrs, dataset, path)
+            if "samples/D_A" not in f:
+                raise KeyError(f"{path} has no samples/D_A dataset")
+            samples = np.asarray(f["samples/D_A"][...], dtype=np.float64)
     samples = samples.reshape(-1)
     samples = samples[np.isfinite(samples)]
-    if samples.size < 20:
+    if samples.size < 20 or np.any(samples <= 0):
         raise ValueError(
-            f"{path} has too few finite D_A samples ({samples.size})")
+            f"{path} needs at least 20 positive finite D_A samples")
     return samples
 
 
 def _build_log_distance_likelihood(samples, D_lo, D_hi, n_grid,
-                                   max_samples):
+                                   max_samples,
+                                   source_prior="uniform_D_A"):
     from scipy.special import logsumexp
 
     samples = np.asarray(samples, dtype=np.float64).reshape(-1)
@@ -231,6 +232,11 @@ def _build_log_distance_likelihood(samples, D_lo, D_hi, n_grid,
         total - np.log(samples.size) - np.log(bw)
         - 0.5 * np.log(2 * np.pi)
     )
+    if source_prior == "uniform_log_D_A":
+        # P20 posterior density is L(D_A) / D_A; remove that stage-1 prior.
+        log_L = log_L + np.log(D_grid)
+    elif source_prior != "uniform_D_A":
+        raise ValueError(f"unsupported source distance prior: {source_prior}")
     log_L = log_L - np.nanmax(log_L)
     return (
         jnp.asarray(D_grid), jnp.asarray(log_L), float(bw), int(samples.size)
@@ -239,13 +245,21 @@ def _build_log_distance_likelihood(samples, D_lo, D_hi, n_grid,
 
 def _build_toy_items(galaxies, args, velocity_data=None):
     overrides = _toy_distance_overrides(args.toy_distance_file)
+    source_prior = ("uniform_log_D_A" if args.distance_source == "p20"
+                    else "uniform_D_A")
     items = []
     for galaxy in galaxies:
         gcfg = MASTER_CFG["model"]["galaxies"][galaxy]
-        path = overrides.get(galaxy) or _toy_default_distance_file(
-            galaxy, args)
+        if args.distance_source == "p20":
+            default_path = os.path.join(
+                ROOT, "data", "Megamaser", "external", "Dom_data",
+                f"D_archivedP20_{galaxy}.txt")
+        else:
+            default_path = _toy_default_distance_file(galaxy, args)
+        path = overrides.get(galaxy) or default_path
         samples = _load_toy_distance_samples(         # D_A samples
-            path, MASTER_CFG.get("io", {}).get("dataset"))
+            path, MASTER_CFG.get("io", {}).get("dataset"),
+            args.distance_source)
         D_q16, D_med, D_q84 = np.percentile(samples, [16, 50, 84])
         # D_c init for the sampled comoving distance: D_c = D_A (1 + z)
         # at H0_ref.
@@ -257,7 +271,8 @@ def _build_toy_items(galaxies, args, velocity_data=None):
         outside = (samples < DA_lo) | (samples > DA_hi)
         D_grid, log_L_grid, bw, n_used = _build_log_distance_likelihood(
             samples, DA_lo, DA_hi,
-            args.toy_distance_n_grid, args.toy_distance_max_samples)
+            args.toy_distance_n_grid, args.toy_distance_max_samples,
+            source_prior)
         fprint(
             f"{galaxy}: toy D_A KDE from {path} "
             f"(median={D_med:.2f} -{D_med - D_q16:.2f} "
@@ -278,12 +293,14 @@ def _build_toy_items(galaxies, args, velocity_data=None):
             "D_hi": D_hi,
             "DA_lo": DA_lo,          # D_A KDE-likelihood bounds
             "DA_hi": DA_hi,
+            "DA_init": float(D_med),
             "D_init": D_c_init,      # sampled coordinate is D_c
             "D_grid": D_grid,
             "log_L_grid": log_L_grid,
             "toy_distance_file": os.path.abspath(path),
             "toy_distance_kde_bandwidth": bw,
             "toy_distance_kde_samples": n_used,
+            "toy_distance_source_prior": source_prior,
             "toy_distance_total_samples": int(samples.size),
             "toy_distance_source_outside_support": int(np.sum(outside)),
         })
@@ -296,12 +313,14 @@ def _build_toy_items(galaxies, args, velocity_data=None):
 
 class ToyDistanceTarget:
     def __init__(self, items, shared_priors, selection, volume_data,
-                 flat_dist, velocity_beta, sample_velocity_beta,
+                 distance_prior, velocity_beta, sample_velocity_beta,
                  sample_vext, los_nside, vext_prior=None):
         self.items = tuple(items)
         self.selection = selection
         self.volume_data = volume_data
-        self.flat_dist = bool(flat_dist)
+        self.distance_prior = distance_prior
+        self.flat_dist = distance_prior == "distance"
+        self.log_distance = distance_prior == "log-distance"
         self.velocity_beta = float(velocity_beta)
         self.sample_velocity_beta = bool(sample_velocity_beta)
         self.sample_vext = bool(sample_vext)
@@ -311,6 +330,7 @@ class ToyDistanceTarget:
         om = float(MASTER_CFG["model"].get(
             "Om", MASTER_CFG["model"].get("Om0", 0.3)))
         self.distance2redshift = Distance2Redshift(Om0=om)
+        self.ad2redshift = AngularDiameterDistance2Redshift(Om0=om)
         self.d_sel = jnp.linspace(
             1.0, max(item["D_hi"] for item in self.items), 1001)
         self.log_d2_sel = 2.0 * jnp.log(self.d_sel)
@@ -348,8 +368,12 @@ class ToyDistanceTarget:
                  self.shared_priors["cz_lim_selection_width"]),
             ])
         for item in self.items:
-            specs.append((_pfx(item["name"], "D_c"),
-                          dist.Uniform(item["D_lo"], item["D_hi"])))
+            if self.log_distance:
+                specs.append((_pfx(item["name"], "log_D_A"), dist.Uniform(
+                    jnp.log(item["DA_lo"]), jnp.log(item["DA_hi"]))))
+            else:
+                specs.append((_pfx(item["name"], "D_c"),
+                              dist.Uniform(item["D_lo"], item["D_hi"])))
         self.specs = tuple(specs)
         self.theta_sites = tuple(name for name, _ in self.specs)
 
@@ -398,12 +422,19 @@ class ToyDistanceTarget:
         return self.velocity_beta
 
     def _D_c(self, params, item):
+        if self.log_distance:
+            D_A = self._D_A(params, item)
+            z = self.ad2redshift(
+                jnp.atleast_1d(D_A), h=self._h(params)).squeeze()
+            return D_A * (1.0 + z)
         return params[_pfx(item["name"], "D_c")]
 
     def _D_A(self, params, item):
         """Convert the sampled comoving distance to angular-diameter
         distance at the current H0 so the stage-1 KDE (built in D_A)
         can be evaluated."""
+        if self.log_distance:
+            return jnp.exp(params[_pfx(item["name"], "log_D_A")])
         D_c = self._D_c(params, item)
         z = self.distance2redshift(
             jnp.atleast_1d(D_c), h=self._h(params)).squeeze()
@@ -484,13 +515,11 @@ class ToyDistanceTarget:
         return _logmeanexp(ll_fields_total)
 
     def extra_logdensity(self, params):
-        """Log-density terms beyond the parameter priors: the uniform-in-volume
-        distance reweighting, the per-galaxy KDE distance likelihoods, and the
-        joint redshift/selection term.  Prior densities are contributed by the
-        numpyro sample sites, so they are excluded here."""
+        """Terms beyond the sampled priors: volume reweighting, distance
+        likelihoods, and the joint redshift/selection term."""
         total = jnp.asarray(0.0, dtype=params["H0"].dtype)
         for item in self.items:
-            if not self.flat_dist:
+            if self.distance_prior == "volume":
                 # D_c is sampled directly, so uniform-in-volume is exactly
                 # p(D_c) ~ D_c^2 with no change-of-variables Jacobian.
                 total = total + 2.0 * jnp.log(self._D_c(params, item))
@@ -503,6 +532,9 @@ class ToyDistanceTarget:
         for item in self.items:
             numpyro.deterministic(_pfx(item["name"], "D_A"),
                                   self._D_A(params, item))
+            if self.log_distance:
+                numpyro.deterministic(_pfx(item["name"], "D_c"),
+                                      self._D_c(params, item))
         numpyro.factor("extra", self.extra_logdensity(params))
 
 
@@ -528,7 +560,11 @@ def _toy_init(target):
         init["cz_lim_selection"] = jnp.asarray(10000.0)
         init["cz_lim_selection_width"] = jnp.asarray(500.0)
     for item in target.items:
-        init[_pfx(item["name"], "D_c")] = jnp.asarray(item["D_init"])
+        if target.log_distance:
+            init[_pfx(item["name"], "log_D_A")] = jnp.log(
+                jnp.asarray(item["DA_init"]))
+        else:
+            init[_pfx(item["name"], "D_c")] = jnp.asarray(item["D_init"])
     return init
 
 
@@ -662,12 +698,13 @@ def _save_hdf5(path, result, metadata):
             f.attrs[key] = value
 
 
-def _result_path(galaxies, selection, reconstruction, flat_dist,
+def _result_path(galaxies, selection, reconstruction, distance_prior,
                  variant="", toy=False):
     gal_tag = "all" if tuple(galaxies) == MCP_GALAXIES else (
         "_".join(g.replace("-", "") for g in galaxies))
     stem = "joint_H0_toy" if toy else "joint_H0"
-    prior_tag = "flat" if flat_dist else "r2"
+    prior_tag = {"distance": "flat", "volume": "r2",
+                 "log-distance": "logDA"}[distance_prior]
     # root_output is dataset-namespaced by apply_dataset; keep stage-2 products
     # separate from the per-galaxy distance chains consumed by this runner.
     root = MASTER_CFG.get("io", {}).get("root_output", "results/Megamaser")
@@ -958,11 +995,18 @@ def main(argv=None):
                         help="Upper bound of the Vext magnitude prior. "
                              "Default: [joint.priors.Vext_mag].upper in "
                              "config_maser.toml.")
-    parser.add_argument("--distance-prior", choices=("distance", "volume"),
+    parser.add_argument("--distance-prior",
+                        choices=("distance", "volume", "log-distance"),
                         default=None,
                         help="Distance prior. Default: uniform-in-distance "
                              "when --selection none, uniform-in-volume "
-                             "otherwise. Selection forbids 'distance'.")
+                             "otherwise. 'log-distance' is uniform in "
+                             "log(D_A). Selection requires 'volume'.")
+    parser.add_argument("--distance-source", choices=("candel", "p20"),
+                        default="candel",
+                        help="Stage-1 distance posterior source. 'p20' reads "
+                             "data/Megamaser/external/Dom_data/ and removes "
+                             "its uniform-in-log(D_A) prior.")
     parser.add_argument("--toy-distance-file", action="append", default=[],
                         metavar="GALAXY=PATH",
                         help="Override the per-galaxy chain used for the KDE "
@@ -1038,7 +1082,7 @@ def main(argv=None):
         parser.error("joint H0 inference always excludes NGC4258; "
                      "remove it from --galaxy.")
     try:
-        flat_dist = _resolve_distance_prior(
+        distance_prior = _resolve_distance_prior(
             args.selection, args.distance_prior)
     except ValueError as exc:
         parser.error(str(exc))
@@ -1105,7 +1149,7 @@ def main(argv=None):
     fsection("Loading toy distance likelihoods")
     items = _build_toy_items(galaxies, args, velocity_data=velocity_data)
     target = ToyDistanceTarget(
-        items, joint_priors, args.selection, volume_data, flat_dist,
+        items, joint_priors, args.selection, volume_data, distance_prior,
         velocity_beta, sample_velocity_beta, sample_vext, los_nside,
         vext_prior=vext_prior)
     init = _toy_init(target)
@@ -1114,7 +1158,9 @@ def main(argv=None):
     fprint(f"galaxies: {', '.join(galaxies)}")
     if args.leave_one_out_dropped is not None:
         fprint(f"leave-one-out: dropped {args.leave_one_out_dropped}")
-    prior_name = "uniform in distance" if flat_dist else "uniform in volume"
+    prior_name = {"distance": "uniform in distance",
+                  "volume": "uniform in volume",
+                  "log-distance": "uniform in log(D_A)"}[distance_prior]
     beta_state = (f"N({velocity_beta:g}, 0.02) sampled"
                   if sample_velocity_beta else f"{velocity_beta:g} fixed")
     fprint(f"selection model: {args.selection}; reconstruction: "
@@ -1131,7 +1177,8 @@ def main(argv=None):
     elif sample_vext:
         fprint("Vext prior: uniform (no informative prior configured)")
     fprint(f"distance likelihood: KDE over saved single-galaxy D_A "
-           f"samples; grid={args.toy_distance_n_grid}; "
+           f"samples; source={args.distance_source}; "
+           f"grid={args.toy_distance_n_grid}; "
            f"max_samples={args.toy_distance_max_samples}")
     fprint(f"JAX backend: {jax.default_backend()}; precision: "
            f"{'float64' if jax.config.jax_enable_x64 else 'float32'}")
@@ -1140,7 +1187,7 @@ def main(argv=None):
     fprint(f"target_accept_theta={args.target_accept_theta}; "
            f"initial_step_size={args.initial_step_size}")
     dist_sites = [site for site in target.theta_sites
-                  if site.endswith("__D_c")]
+                  if site.endswith(("__D_c", "__log_D_A"))]
     h0_dist_block = ", ".join(("H0", *dist_sites))
     fprint(f"theta mass matrix: dense over {len(target.theta_sites)} "
            f"sites; H0-distance block: {h0_dist_block}")
@@ -1156,9 +1203,11 @@ def main(argv=None):
 
     variant = ("_ecc" if args.add_ecc else "") + (
         "_qw" if args.add_quadratic_warp else "")
+    if args.distance_source == "p20":
+        variant += "_p20"
     outpath = args.output or _result_path(
-        galaxies, args.selection, args.reconstruction, flat_dist, variant,
-        toy=True)
+        galaxies, args.selection, args.reconstruction, distance_prior,
+        variant, toy=True)
     os.makedirs(os.path.dirname(outpath), exist_ok=True)
     _save_hdf5(outpath, result, {
         "sampler": "numpyro_joint_toy_distance_mcmc",
@@ -1173,8 +1222,10 @@ def main(argv=None):
         "velocity_beta": velocity_beta,
         "sample_velocity_beta": sample_velocity_beta,
         "sample_vext": sample_vext,
-        "flat_dist": bool(flat_dist),
-        "distance_prior": prior_name,
+        "flat_dist": distance_prior == "distance",
+        "distance_prior": distance_prior,
+        "distance_prior_label": prior_name,
+        "distance_source": args.distance_source,
         "selection_los_nside": int(los_nside),
         "toy_distance_files": ",".join(
             item["toy_distance_file"] for item in items),
@@ -1183,6 +1234,8 @@ def main(argv=None):
             for item in items),
         "toy_distance_kde_samples": ",".join(
             str(item["toy_distance_kde_samples"]) for item in items),
+        "toy_distance_source_prior": ",".join(
+            item["toy_distance_source_prior"] for item in items),
         "toy_distance_source_outside_support": ",".join(
             str(item["toy_distance_source_outside_support"])
             for item in items),

@@ -1,8 +1,9 @@
 #!/bin/bash -l
-# Submit the eight joint-H0 measurements: distance/redshift selection with no
+# Submit the eleven joint-H0 measurements: distance/redshift selection with no
 # velocity field, Carrick, or Manticore (six), plus no-selection baselines with
-# uniform-in-volume and uniform-in-distance priors (two). Each variant is one
-# joint NUTS chain over GALAXIES, routed through submit.sh --infer-H0.
+# uniform-in-volume, uniform-in-distance, and uniform-in-log(D_A) priors
+# (five). Each variant is one joint NUTS chain over GALAXIES, routed through
+# submit.sh --infer-H0.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,12 +37,14 @@ LEAVE_ONE_OUT=false
 SELECTION="redshift"
 SEL_EXPLICIT=false
 ADD_QW=false
+DISTANCE_SOURCE="candel"
 
 usage() {
     cat <<EOF
 Usage: $0 (--local | -q QUEUE) [--galaxy GAL,GAL,...|all] [--cpus N] [--mem GB] \\
           [--gpu-mem GB] [--num-warmup N] [--num-samples N] [--num-chains N] \\
           [--max-tree-depth N] [--dataset NAME[,NAME,...]] [--reconstruction LIST] \\
+          [--distance-source candel|p20] \\
           [--dry] [-y] \\
           [-- extra submit.sh args]
 
@@ -49,9 +52,10 @@ Runs the joint-H0 sweep over the GALAXIES set (default: $GALAXIES),
 all galaxies analysed jointly with a shared H0:
 
   selected       : distance, redshift x $RECONSTRUCTIONS
-  no selection   : uniform-in-volume, uniform-in-distance (no velocities)
+  no selection   : volume, distance, log(D_A) priors (no reconstruction),
+                   plus distance and log(D_A) priors with Carrick
 
-= 2 x N_reconstruction + 2 submit.sh calls per dataset (eight with the defaults).
+= eleven submit.sh calls per dataset with the default reconstructions.
 
 With --leave-one-out the grid is replaced by one joint job per dropped galaxy
 and reconstruction at a fixed selection/warp config. The dropped galaxy is
@@ -75,8 +79,11 @@ visible in each output filename.
   --num-chains N     Forwarded to submit.sh; omit for the config default.
   --max-tree-depth N Forwarded to submit.sh (NUTS max tree depth).
   --dataset LIST     Comma-separated spot-table/distance-chain datasets.
+  --distance-source candel|p20
+                     Stage-1 distance posteriors (default: candel). p20 uses
+                     the archived Dom files and removes their log(D_A) prior.
   --leave-one-out    LOO mode: one joint job per dropped galaxy at a single
-                     fixed config, instead of the eight-run sweep. Needs >=2 galaxies
+                     fixed config, instead of the eleven-run sweep. Needs >=2 galaxies
                      (--galaxy all expands to the five MCP galaxies).
   --selection SEL    LOO only: none|distance|redshift for the fixed config
                      (default redshift).
@@ -103,6 +110,7 @@ while [[ $# -gt 0 ]]; do
         --num-chains) NUM_CHAINS="$2"; shift 2 ;;
         --max-tree-depth) MAX_TREE_DEPTH="$2"; shift 2 ;;
         --dataset) DATASETS="$2"; shift 2 ;;
+        --distance-source) DISTANCE_SOURCE="$2"; shift 2 ;;
         --leave-one-out) LEAVE_ONE_OUT=true; shift ;;
         --selection) SELECTION="$2"; SEL_EXPLICIT=true; shift 2 ;;
         --add-quadratic-warp) ADD_QW=true; shift ;;
@@ -123,9 +131,13 @@ fi
 if [[ "$LEAVE_ONE_OUT" == false
       && ( "$SEL_EXPLICIT" == true || "$ADD_QW" == true ) ]]; then
     echo "[ERROR] --selection/--add-quadratic-warp are only valid with --leave-one-out"
-    echo "        (without it the fixed eight-run configuration is used)"
+    echo "        (without it the fixed eleven-run configuration is used)"
     exit 1
 fi
+case "$DISTANCE_SOURCE" in
+    candel|p20) ;;
+    *) echo "[ERROR] --distance-source must be candel|p20"; exit 1 ;;
+esac
 if [[ "$LEAVE_ONE_OUT" == true ]]; then
     case "$SELECTION" in
         none|distance|redshift) ;;
@@ -164,6 +176,8 @@ fi
 
 # Args shared by every variant (--galaxy/--selection vary per job, added below).
 common=("--infer-H0")
+[[ "$DISTANCE_SOURCE" != "candel" ]] && common+=(
+    --distance-source "$DISTANCE_SOURCE")
 [[ -n "$CPUS" ]] && common+=(--cpus "$CPUS")
 [[ -n "$MEM" ]] && common+=(--mem "$MEM")
 [[ -n "$GPU_MEM" ]] && common+=(--gpu-mem "$GPU_MEM")
@@ -206,13 +220,22 @@ else
                 jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"${sel}"$'\x1f'"${recon}"$'\x1f'"volume"$'\x1f')
             done
         done
-        jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"none"$'\x1f'"volume"$'\x1f')
-        jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"none"$'\x1f'"distance"$'\x1f')
+        for prior in volume distance log-distance; do
+            jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"none"$'\x1f'"${prior}"$'\x1f')
+        done
+        for recon in "${recon_arr[@]}"; do
+            if [[ "$recon" == "Carrick2015" ]]; then
+                for prior in distance log-distance; do
+                    jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"${recon}"$'\x1f'"${prior}"$'\x1f')
+                done
+            fi
+        done
     done
 fi
 
 echo "[sweep] target: ${target[*]} | joint H0"
 echo "[sweep] datasets: ${DATASETS:-config default}"
+echo "[sweep] distance source: $DISTANCE_SOURCE"
 if [[ "$LEAVE_ONE_OUT" == true ]]; then
     echo "[sweep] mode: leave-one-out (single config per dropped galaxy)"
     echo "[sweep] config: selection=$SELECTION" \
@@ -221,7 +244,7 @@ if [[ "$LEAVE_ONE_OUT" == true ]]; then
     echo "[sweep] jobs: drop-one subsets x ${#recon_arr[@]} reconstruction(s) x ${#dataset_arr[@]} dataset(s) = ${#jobs[@]} joint jobs"
     echo "[sweep] base galaxies: $base"
 else
-    echo "[sweep] jobs: (2 selections x ${#recon_arr[@]} velocity choices + 2 no-selection priors) x ${#dataset_arr[@]} dataset(s) = ${#jobs[@]} joint jobs"
+    echo "[sweep] jobs: selected variants + no-selection prior baselines x ${#dataset_arr[@]} dataset(s) = ${#jobs[@]} joint jobs"
     echo "[sweep] galaxies (joint): $GALAXIES"
 fi
 echo "[sweep] will run:"
