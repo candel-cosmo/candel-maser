@@ -35,6 +35,10 @@ ADD_ECC=false
 ADD_QW=false
 MATCH_REID=false
 FIX_FLOORS_PESCE=false
+SINGLE_ERROR_FLOOR=false
+CLUMP2_ACCELERATION_FLOOR_ONLY=false
+TEMP_OUTPUT=false
+TEMP_ROOT_OUTPUT="results_test/Megamaser"
 FIX_GLOBALS=false
 LOO_DROPPED=""
 DISTANCE_SOURCE="candel"
@@ -76,6 +80,9 @@ Required:
                          config_maser.toml (currently fiducial). Selects the tables,
                          the init_<dataset>.toml best points, and the
                          <root_output>/<dataset>/ results namespace.
+  --temp-output          Write test chains, checkpoints, diagnostics, and
+                         copied logs below results_test/Megamaser/<dataset>/.
+                         Iterative clipping will not update data/Megamaser/.
   --galaxy GAL[,GAL,...]|all
                          Galaxy/galaxies to submit.
                          Choices: $ALL_GALS
@@ -113,6 +120,11 @@ Joint H0 options (with --infer-H0), passed to run_joint_H0.py:
                          Stage-1 distance posteriors (default: candel). p20
                          reads the archived Dom text files and removes their
                          uniform-in-log(D_A) prior.
+  --single-error-floor   When NGC5765b is included, select its stage-1 chain
+                         fitted with one standard floor per observable.
+  --clump2-acceleration-floor-only
+                         Select the NGC5765b stage-1 chain fitted with only a
+                         separate clump-2 acceleration floor.
   --reconstruction none|Carrick2015|ManticoreLocalCOLA
   --field-config PATH
   --Vext                 Sample external bulk flow Vext (off by default).
@@ -138,7 +150,13 @@ Common options passed to run_maser.py:
                          inference/seed). DE checkpoints are separated by seed.
   --fix-floors-pesce     Hold the five error floors fixed at the published
                          Pesce/Reid values. de: dropped from the DE search;
-                         mcmc: dropped from the sampled sites.
+                         mcmc: dropped from the sampled sites. For NGC5765b,
+                         this implies --single-error-floor.
+  --single-error-floor   NGC5765b only: disable its separate sampled clump-2
+                         floors and use the standard floor per observable.
+  --clump2-acceleration-floor-only
+                         NGC5765b only: sample a separate clump-2 acceleration
+                         floor; position and velocity use the standard floors.
 
 MCMC/joint quick overrides passed to the Python runner:
   --num-warmup N
@@ -324,11 +342,19 @@ chain_init_strategy() {
 
 chain_variant_suffix() {
     local init="$1"
+    local galaxy="$2"
     local parts=()
     [[ "$ADD_ECC" == true ]] && parts+=("ecc")
     [[ "$ADD_QW" == true ]] && parts+=("qw")
     [[ "$MATCH_REID" == true ]] && parts+=("matchreid")
     [[ "$FIX_FLOORS_PESCE" == true ]] && parts+=("fixfloors")
+    if [[ "$galaxy" == "NGC5765b" \
+          && "$CLUMP2_ACCELERATION_FLOOR_ONLY" == true ]]; then
+        parts+=("accelfloor")
+    elif [[ "$galaxy" == "NGC5765b" \
+            && "$SINGLE_ERROR_FLOOR" == true ]]; then
+        parts+=("singlefloor")
+    fi
     parts+=("init${init}")
     local IFS=_
     echo "_${parts[*]}"
@@ -358,6 +384,7 @@ while [[ $# -gt 0 ]]; do
         --local) LOCAL=true; shift ;;
         --dry) DRY=true; shift ;;
         --skip-done) SKIP_DONE=true; shift ;;
+        --temp-output) TEMP_OUTPUT=true; shift ;;
         --infer-H0) INFER_H0=true; shift ;;
         --evidence) EVIDENCE=true; shift ;;
         --dataset) DATASET="$2"; ALWAYS_ARGS+=("$1" "$2"); shift 2 ;;
@@ -418,12 +445,20 @@ while [[ $# -gt 0 ]]; do
                 --add-quadratic-warp) ADD_QW=true ;;
             esac
             VARIANT_ARGS+=("$1"); shift ;;
+        --single-error-floor)
+            SINGLE_ERROR_FLOOR=true
+            VARIANT_ARGS+=("$1"); shift ;;
+        --clump2-acceleration-floor-only)
+            CLUMP2_ACCELERATION_FLOOR_ONLY=true
+            VARIANT_ARGS+=("$1"); shift ;;
         --resume|--fix-globals|--skip-base-model-seed)
             [[ "$1" == "--fix-globals" ]] && FIX_GLOBALS=true
             DE_ARGS+=("$1"); shift ;;
         --fix-globals-pesce|--fix-floors-pesce)
             case "$1" in
-                --fix-floors-pesce) FIX_FLOORS_PESCE=true ;;
+                --fix-floors-pesce)
+                    FIX_FLOORS_PESCE=true
+                    SINGLE_ERROR_FLOOR=true ;;
             esac
             case "$1" in
                 --fix-globals-pesce)
@@ -440,6 +475,13 @@ while [[ $# -gt 0 ]]; do
         *) PASSTHRU_ARGS+=("$@"); break ;;
     esac
 done
+
+if [[ "$SINGLE_ERROR_FLOOR" == true \
+      && "$CLUMP2_ACCELERATION_FLOOR_ONLY" == true ]]; then
+    echo "[ERROR] --single-error-floor and" \
+         "--clump2-acceleration-floor-only are mutually exclusive"
+    exit 1
+fi
 
 if [[ -z "$NUM_CHAINS" || -z "$CHAIN_WORKERS" ]]; then
     for ((i = 0; i < ${#PASSTHRU_ARGS[@]}; i++)); do
@@ -472,6 +514,13 @@ fi
 if [[ "$DATASET" != "original_published" && "$DATASET" != "fiducial" && "$DATASET" != "unpruned" && "$DATASET" != "clipped" ]]; then
     echo "[ERROR] --dataset must be original_published, fiducial, unpruned, or clipped"
     exit 1
+fi
+RUNNER_ENV=(/usr/bin/env)
+RUNNER_ENV_STR="/usr/bin/env"
+if [[ "$TEMP_OUTPUT" == true ]]; then
+    RUNNER_ENV+=("CANDEL_MEGAMASER_ROOT_OUTPUT=$TEMP_ROOT_OUTPUT")
+    RUNNER_ENV_STR+=" CANDEL_MEGAMASER_ROOT_OUTPUT=$TEMP_ROOT_OUTPUT"
+    echo "[submit] temporary output root: $ROOT/$TEMP_ROOT_OUTPUT/$DATASET"
 fi
 if [[ "$SAMPLER" != "mcmc" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler must be mcmc or de"; exit 1
@@ -709,7 +758,7 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
     [[ -n "$LOO_DROPPED" ]] && job_name="${job_name}_loo${LOO_DROPPED}"
     if [[ "$LOCAL" == true ]]; then
         echo "Running $joint_label ($GALAXY) locally"
-        cmd=(/usr/bin/env JAX_PLATFORMS=cpu "$CANDEL_PYTHON" -u "$runner"
+        cmd=("${RUNNER_ENV[@]}" JAX_PLATFORMS=cpu "$CANDEL_PYTHON" -u "$runner"
              --galaxy "$GALAXY")
         [[ ${#RUN_ARGS[@]} -gt 0 ]] && cmd+=("${RUN_ARGS[@]}")
         if [[ "$DRY" == true ]]; then
@@ -732,13 +781,14 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
         echo "Submitting $joint_label ($GALAXY) -> $CANDEL_CLUSTER:$QUEUE" \
              "($([[ "$joint_gpu" == true ]] && echo GPU || echo CPU))"
         if [[ "$joint_gpu" == true ]]; then
-            pycmd="$CANDEL_PYTHON -u $runner --galaxy $GALAXY"
+            pycmd="$RUNNER_ENV_STR $CANDEL_PYTHON -u $runner --galaxy $GALAXY"
         else
-            pycmd="/usr/bin/env JAX_PLATFORMS=cpu $CANDEL_PYTHON -u $runner --galaxy $GALAXY"
+            pycmd="$RUNNER_ENV_STR JAX_PLATFORMS=cpu $CANDEL_PYTHON -u $runner --galaxy $GALAXY"
         fi
         [[ ${#RUN_ARGS[@]} -gt 0 ]] && pycmd+=" ${RUN_ARGS[*]}"
         # Keep stage-2 outputs and scheduler logs below the dataset's H0 folder.
         joint_root="$(config_value io root_output)"
+        [[ "$TEMP_OUTPUT" == true ]] && joint_root="$TEMP_ROOT_OUTPUT"
         [[ -z "$joint_root" ]] && joint_root="results/Megamaser"
         submit_args=(--queue "$QUEUE" --mem "$MEM"
                      --name "$job_name"
@@ -797,6 +847,7 @@ maser_root_output="$(
     ' "$ROOT/scripts/megamaser/config_maser.toml" 2>/dev/null || true
 )"
 [[ -z "$maser_root_output" ]] && maser_root_output="results/Megamaser"
+[[ "$TEMP_OUTPUT" == true ]] && maser_root_output="$TEMP_ROOT_OUTPUT"
 # run_maser.py/run_de_map.py namespace root_output by dataset, so mirror that
 # here or the chain and log paths below point at the wrong dataset.
 MASER_OUT="$ROOT/$maser_root_output/$DATASET"
@@ -805,8 +856,9 @@ stamp="$(date '+%Y%m%d_%H%M%S')"
 if [[ "$EVIDENCE" == true ]]; then
     EVIDENCE_RUNNER="$ROOT/scripts/megamaser/evidence_single_galaxy.py"
     init_strategy="$(chain_init_strategy)"
-    suffix="blackjax_mcmc_rphi$(chain_variant_suffix "$init_strategy")"
     for gal in $GALAXY; do
+        suffix="blackjax_mcmc_rphi$(chain_variant_suffix \
+            "$init_strategy" "$gal")"
         chain="$MASER_OUT/$gal/${gal}_${suffix}.hdf5"
         logdir="$MASER_OUT/$gal/logs"
         echo "[evidence] $gal: $chain"
@@ -823,7 +875,7 @@ if [[ "$EVIDENCE" == true ]]; then
         [[ -n "$SPOT_BATCH" ]] && evidence_args+=(--spot-batch "$SPOT_BATCH")
         [[ ${#PASSTHRU_ARGS[@]} -gt 0 ]] && evidence_args+=("${PASSTHRU_ARGS[@]}")
         if [[ "$LOCAL" == true ]]; then
-            cmd=("$CANDEL_PYTHON" -u "$EVIDENCE_RUNNER" "$gal")
+            cmd=("${RUNNER_ENV[@]}" "$CANDEL_PYTHON" -u "$EVIDENCE_RUNNER" "$gal")
             cmd+=("${evidence_args[@]}")
             if [[ "$DRY" == true ]]; then
                 printf '[dry]'; printf ' %q' "${cmd[@]}"; printf '\n'
@@ -833,7 +885,7 @@ if [[ "$EVIDENCE" == true ]]; then
             continue
         fi
         echo "Submitting $gal evidence -> $CANDEL_CLUSTER:$QUEUE"
-        pycmd="$CANDEL_PYTHON -u $EVIDENCE_RUNNER $gal"
+        pycmd="$RUNNER_ENV_STR $CANDEL_PYTHON -u $EVIDENCE_RUNNER $gal"
         pycmd+=" ${evidence_args[*]}"
         submit_args=(--gpu --queue "$QUEUE" --mem "$MEM"
                      --name "maser_evidence_${gal}" --logdir "$logdir")
@@ -853,6 +905,9 @@ if [[ ${#RUN_ARGS[@]} -gt 0 ]]; then
             --compare-reid)       variant_tag="${variant_tag}_reid" ;;
             --match-reid)         variant_tag="${variant_tag}_matchreid" ;;
             --fix-floors-pesce)   variant_tag="${variant_tag}_fixfloors" ;;
+            --single-error-floor) variant_tag="${variant_tag}_singlefloor" ;;
+            --clump2-acceleration-floor-only)
+                variant_tag="${variant_tag}_accelfloor" ;;
         esac
     done
 fi
@@ -862,7 +917,8 @@ fi
 for gal in $GALAXY; do
     if [[ "$SKIP_DONE" == true ]]; then
         init_strategy="$(chain_init_strategy)"
-        suffix="blackjax_mcmc_rphi$(chain_variant_suffix "$init_strategy")"
+        suffix="blackjax_mcmc_rphi$(chain_variant_suffix \
+            "$init_strategy" "$gal")"
         outpath="$MASER_OUT/$gal/${gal}_${suffix}.hdf5"
         if [[ -f "$outpath" ]]; then
             echo "[skip-done] $gal: $outpath"
@@ -873,10 +929,11 @@ for gal in $GALAXY; do
     if [[ "$LOCAL" == true ]]; then
         echo "Running $gal ($SAMPLER) locally"
         if [[ "$SAMPLER" == "mcmc" ]]; then
-            cmd=(/usr/bin/env JAX_PLATFORMS=cpu "$CANDEL_PYTHON" -u "$RUNNER"
+            cmd=("${RUNNER_ENV[@]}" JAX_PLATFORMS=cpu "$CANDEL_PYTHON" -u "$RUNNER"
                  "$gal" --sampler "$SAMPLER")
         else
-            cmd=("$CANDEL_PYTHON" -u "$RUNNER" "$gal" --sampler "$SAMPLER")
+            cmd=("${RUNNER_ENV[@]}" "$CANDEL_PYTHON" -u "$RUNNER"
+                 "$gal" --sampler "$SAMPLER")
         fi
         if [[ ${#RUN_ARGS[@]} -gt 0 ]]; then
             cmd+=("${RUN_ARGS[@]}")
@@ -903,9 +960,9 @@ for gal in $GALAXY; do
 
     echo "Submitting $gal ($SAMPLER) -> $CANDEL_CLUSTER:$QUEUE"
     if [[ "$SAMPLER" == "mcmc" ]]; then
-        pycmd="/usr/bin/env JAX_PLATFORMS=cpu $CANDEL_PYTHON -u $RUNNER $gal --sampler $SAMPLER"
+        pycmd="$RUNNER_ENV_STR JAX_PLATFORMS=cpu $CANDEL_PYTHON -u $RUNNER $gal --sampler $SAMPLER"
     else
-        pycmd="$CANDEL_PYTHON -u $RUNNER $gal --sampler $SAMPLER"
+        pycmd="$RUNNER_ENV_STR $CANDEL_PYTHON -u $RUNNER $gal --sampler $SAMPLER"
     fi
     if [[ ${#RUN_ARGS[@]} -gt 0 ]]; then
         pycmd+=" ${RUN_ARGS[*]}"

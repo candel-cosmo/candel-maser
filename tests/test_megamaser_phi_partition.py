@@ -70,6 +70,7 @@ def _precomputed_model_fields(eccentric, shared_r=False):
     model._all_sigma_v2 = jnp.array([0.25, 0.25])
     model._all_sigma_a2 = jnp.array([0.01, 1.0])
     model._all_has_accel = jnp.array([True, False])
+    model._all_is_clump2 = jnp.array([False, False])
     model.is_highvel = jnp.array([False, True])
     r_ang = (jnp.array([0.28, 0.34]) if shared_r else
              jnp.array([[0.28, 0.34], [0.39, 0.47]]))
@@ -83,6 +84,24 @@ def _precomputed_model_fields(eccentric, shared_r=False):
         e_x=0.035 if eccentric else None,
         e_y=-0.02 if eccentric else None,
         dperiapsis_dr=jnp.deg2rad(4.0), dv_sys=3.0)
+
+
+def test_clump2_floors_replace_standard_floors():
+    model, _ = _precomputed_model_fields(eccentric=False)
+    model._all_is_clump2 = jnp.array([True, False])
+    r_pre = model._r_precompute(
+        jnp.array([0.28, 0.39]), jnp.arange(2),
+        2.0, -1.0, 110.0, 3.0, 7003.0,
+        0.35, 0.35, 0.2,
+        jnp.deg2rad(89.0), jnp.deg2rad(2.0),
+        jnp.deg2rad(20.0), jnp.deg2rad(3.0),
+        1.0, 1.0, 4.0, 4.0, 0.01,
+        9.0, 16.0, 25.0, 0.09)
+
+    np.testing.assert_allclose(r_pre["var_x"], [25.0, 26.0])
+    np.testing.assert_allclose(r_pre["var_y"], [32.0, 26.0])
+    np.testing.assert_allclose(r_pre["var_v"], [25.25, 4.25])
+    np.testing.assert_allclose(r_pre["var_a"], [0.10, 1.01])
 
 
 def test_partition_integrates_sharp_peaks_in_both_phi_halfplanes():

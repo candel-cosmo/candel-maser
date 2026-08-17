@@ -37,6 +37,7 @@ if MASER_DIR not in sys.path:
     sys.path.insert(0, MASER_DIR)
 
 from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
+from candel.model.maser_blackjax import prepare_floor_init  # noqa: E402
 
 
 def load_master_config(path, dataset=None):
@@ -388,6 +389,8 @@ def extend_grad_params(model, sample):
         "eta" if getattr(model, "mass_parameterization", "eta") == "eta"
         else "log_MBH")
     keys.extend(GRAD_PARAMS_BASE)
+    if getattr(model, "use_clump2_floors", False):
+        keys.extend(target for target, _ in model.clump2_floor_pairs)
     if model.use_quadratic_warp:
         for k in ("d2i_dr2", "d2Omega_dr2"):
             if k in sample:
@@ -463,7 +466,7 @@ def ensure_grad_sample(model, init_block, dtype=None):
             for k in ("ecc", "periapsis"):
                 sample.setdefault(k, jnp.asarray(0.0, dtype=dtype))
         sample.setdefault("dperiapsis_dr", jnp.asarray(0.0, dtype=dtype))
-    return sample
+    return prepare_floor_init(model, sample)
 
 
 def jax_phys_from_sample(model, sample):
@@ -497,6 +500,23 @@ def jax_phys_from_sample(model, sample):
     M_BH = 10.0 ** (log_MBH - 7.0)
     v_sys = model.v_sys_obs + g("dv_sys", 0.0)
 
+    sigma_x_floor2 = g("sigma_x_floor") ** 2
+    sigma_y_floor2 = g("sigma_y_floor") ** 2
+    var_v_sys = g("sigma_v_sys") ** 2
+    sigma_a_floor2 = g("sigma_a_floor") ** 2
+    if getattr(model, "use_clump2_floors", False):
+        active = {target for target, _ in model.clump2_floor_pairs}
+        names = (
+            "sigma_x_floor_clump2", "sigma_y_floor_clump2",
+            "sigma_v_floor_clump2", "sigma_a_floor_clump2")
+        clump2_floors = tuple(
+            g(name) ** 2 if name in active else standard
+            for name, standard in zip(
+                names, (sigma_x_floor2, sigma_y_floor2,
+                        var_v_sys, sigma_a_floor2)))
+    else:
+        clump2_floors = ()
+
     phys_args = (
         g("x0"), g("y0"),
         D_A, M_BH, v_sys,
@@ -507,11 +527,12 @@ def jax_phys_from_sample(model, sample):
         jnp.deg2rad(g("di_dr")),
         jnp.deg2rad(g("Omega0")),
         jnp.deg2rad(g("dOmega_dr")),
-        g("sigma_x_floor") ** 2,
-        g("sigma_y_floor") ** 2,
-        g("sigma_v_sys") ** 2,
+        sigma_x_floor2,
+        sigma_y_floor2,
+        var_v_sys,
         g("sigma_v_hv") ** 2,
-        g("sigma_a_floor") ** 2,
+        sigma_a_floor2,
+        *clump2_floors,
     )
     phys_kw = {"dv_sys": g("dv_sys", 0.0)}
     if model.use_quadratic_warp:

@@ -31,6 +31,21 @@ DATASET = "original_published"
 RESULTS = ROOT / "results" / "Megamaser" / DATASET / "H0"
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
 
+# The forest figure compares the two baseline input spot tables at fixed
+# modelling variant.  The published catalogues are deliberately not shown:
+# they are the historical reference and live in the H0-variants table only.
+# The other figures in this module stay on DATASET.
+H0_ROOT = ROOT / "results" / "Megamaser"
+DATASETS = ["fiducial", "clipped"]
+DATASET_LABEL = {"fiducial": "P20",
+                 "clipped": "Revised-clipped",
+                 "original_published": "Original"}
+# Colour already encodes the selection, so the input table is encoded by
+# marker shape and fill.
+DATASET_MARKER = {"fiducial": "o", "clipped": "s", "original_published": "o"}
+DATASET_OPEN = {"fiducial": False, "clipped": False,
+                "original_published": True}
+
 # (value, sigma) reference H0 measurements, all symmetric.
 PLANCK = (67.4, 0.5)        # Planck 2018
 SHOES = (73.17, 0.86)       # SH0ES, Breuval+2024 (arXiv:2404.08038)
@@ -68,18 +83,33 @@ def _da_summary(s):
     return q50, q50 - q16, q84 - q50
 
 
+def _dataset_path(dataset, sel, recon):
+    """Volume-prior, linear-warp combined run for one input spot table."""
+    stem = f"joint_H0_toy_all_{sel}_{recon}_r2"
+    return H0_ROOT / dataset / "H0" / f"{stem}.hdf5"
+
+
 def load_grid():
-    """Return {(recon, sel, qw): H0 samples} for every grid file present."""
+    """Return {(recon, sel, dataset): H0 samples} for every grid file present.
+
+    Missing files are skipped rather than raising, so the figure degrades to
+    whichever input tables have been run.
+    """
     out = {}
+    missing = []
     for recon in RECON:
         for sel in SEL:
-            for qw in (False, True):
-                p = _path(sel, recon, qw)
+            for dataset in DATASETS:
+                p = _dataset_path(dataset, sel, recon)
                 if not p.exists():
+                    missing.append(f"{dataset}/{sel}/{recon}")
                     continue
                 with h5py.File(p, "r") as f:
-                    out[(recon, sel, qw)] = np.asarray(
+                    out[(recon, sel, dataset)] = np.asarray(
                         f["samples/H0"], dtype=float).ravel()
+    if missing:
+        print(f"load_grid: {len(missing)} run(s) absent: "
+              + ", ".join(missing))
     return out
 
 
@@ -99,7 +129,7 @@ def fig_forest(out):
 
     # Row / selection / reconstruction-block vertical gaps.
     PAIR_STEP, SEL_GAP, RECON_GAP = 0.8, 1.6, 2.6
-    y, med, lo, hi, col, fill = [], [], [], [], [], []
+    y, med, lo, hi, col, dset = [], [], [], [], [], []
     sel_labels = []   # (text, y_centre) one per selection pair
     blocks = []       # (recon, y_centre) one per reconstruction block
     block_bounds = []  # (y_min, y_max) per block, for separator lines
@@ -112,10 +142,10 @@ def fig_forest(out):
             if si > 0:
                 pos += SEL_GAP
             pair_ys = []
-            for qw in (False, True):
-                if (recon, sel, qw) not in grid:
+            for dataset in DATASETS:
+                if (recon, sel, dataset) not in grid:
                     continue
-                q16, q50, q84 = np.percentile(grid[(recon, sel, qw)],
+                q16, q50, q84 = np.percentile(grid[(recon, sel, dataset)],
                                               [16, 50, 84])
                 y.append(pos)
                 pair_ys.append(pos)
@@ -124,7 +154,7 @@ def fig_forest(out):
                 lo.append(q50 - q16)
                 hi.append(q84 - q50)
                 col.append(PAL[sel])
-                fill.append(qw)  # quadratic -> open marker
+                dset.append(dataset)
                 pos += PAIR_STEP
             pos -= PAIR_STEP  # SEL_GAP runs from the last row of the pair
             base = recon == "ManticoreLocalCOLA"
@@ -154,9 +184,11 @@ def fig_forest(out):
         ax.axhspan(mlc_lo, mlc_hi, color="0.9", alpha=0.6, lw=0, zorder=-5)
         for i in range(len(y)):
             ax.errorbar(
-                med[i], y[i], xerr=[[lo[i]], [hi[i]]], fmt="o", ms=4.5,
+                med[i], y[i], xerr=[[lo[i]], [hi[i]]],
+                fmt=DATASET_MARKER[dset[i]], ms=4.5,
                 color=col[i], capsize=2, lw=1.0,
-                markerfacecolor="white" if fill[i] else col[i],
+                markerfacecolor=("white" if DATASET_OPEN[dset[i]]
+                                 else col[i]),
                 markeredgecolor=col[i])
         for (name, (mu, sig), c), yy in zip(refs, ref_y):
             ax.errorbar(mu, yy, xerr=sig, fmt="D", ms=4.5, color=c,
@@ -184,15 +216,16 @@ def fig_forest(out):
                     xycoords=("axes fraction", "data"),
                     rotation=-90, va="center", ha="center", fontsize=7,
                     color="0.3", annotation_clip=False)
-        # marker key centred above the panel: filled = linear, open = quadratic
-        warp_key = [
-            Line2D([], [], marker="o", color="0.35", markerfacecolor="0.35",
-                   linestyle="none", ms=4.5, label="Linear warp"),
-            Line2D([], [], marker="o", color="0.35", markerfacecolor="white",
-                   linestyle="none", ms=4.5, label="Quadratic warp")]
-        ax.legend(handles=warp_key, loc="lower center",
-                  bbox_to_anchor=(0.5, 1.004), ncol=2, frameon=False,
-                  fontsize=7, handletextpad=0.3, columnspacing=1.2)
+        # marker key centred above the panel: one entry per input spot table
+        table_key = [
+            Line2D([], [], marker=DATASET_MARKER[d], color="0.35",
+                   markerfacecolor=("white" if DATASET_OPEN[d] else "0.35"),
+                   markeredgecolor="0.35", linestyle="none", ms=4.5,
+                   label=DATASET_LABEL[d])
+            for d in DATASETS]
+        ax.legend(handles=table_key, loc="lower center",
+                  bbox_to_anchor=(0.5, 1.004), ncol=3, frameon=False,
+                  fontsize=7, handletextpad=0.3, columnspacing=1.0)
         # header centred above the left-hand selection labels
         ax.text(-0.12, 1.008, r"\textit{Selection}" "\n" r"\textit{variants}",
                 transform=ax.transAxes, ha="center", va="bottom", fontsize=7.5)

@@ -33,7 +33,8 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
+from candel.model.maser_blackjax import (  # noqa: E402
+    MaserBlackJaxTarget, prepare_floor_init)
 from candel.model.maser_map import evaluate_at_globals  # noqa: E402
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
 from candel.pvdata.megamaser_data import (  # noqa: E402
@@ -103,10 +104,12 @@ def _clean_init(model, init_cfg):
     else:
         for k in ("d2i_dr2", "d2Omega_dr2"):
             p.setdefault(k, jnp.asarray(0.0))
-    return p
+    return prepare_floor_init(model, p)
 
 
-def _build_target(galaxy, gcfg, spot_batch, dataset):
+def _build_target(galaxy, gcfg, spot_batch, dataset,
+                  single_error_floor=False,
+                  clump2_acceleration_floor_only=False):
     config = {
         "inference": _MASTER_CFG["inference"],
         "model": dict(_MASTER_CFG["model"]),
@@ -114,6 +117,11 @@ def _build_target(galaxy, gcfg, spot_batch, dataset):
     }
     config["model"]["galaxies"] = {
         g: dict(blk) for g, blk in _MASTER_CFG["model"]["galaxies"].items()}
+    if single_error_floor:
+        config["model"]["use_ngc5765b_clump2_floors"] = False
+    elif clump2_acceleration_floor_only:
+        config["model"]["use_ngc5765b_clump2_floors"] = True
+        config["model"]["ngc5765b_clump2_acceleration_only"] = True
     data = load_megamaser_spots(
         maser_data_root(dataset), galaxy, v_sys_obs=gcfg["v_sys_obs"],
         use_ecc=gcfg.get("use_ecc", False),
@@ -232,6 +240,13 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0,
                         help="RNG seed for the random restarts")
     parser.add_argument("--spot-batch", type=int, default=None)
+    floor_mode = parser.add_mutually_exclusive_group()
+    floor_mode.add_argument(
+        "--single-error-floor", action="store_true",
+        help="For NGC5765b, disable the separate clump-2 floors.")
+    floor_mode.add_argument(
+        "--clump2-acceleration-floor-only", action="store_true",
+        help="For NGC5765b, use a separate clump-2 acceleration floor only.")
     parser.add_argument("--no-reid", action="store_true",
                         help="skip the Reid/Pesce fixed-globals comparison")
     parser.add_argument("--no-marginal", action="store_true",
@@ -248,7 +263,10 @@ def main(argv=None):
     print("float64 enabled; JAX backend:", jax.default_backend(), flush=True)
 
     model, target, init = _build_target(
-        args.galaxy, galaxies[args.galaxy], args.spot_batch, dataset)
+        args.galaxy, galaxies[args.galaxy], args.spot_batch, dataset,
+        single_error_floor=args.single_error_floor,
+        clump2_acceleration_floor_only=(
+            args.clump2_acceleration_floor_only))
     print(f"{args.galaxy}: n_spots={model.n_spots}, "
           f"globals={list(target.names)}", flush=True)
 
@@ -324,10 +342,16 @@ def main(argv=None):
             print(f"{label:>6s} {cc:>12.3f} {rc:>15.3f} "
                   f"{abs(cc - rc):>9.3f} {rel:>7.3f}{flag}", flush=True)
 
+    floor_suffix = ""
+    if args.galaxy == "NGC5765b":
+        if model.clump2_acceleration_only:
+            floor_suffix = "_accelfloor"
+        elif not model.use_clump2_floors:
+            floor_suffix = "_singlefloor"
     outpath = args.out or os.path.join(
         results_path(
             _MASTER_CFG["io"].get("root_output", "results/Megamaser")),
-        f"{args.galaxy}_map{_variant_suffix(model)}.json")
+        f"{args.galaxy}_map{_variant_suffix(model)}{floor_suffix}.json")
     os.makedirs(os.path.dirname(outpath), exist_ok=True)
     with open(outpath, "w") as fh:
         json.dump({"dof": dof,

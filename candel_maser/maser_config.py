@@ -18,6 +18,7 @@ One switch, applied once per process: `apply_dataset` merges the dataset's
 `init_<dataset>.toml` best points into the config and namespaces `root_output`
 by dataset, so every downstream path follows without further edits.
 """
+from os import environ
 from os.path import basename, dirname, join, normpath
 
 import tomli
@@ -26,6 +27,7 @@ from candel.pvdata.megamaser_data import MASER_DATASETS
 from candel.util import fprint
 
 _HERE = dirname(__file__)
+ROOT_OUTPUT_ENV = "CANDEL_MEGAMASER_ROOT_OUTPUT"
 
 # Keys a dataset file may set. Everything else must stay in config_maser.toml:
 # the runners read force_f64 / phi_integration / conditional_spot_batch
@@ -88,6 +90,8 @@ def _merge_init(cfg, dataset):
 def _namespace_root_output(cfg, dataset):
     """Append `dataset` to ``[io].root_output``, idempotently."""
     io = cfg.setdefault("io", {})
+    if environ.get(ROOT_OUTPUT_ENV):
+        io["root_output"] = environ[ROOT_OUTPUT_ENV]
     root = io.get("root_output")
     if root is None:
         return

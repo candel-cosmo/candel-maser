@@ -129,6 +129,11 @@ def _toy_default_distance_file(galaxy, args):
         parts.append("ecc")
     if args.add_quadratic_warp:
         parts.append("qw")
+    if galaxy == "NGC5765b":
+        if args.clump2_acceleration_floor_only:
+            parts.append("accelfloor")
+        elif args.single_error_floor:
+            parts.append("singlefloor")
     parts.append(f"init{init}")
     suffix = "blackjax_mcmc_rphi_" + "_".join(parts)
     return results_path(root, galaxy, f"{galaxy}_{suffix}.hdf5")
@@ -1032,6 +1037,15 @@ def main(argv=None):
                         help="Select the eccentric stage-1 chains.")
     parser.add_argument("--add-quadratic-warp", action="store_true",
                         help="Select the quadratic-warp stage-1 chains.")
+    floor_mode = parser.add_mutually_exclusive_group()
+    floor_mode.add_argument(
+        "--single-error-floor", action="store_true",
+        help="Select the NGC5765b stage-1 chain fitted without separate "
+             "clump-2 floors; other galaxies are unchanged.")
+    floor_mode.add_argument(
+        "--clump2-acceleration-floor-only", action="store_true",
+        help="Select the NGC5765b stage-1 chain fitted with only a separate "
+             "clump-2 acceleration floor.")
     parser.add_argument("--leave-one-out-dropped", default=None,
                         metavar="GAL",
                         help="Galaxy dropped in this leave-one-out fit; "
@@ -1203,6 +1217,13 @@ def main(argv=None):
 
     variant = ("_ecc" if args.add_ecc else "") + (
         "_qw" if args.add_quadratic_warp else "")
+    if (args.distance_source == "candel" and args.single_error_floor
+            and "NGC5765b" in galaxies):
+        variant += "_singlefloor"
+    if (args.distance_source == "candel"
+            and args.clump2_acceleration_floor_only
+            and "NGC5765b" in galaxies):
+        variant += "_accelfloor"
     if args.distance_source == "p20":
         variant += "_p20"
     outpath = args.output or _result_path(
@@ -1219,6 +1240,13 @@ def main(argv=None):
         "reconstruction": args.reconstruction,
         "use_ecc": bool(args.add_ecc),
         "use_quadratic_warp": bool(args.add_quadratic_warp),
+        "ngc5765b_single_error_floor": bool(
+            args.distance_source == "candel" and args.single_error_floor
+            and "NGC5765b" in galaxies),
+        "ngc5765b_clump2_acceleration_floor_only": bool(
+            args.distance_source == "candel"
+            and args.clump2_acceleration_floor_only
+            and "NGC5765b" in galaxies),
         "velocity_beta": velocity_beta,
         "sample_velocity_beta": sample_velocity_beta,
         "sample_vext": sample_vext,

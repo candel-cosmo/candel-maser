@@ -20,8 +20,9 @@ The sampler targets the megamaser disk likelihood:
   Euclidean coordinates;
 * the production distance/mass block samples direct ``D_A`` and either
   ``log_MBH`` or ``eta = log_MBH - log10(D_A)``;
-* ``r_ang`` is represented by non-centred log-radius residuals,
-  ``z_r = log(r_ang / r_hat(theta))``, and updated jointly with ``phi`` by a
+* ``r_ang`` is represented by non-centred log-radius residuals, except for
+  NGC5765b where a logit transform imposes fixed angular bounds, and is
+  updated jointly with ``phi`` by a
   vectorised per-spot adaptive random-walk Metropolis (correlated ``(z_r,
   phi)`` block, plus a reflection move that hops the two ``phi`` modes of
   high-velocity spots);
@@ -58,6 +59,7 @@ from . import maser_physics
 (_I_X0, _I_Y0, _I_DA, _I_MBH, _I_VSYS, _I_RREF_I, _I_RREF_OMEGA,
  _I_I0, _I_DI, _I_OMEGA0, _I_DOMEGA, _I_SXF2, _I_SYF2, _I_VARVHV,
  _I_SAF2) = (0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 15, 16)
+_I_SXF2_CLUMP2, _I_SYF2_CLUMP2 = 17, 18
 
 
 def _require_blackjax():
@@ -138,7 +140,27 @@ def _update_chunk_postfix(progress, info_chunk, theta_scale):
     _update_mcmc_progress_postfix(progress, last, theta_scale)
 
 
-def _seeds(model, phys_args):
+def _ngc5765b_reference_r_ang_bounds(model, h):
+    """Fixed angular bounds from the CMB redshift at the reference H0."""
+    v_cmb = float(model.config["model"]["galaxies"]["NGC5765b"][
+        "v_cmb_kms"])
+    z_ref = v_cmb / maser_physics.SPEED_OF_LIGHT
+    D_c_ref = model.redshift2distance(
+        jnp.atleast_1d(v_cmb), h=h, is_velocity=True).squeeze()
+    D_A_ref = D_c_ref / (1.0 + z_ref)
+    r_min, r_max = model.r_ang_range(D_A_ref)
+    return r_min, r_max, D_A_ref
+
+
+def _r_ang_seed_bounds(model, D_A, h):
+    """Finite seed bounds; also the fixed MCMC support for NGC5765b."""
+    if model.galaxy_name == "NGC5765b":
+        r_min, r_max, _ = _ngc5765b_reference_r_ang_bounds(model, h)
+        return r_min, r_max
+    return model.r_ang_range(D_A)
+
+
+def _seeds(model, phys_args, h):
     """Float32-stable (r_hat, r_min, r_max) from a phys_args tuple.
 
     ``model.radius_seeds`` is mathematically fine, but in float32 its masked
@@ -150,7 +172,7 @@ def _seeds(model, phys_args):
     M_BH = phys_args[_I_MBH]
     v_sys = phys_args[_I_VSYS]
     i0 = phys_args[_I_I0]
-    r_min, r_max = model.r_ang_range(D_A)
+    r_min, r_max = _r_ang_seed_bounds(model, D_A, h)
 
     dtype = jnp.result_type(D_A, M_BH, v_sys, i0)
     sin_i = jnp.maximum(jnp.abs(jnp.sin(i0)),
@@ -242,6 +264,10 @@ def _theta_site_prior_pairs(model, h=None):
         ("dv_sys", "dv_sys"),
     ]
 
+    if getattr(model, "use_clump2_floors", False):
+        pairs.extend((target, target)
+                     for target, _ in model.clump2_floor_pairs)
+
     if model.use_ecc:
         if not model.ecc_cartesian:
             raise NotImplementedError(
@@ -270,6 +296,24 @@ def _theta_site_prior_pairs(model, h=None):
             continue
         out.append((site, prior_key, prior))
     return tuple(out)
+
+
+def prepare_floor_init(model, params):
+    """Keep initial values only for the active clump-2 floor sites."""
+    sources = (
+        ("sigma_x_floor_clump2", "sigma_x_floor"),
+        ("sigma_y_floor_clump2", "sigma_y_floor"),
+        ("sigma_v_floor_clump2", "sigma_v_sys"),
+        ("sigma_a_floor_clump2", "sigma_a_floor"),
+    )
+    active = {target for target, _ in getattr(
+        model, "clump2_floor_pairs", ())}
+    for target, source in sources:
+        if target in active:
+            params.setdefault(target, params[source])
+        else:
+            params.pop(target, None)
+    return params
 
 
 def _finite_scalar(value):
@@ -429,17 +473,23 @@ def _chain_worker_count(num_chains, chain_workers=8):
 
 def estimate_radial_eps(model, theta, h, delta=0.02,
                         eps_min=1e-3, eps_max=0.5):
-    """Per-spot proposal scales for non-centred log-radius residuals."""
+    """Per-spot proposal scales for non-centred radius residuals."""
     phys_args, phys_kw = model.phys_from_params_jax(theta, h)
-    r_hat, r_min, r_max = _seeds(model, phys_args)
-    log_r_hat = jnp.log(r_hat)
-    lo = jnp.log(r_min) - log_r_hat
-    hi = jnp.log(r_max) - log_r_hat
-    step = jnp.minimum(delta, 0.45 * jnp.minimum(-lo, hi))
-    step = jnp.maximum(step, jnp.asarray(1e-5, dtype=r_hat.dtype))
+    r_hat, r_min, r_max = _seeds(model, phys_args, h)
+    if model.galaxy_name == "NGC5765b":
+        step = jnp.full_like(r_hat, delta)
+    else:
+        log_r_hat = jnp.log(r_hat)
+        lo = jnp.log(r_min) - log_r_hat
+        hi = jnp.log(r_max) - log_r_hat
+        step = jnp.minimum(delta, 0.45 * jnp.minimum(-lo, hi))
+        step = jnp.maximum(
+            step, jnp.asarray(1e-5, dtype=r_hat.dtype))
 
     def ll(z):
-        return _ll_per_spot(model, r_hat * jnp.exp(z), phys_args, phys_kw)
+        r_ang, _ = _transform_r_ang(
+            model, z, r_hat, r_min, r_max)
+        return _ll_per_spot(model, r_ang, phys_args, phys_kw)
 
     z0 = jnp.zeros_like(r_hat)
     l0 = ll(z0)
@@ -450,11 +500,52 @@ def estimate_radial_eps(model, theta, h, delta=0.02,
     return jnp.clip(2.4 * sigma, eps_min, eps_max)
 
 
+def _bounded_r_from_z(z_r, r_hat, r_min, r_max):
+    """Map unconstrained residuals to ``r_min < r_ang < r_max``."""
+    width = r_max - r_min
+    q_hat = (r_hat - r_min) / width
+    centre = jnp.log(q_hat) - jnp.log1p(-q_hat)
+    t = centre + z_r
+    q = jax.nn.sigmoid(t)
+    r_ang = r_min + width * q
+    log_dr_dz = (jnp.log(width) + jax.nn.log_sigmoid(t)
+                 + jax.nn.log_sigmoid(-t))
+    return r_ang, log_dr_dz
+
+
+def _z_from_bounded_r(r_ang, r_hat, r_min, r_max):
+    """Inverse of :func:`_bounded_r_from_z` for initialisation."""
+    width = r_max - r_min
+    eps = jnp.finfo(jnp.asarray(r_ang).dtype).eps
+    q = jnp.clip((r_ang - r_min) / width, eps, 1.0 - eps)
+    q_hat = (r_hat - r_min) / width
+    return (jnp.log(q) - jnp.log1p(-q)
+            - jnp.log(q_hat) + jnp.log1p(-q_hat))
+
+
+def _transform_r_ang(model, z_r, r_hat, r_min, r_max):
+    """Map residuals to radii with the galaxy-specific MCMC support."""
+    if model.galaxy_name == "NGC5765b":
+        return _bounded_r_from_z(z_r, r_hat, r_min, r_max)
+    r_ang = r_hat * jnp.exp(z_r)
+    return r_ang, jnp.log(r_ang)
+
+
+def _inverse_transform_r_ang(model, r_ang, r_hat, r_min, r_max):
+    """Inverse of :func:`_transform_r_ang` for initialisation."""
+    if model.galaxy_name == "NGC5765b":
+        return _z_from_bounded_r(r_ang, r_hat, r_min, r_max)
+    return jnp.log(r_ang / r_hat)
+
+
 def _r_ang_from_z(model, theta, h, z_r):
-    """Map non-centred log-radius residuals to angular radii."""
+    """Map unconstrained residuals to angular radii."""
     phys_args, phys_kw = model.phys_from_params_jax(theta, h)
-    r_hat, r_min, r_max = _seeds(model, phys_args)
-    return r_hat * jnp.exp(z_r), r_hat, r_min, r_max, phys_args, phys_kw
+    r_hat, r_min, r_max = _seeds(model, phys_args, h)
+    r_ang, log_dr_dz = _transform_r_ang(
+        model, z_r, r_hat, r_min, r_max)
+    return (r_ang, r_hat, r_min, r_max, phys_args, phys_kw,
+            log_dr_dz)
 
 
 def _systemic_phi_xy_coefficients(model, r_ang, phys_args, phys_kw):
@@ -468,8 +559,17 @@ def _systemic_phi_xy_coefficients(model, r_ang, phys_args, phys_kw):
     radius_uas = 1e3 * r_ang
     dx_dphi = radius_uas * sin_O
     dy_dphi = radius_uas * cos_O
-    var_x = model._all_sigma_x2 + phys_args[_I_SXF2]
-    var_y = model._all_sigma_y2 + phys_args[_I_SYF2]
+    if getattr(model, "use_clump2_floors", False):
+        floor_x2 = jnp.where(
+            model._all_is_clump2,
+            phys_args[_I_SXF2_CLUMP2], phys_args[_I_SXF2])
+        floor_y2 = jnp.where(
+            model._all_is_clump2,
+            phys_args[_I_SYF2_CLUMP2], phys_args[_I_SYF2])
+    else:
+        floor_x2, floor_y2 = phys_args[_I_SXF2], phys_args[_I_SYF2]
+    var_x = model._all_sigma_x2 + floor_x2
+    var_y = model._all_sigma_y2 + floor_y2
     denom = dx_dphi**2 / var_x + dy_dphi**2 / var_y
     denom = jnp.maximum(denom, jnp.finfo(r_ang.dtype).tiny)
     active = ~model.is_highvel
@@ -619,7 +719,7 @@ def latent_z_phi_rw_sweep(model, theta, z_r, phi, latent_scale, rng_key, h,
       still discoverable.  (Mirror is symmetric -> no correction; the map
       carries its Jacobian.)
     """
-    _, r_hat, _, _, phys_args, phys_kw = _r_ang_from_z(
+    _, r_hat, r_min, r_max, phys_args, phys_kw, _ = _r_ang_from_z(
         model, theta, h, z_r)
     phi_lo, phi_hi, phi_centre = _phi_support_arrays(model, z_r.dtype)
     is_hv = model.is_highvel
@@ -648,13 +748,12 @@ def latent_z_phi_rw_sweep(model, theta, z_r, phi, latent_scale, rng_key, h,
         return jnp.where(phi_val >= phi_centre, 1.0, -1.0)
 
     def logp(z_val, phi_val):
-        r_val = r_hat * jnp.exp(z_val)
+        r_val, log_dr_dz = _transform_r_ang(
+            model, z_val, r_hat, r_min, r_max)
         inside_phi = (phi_val >= phi_lo) & (phi_val <= phi_hi)
         lp = _ll_fixed_phi_per_spot(
             model, r_val, phi_val, phys_args, phys_kw)
-        # Flat-in-r_ang Jacobian |dr_ang/dz_r| = r_ang; r_ang > 0 is automatic
-        # so there is no [r_min, r_max] wall.  phi keeps its hard box.
-        lp = lp + jnp.log(r_val)
+        lp = lp + log_dr_dz
         return jnp.where(inside_phi, lp, -jnp.inf)
 
     lp0 = logp(z_r, phi)
@@ -758,7 +857,7 @@ class MaserBlackJaxTarget:
         if transport_systemic_phi:
             u_theta, z_r = self.initial_state(init_params)
             theta, _ = self.constrain(u_theta)
-            r_ang, _, _, _, phys_args, phys_kw = _r_ang_from_z(
+            r_ang, _, _, _, phys_args, phys_kw, _ = _r_ang_from_z(
                 self.model, theta, self.h, z_r)
             self._phi_transport_xy = _systemic_phi_xy_coefficients(
                 self.model, r_ang, phys_args, phys_kw)
@@ -819,14 +918,15 @@ class MaserBlackJaxTarget:
         u_theta = self.unconstrain(init_params)
         theta, _ = self.constrain(u_theta)
         phys_args, _ = self.model.phys_from_params_jax(theta, self.h)
-        r_hat, _, _ = _seeds(self.model, phys_args)
+        r_hat, r_min, r_max = _seeds(self.model, phys_args, self.h)
         if "z_r" in init_params:
             z_r = jnp.asarray(init_params["z_r"], dtype=u_theta.dtype)
         elif "r_ang" in init_params:
             r_ang = jnp.asarray(init_params["r_ang"], dtype=u_theta.dtype)
             if r_ang.ndim == 1 and int(r_ang.shape[0]) == int(
                     self.model.n_spots):
-                z_r = jnp.log(r_ang / r_hat)
+                z_r = _inverse_transform_r_ang(
+                    self.model, r_ang, r_hat, r_min, r_max)
             else:
                 z_r = jnp.zeros_like(r_hat, dtype=u_theta.dtype)
         else:
@@ -857,9 +957,10 @@ class MaserBlackJaxTarget:
         return jnp.where(self.model.is_highvel, phi_residual, shifted)
 
     def logdensity_explicit_transported(self, u_theta, z_r, phi_residual):
-        """Explicit target with systemic phi held in transported coordinates."""
+        """Target with systemic phi held in transported coordinates."""
         theta, log_det_theta = self.constrain(u_theta)
-        r_ang, _, r_min, r_max, phys_args, phys_kw = _r_ang_from_z(
+        (r_ang, _, r_min, r_max, phys_args, phys_kw,
+         log_dr_dz) = _r_ang_from_z(
             self.model, theta, self.h, z_r)
         kx, ky = self._phi_transport_xy
         centre = -(kx * phys_args[_I_X0] + ky * phys_args[_I_Y0])
@@ -869,17 +970,19 @@ class MaserBlackJaxTarget:
         lp = self.constrained_logdensity_r_ang_phi(
             theta, r_ang, phi, r_min=r_min, r_max=r_max,
             phys_args=phys_args, phys_kw=phys_kw)
-        lp = lp + jnp.where(jnp.isfinite(lp), jnp.sum(jnp.log(r_ang)), 0.0)
+        lp = lp + jnp.where(
+            jnp.isfinite(lp), jnp.sum(log_dr_dz), 0.0)
         return lp + jnp.where(jnp.isfinite(lp), log_det_theta, 0.0)
 
     def constrained_logdensity_z_phi(self, theta, z_r, phi):
         """Log posterior in constrained globals, z radii, and fixed phi."""
-        r_ang, _, r_min, r_max, phys_args, phys_kw = _r_ang_from_z(
+        (r_ang, _, r_min, r_max, phys_args, phys_kw,
+         log_dr_dz) = _r_ang_from_z(
             self.model, theta, self.h, z_r)
         lp = self.constrained_logdensity_r_ang_phi(
             theta, r_ang, phi, r_min=r_min, r_max=r_max,
             phys_args=phys_args, phys_kw=phys_kw)
-        logdet_r = jnp.sum(jnp.log(r_ang))
+        logdet_r = jnp.sum(log_dr_dz)
         return lp + jnp.where(jnp.isfinite(lp), logdet_r, 0.0)
 
     def constrained_logdensity_r_ang_phi(self, theta, r_ang, phi, *,
@@ -902,19 +1005,23 @@ class MaserBlackJaxTarget:
             lp = lp + self.model.priors["log_MBH"].log_prob(
                 theta["log_MBH"])
 
-        # r_ang has an improper flat prior (r_ang > 0 only, guaranteed by
-        # r_ang = r_hat * exp(z_r)); no [r_min, r_max] bound, so the
-        # theta-NUTS step has no r_ang support wall.  phi keeps its hard box.
+        if self.model.galaxy_name == "NGC5765b":
+            if r_min is None or r_max is None:
+                r_min, r_max, _ = _ngc5765b_reference_r_ang_bounds(
+                    self.model, self.h)
+            inside_r = jnp.all((r_ang >= r_min) & (r_ang <= r_max))
+        else:
+            inside_r = jnp.all(r_ang > 0.0)
         inside_phi = jnp.all((phi >= phi_lo) & (phi <= phi_hi))
         groups = self.model._spot_groups_from_r(r_ang)
         ll = self.model._sum_phi_fixed(
             groups, phi, phys_args, phys_kw)
-        return jnp.where(inside_phi, lp + ll, -jnp.inf)
+        return jnp.where(inside_r & inside_phi, lp + ll, -jnp.inf)
 
     def sample_dict(self, u_theta, z_r):
         theta, _ = self.constrain(u_theta)
         out = dict(theta)
-        r_ang, _, _, _, _, _ = _r_ang_from_z(
+        r_ang, _, _, _, _, _, _ = _r_ang_from_z(
             self.model, theta, self.h, z_r)
         out["r_ang"] = r_ang
         return out
@@ -1209,10 +1316,13 @@ def _make_mcmc_sample_step(blackjax, target, sample_parameters, *,
             phi = target.phi_from_transport_residual(
                 theta_params, phi_nuts)
         sample = target.sample_dict_explicit(theta_state.position, z_r, phi)
-        _, log_det_theta = target.constrain(theta_state.position)
+        theta_params, log_det_theta = target.constrain(
+            theta_state.position)
+        *_, log_dr_dz = _r_ang_from_z(
+            target.model, theta_params, target.h, z_r)
         log_density = (
             theta_state.logdensity - log_det_theta
-            - jnp.sum(jnp.log(sample["r_ang"]))
+            - jnp.sum(log_dr_dz)
         )
         new_state = state._replace(theta=theta_state, z_r=z_r, phi=phi)
         info = _mcmc_info(theta_info, l_accept, r_try, r_accept,

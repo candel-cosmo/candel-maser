@@ -102,15 +102,15 @@ from tqdm import trange  # noqa: E402
 from candel.inference.optimise import _prior_bounds  # noqa: E402
 from candel.inference.optimise import _select_distinct  # noqa: E402
 from candel.model import maser_physics  # noqa: E402
-from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
-from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
+from candel.model.maser_blackjax import (  # noqa: E402
+    MaserBlackJaxTarget, init_from_prior_median, prepare_floor_init)
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
 from candel.pvdata.megamaser_data import (  # noqa: E402
     clipped_mask_path, load_megamaser_spots, maser_data_root)
 from candel.util import (fprint, fsection, get_nested,  # noqa: E402
                          results_path)
-from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
-                          check_init_block)
+from maser_config import (ROOT_OUTPUT_ENV, add_dataset_arg,  # noqa: E402
+                          apply_dataset, check_init_block)
 
 if _F64_ENABLED_HERE:
     print(f"float64 enabled ({_F64_REASON})", flush=True)
@@ -180,7 +180,7 @@ def _clean_init(model, init_cfg):
     else:
         init_params.setdefault("d2i_dr2", jnp.asarray(0.0))
         init_params.setdefault("d2Omega_dr2", jnp.asarray(0.0))
-    return init_params
+    return prepare_floor_init(model, init_params)
 
 
 def _lift_base_model_init(model, gal_cfg):
@@ -1227,6 +1227,11 @@ def _phi_integration_suffix(model):
 
 def _de_checkpoint_filename(model, seed, fix_floors_pesce=False):
     floor_suffix = "_pescefloors" if fix_floors_pesce else ""
+    if getattr(model, "galaxy_name", None) == "NGC5765b":
+        if getattr(model, "clump2_acceleration_only", False):
+            floor_suffix += "_accelfloor"
+        elif not getattr(model, "use_clump2_floors", False):
+            floor_suffix += "_singlefloor"
     return (
         f"de_ckpt_rmap{_variant_suffix(model)}"
         f"{_phi_integration_suffix(model)}{floor_suffix}"
@@ -1597,7 +1602,8 @@ def _clip_run_tag(args, seed):
             key: getattr(args, key) for key in (
                 "f64", "no_ecc", "add_ecc", "no_quadratic_warp",
                 "add_quadratic_warp", "mass_parameterization",
-                "phi_integration", "fix_floors_pesce")},
+                "phi_integration", "fix_floors_pesce",
+                "single_error_floor")},
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode()).hexdigest()[:10]
@@ -1677,7 +1683,7 @@ def _run_iterative_clipping(args, argv):
         fprint(f"WARNING: clipping did not stabilise in "
                f"{args.clip_max_attempts} DE attempts")
     fprint(f"saved clipped-dataset mask to {manifest}")
-    if stabilised:
+    if stabilised and not os.environ.get(ROOT_OUTPUT_ENV):
         canonical_dir = maser_data_root("clipped")
         os.makedirs(canonical_dir, exist_ok=True)
         gcfg = _MASTER_CFG["model"]["galaxies"][args.galaxy]
@@ -1694,6 +1700,8 @@ def _run_iterative_clipping(args, argv):
             target.write(source.read())
         os.replace(tmp, canonical)
         fprint(f"updated clipped dataset mask at {canonical}")
+    elif stabilised:
+        fprint("temporary output mode: not updating the clipped dataset mask")
     fsection("Iterative clipping summary")
     fprint(
         f"removed={len(clipped)}/{data['n_spots']}, "
@@ -2502,6 +2510,16 @@ def main(argv=None):
                              "sigma_v_hv, sigma_a_floor) fixed at the "
                              "published Pesce/Reid values; all other globals "
                              "searched.")
+    floor_mode = parser.add_mutually_exclusive_group()
+    floor_mode.add_argument(
+        "--single-error-floor", action="store_true",
+        help="For NGC5765b, disable the separate clump-2 floors and use "
+             "only the standard sampled floor for each observable. "
+             "Other galaxies are unchanged.")
+    floor_mode.add_argument(
+        "--clump2-acceleration-floor-only", action="store_true",
+        help="For NGC5765b, sample a separate clump-2 acceleration floor "
+             "only; position and velocity use the standard floors.")
     parser.add_argument("--checkpoint-interval-minutes", type=float,
                         default=15.0)
     parser.add_argument("--f64", action="store_true", default=_ENABLE_F64)
@@ -2567,6 +2585,9 @@ def main(argv=None):
                              "ARC: request N with submit.sh --gpu-count N "
                              "(-> --gres=gpu:N).")
     args = parser.parse_args(argv)
+    if args.clump2_acceleration_floor_only and args.fix_floors_pesce:
+        parser.error("--clump2-acceleration-floor-only cannot be combined "
+                     "with --fix-floors-pesce")
 
     if args.no_ecc and args.add_ecc:
         raise SystemExit("--no-ecc and --add-ecc are mutually exclusive.")
@@ -2721,6 +2742,11 @@ def main(argv=None):
     if args.mass_parameterization is not None:
         config["model"]["galaxies"][args.galaxy][
             "mass_parameterization"] = args.mass_parameterization
+    if args.single_error_floor or args.fix_floors_pesce:
+        config["model"]["use_ngc5765b_clump2_floors"] = False
+    elif args.clump2_acceleration_floor_only:
+        config["model"]["use_ngc5765b_clump2_floors"] = True
+        config["model"]["ngc5765b_clump2_acceleration_only"] = True
     cfg_spot_batch = gal_blk.get("conditional_spot_batch", None)
     cfg_spot_batch = (None if cfg_spot_batch is None
                       else int(cfg_spot_batch))

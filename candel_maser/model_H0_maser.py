@@ -335,6 +335,45 @@ class MaserDiskModel(ModelBase):
             fprint(f"prior overrides for {gname}: "
                    f"{', '.join(sorted(gal_priors))}")
 
+        all_clump2_floor_pairs = (
+            ("sigma_x_floor_clump2", "sigma_x_floor"),
+            ("sigma_y_floor_clump2", "sigma_y_floor"),
+            ("sigma_v_floor_clump2", "sigma_v_sys"),
+            ("sigma_a_floor_clump2", "sigma_a_floor"),
+        )
+        self.use_clump2_floors = (
+            gname == "NGC5765b" and bool(get_nested(
+                self.config, "model/use_ngc5765b_clump2_floors", True)))
+        self.clump2_acceleration_only = (
+            self.use_clump2_floors and bool(get_nested(
+                self.config,
+                "model/ngc5765b_clump2_acceleration_only", False)))
+        self.clump2_floor_pairs = (
+            all_clump2_floor_pairs[-1:] if self.clump2_acceleration_only
+            else all_clump2_floor_pairs) if self.use_clump2_floors else ()
+        self.clump2_floor_names = tuple(
+            target for target, _ in self.clump2_floor_pairs)
+        if self.use_clump2_floors:
+            if "clump2_floor_mask" not in data:
+                raise ValueError("NGC5765b clump-2 floors require a mask.")
+            for target, source in self.clump2_floor_pairs:
+                self.priors[target] = self.priors[source]
+                self.prior_dist_name[target] = self.prior_dist_name[source]
+            if self.clump2_acceleration_only:
+                fprint("only the clump-2 acceleration floor is sampled with "
+                       "the standard acceleration-floor prior")
+            else:
+                fprint("clump-2 floors are sampled with the corresponding "
+                       "standard floor priors")
+        if gname == "NGC5765b":
+            if self.clump2_acceleration_only:
+                self.error_floor_policy = (
+                    "sampled_ngc5765b_clump2_acceleration_only")
+            elif self.use_clump2_floors:
+                self.error_floor_policy = "sampled_ngc5765b_clump2"
+            else:
+                self.error_floor_policy = "sampled_ngc5765b_single_floor"
+
         # Megamaser distance is ALWAYS sampled as uniform D_A. The legacy
         # uniform-D_c sampling path was removed; D_c_prior is no longer a knob.
         self._D_A_uniform = True
@@ -435,6 +474,9 @@ class MaserDiskModel(ModelBase):
         self._all_has_accel = jnp.asarray(accel_meas)
         self._all_sigma_a2 = self._all_sigma_a**2
         self._all_sigma_v2 = jnp.asarray(self.sigma_v)**2
+        self._all_is_clump2 = jnp.asarray(
+            data["clump2_floor_mask"] if self.use_clump2_floors
+            else _np.zeros(self.n_spots, dtype=bool))
 
     # ---- galaxy / feature config ----
 
@@ -702,7 +744,7 @@ class MaserDiskModel(ModelBase):
             for lo, hi in self._phi_sys_ranges_deg)
         fprint(f"φ sys: {rng_str}, n={self._n_phi_sys} per sub-range")
         fprint(
-            f"r_ang support: bounds track D_A via "
+            f"conditional r-MAP support: bounds track D_A via "
             f"R_phys in [{self._R_phys_lo:.3f}, "
             f"{self._R_phys_hi:.3f}] pc")
         if not self._refine_r_center:
@@ -738,8 +780,8 @@ class MaserDiskModel(ModelBase):
     def r_ang_range(self, D_A):
         """r_ang range in mas corresponding to physical R_phys bounds at D_A.
 
-        Used by the latent radial updates to keep the physical/angular
-        conversion in one place.
+        Keeps the physical/angular conversion in one place for conditional
+        radial grids and fixed-reference MCMC bounds.
         """
         conv = D_A * PC_PER_MAS_MPC
         return self._R_phys_lo / conv, self._R_phys_hi / conv
@@ -747,7 +789,8 @@ class MaserDiskModel(ModelBase):
     # ---- r estimation (per-spot physics-based centre + scale) ----
 
     def _closed_form_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2,
-                           i0, var_v_hv):
+                           i0, var_v_hv,
+                           sigma_a_floor_clump2_2=None):
         """Closed-form seed + propagated-noise width for every spot.
 
         HV:    velocity → r_vel = M·(C_v·sin_i)² / (D·Δv²)
@@ -774,7 +817,11 @@ class MaserDiskModel(ModelBase):
         r_est = jnp.clip(r_est, r_min * 1.01, r_max * 0.99)
 
         sigma_v_eff = jnp.sqrt(var_v_hv)
-        sigma_a_eff = jnp.sqrt(sigma_a_floor2)
+        if sigma_a_floor_clump2_2 is None:
+            sigma_a_floor_clump2_2 = sigma_a_floor2
+        sigma_a_eff = jnp.sqrt(jnp.where(
+            self._all_is_clump2,
+            sigma_a_floor_clump2_2, sigma_a_floor2))
         s_vel = 2.0 * sigma_v_eff / (jnp.abs(dv) + R_EST_EPS)
         s_acc = sigma_a_eff / (2.0 * jnp.abs(self._all_a) + R_EST_EPS)
         s_prop = jnp.where(
@@ -783,7 +830,8 @@ class MaserDiskModel(ModelBase):
             jnp.maximum(s_acc, 0.1))
         return r_est, s_prop, r_min, r_max
 
-    def radius_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv):
+    def radius_seeds(self, D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+                     sigma_a_floor_clump2_2=None):
         """Differentiable closed-form radius seeds (r_hat plus support bounds).
 
         Same closed forms as `_closed_form_seeds` (velocity inversion
@@ -795,7 +843,8 @@ class MaserDiskModel(ModelBase):
         Returns (r_hat, r_min, r_max).
         """
         r_hat, _, r_min, r_max = self._closed_form_seeds(
-            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+            sigma_a_floor_clump2_2)
         if self._n_sys_uncons > 0:
             r_geo = jnp.sqrt(r_min * r_max)
             r_hat = r_hat.at[self._idx_sys_uncons].set(r_geo)
@@ -888,8 +937,11 @@ class MaserDiskModel(ModelBase):
                        i0, var_v_hv, phys_args, phys_kw, r_global,
                        cache_scan=False, include_acceleration=True):
         """Per-spot seed and fallback width for conditional r-MAP."""
+        sigma_a_floor_clump2_2 = (
+            phys_args[20] if len(phys_args) > 20 else sigma_a_floor2)
         r_est, s_prop, r_min, r_max = self._closed_form_seeds(
-            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+            sigma_a_floor_clump2_2)
         if not include_acceleration and self._n_sys:
             r_est = r_est.at[self._idx_sys].set(jnp.sqrt(r_min * r_max))
         scan_cache = {}
@@ -954,8 +1006,11 @@ class MaserDiskModel(ModelBase):
         if phys_kw is None:
             phys_kw = {}
 
+        sigma_a_floor_clump2_2 = (
+            phys_args[20] if len(phys_args) > 20 else sigma_a_floor2)
         r_cf, _, r_min, r_max = self._closed_form_seeds(
-            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+            sigma_a_floor_clump2_2)
         valid = self.is_highvel | self._all_has_accel.astype(bool)
         if self._global_r_full_support:
             r_lo_data, r_hi_data = r_min, r_max
@@ -1078,8 +1133,11 @@ class MaserDiskModel(ModelBase):
         i0 = phys_args[8]
         var_v_hv = phys_args[15]
         sigma_a_floor2 = phys_args[16]
+        sigma_a_floor_clump2_2 = (
+            phys_args[20] if len(phys_args) > 20 else sigma_a_floor2)
         r_cf, _, r_min, r_max = self._closed_form_seeds(
-            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+            D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+            sigma_a_floor_clump2_2)
         valid = self.is_highvel | self._all_has_accel.astype(bool)
         if self._global_r_full_support:
             r_lo_data, r_hi_data = r_min, r_max
@@ -1263,7 +1321,15 @@ class MaserDiskModel(ModelBase):
          r_ang_ref_i, r_ang_ref_Omega, r_ang_ref_periapsis,
          i0, di_dr, Omega0, dOmega_dr,
          sigma_x_floor2, sigma_y_floor2, var_v_sys, var_v_hv,
-         sigma_a_floor2) = phys_args
+         sigma_a_floor2) = phys_args[:17]
+        if len(phys_args) > 17:
+            (sigma_x_floor_clump2_2, sigma_y_floor_clump2_2,
+             var_v_clump2, sigma_a_floor_clump2_2) = phys_args[17:21]
+        else:
+            (sigma_x_floor_clump2_2, sigma_y_floor_clump2_2,
+             var_v_clump2, sigma_a_floor_clump2_2) = (
+                sigma_x_floor2, sigma_y_floor2,
+                var_v_sys, sigma_a_floor2)
         d2i_dr2 = phys_kw.get("d2i_dr2", 0.0)
         d2Omega_dr2 = phys_kw.get("d2Omega_dr2", 0.0)
         e_x = phys_kw.get("e_x", None)
@@ -1282,13 +1348,15 @@ class MaserDiskModel(ModelBase):
         sa2_g = self._all_sigma_a2[idx].astype(dtype)
         has_a_g = self._all_has_accel[idx].astype(dtype)
         is_hv_g = self.is_highvel[idx]
+        is_clump2_g = self._all_is_clump2[idx]
 
         ell_lo = jnp.log(r_min * 1.01)
         ell_hi = jnp.log(r_max * 0.99)
         ell_est = jnp.log(r_est_group)
 
         def f_one(ell, spot):
-            (xi, yi, vi, ai, sx2i, sy2i, sv2i, sa2i, hai, ishvi) = spot
+            (xi, yi, vi, ai, sx2i, sy2i, sv2i, sa2i,
+             hai, ishvi, isc2i) = spot
             r = jnp.exp(ell)
 
             i_r, Om_r = warp_geometry(
@@ -1316,16 +1384,21 @@ class MaserDiskModel(ModelBase):
                     ecc_cos_om=e_x * cos_del - e_y * sin_del,
                     ecc_sin_om=e_x * sin_del + e_y * cos_del)
 
-            var_x = sx2i + sigma_x_floor2
-            var_y = sy2i + sigma_y_floor2
-            var_v = sv2i + jnp.where(ishvi, var_v_hv, var_v_sys)
+            var_x = sx2i + jnp.where(
+                isc2i, sigma_x_floor_clump2_2, sigma_x_floor2)
+            var_y = sy2i + jnp.where(
+                isc2i, sigma_y_floor_clump2_2, sigma_y_floor2)
+            var_v = sv2i + jnp.where(
+                isc2i, var_v_clump2,
+                jnp.where(ishvi, var_v_hv, var_v_sys))
 
             nhc = neg_half_chi2_position(xi, yi, X, Y, var_x, var_y)
             nhc = nhc + neg_half_chi2_velocity(vi, V, var_v)
             if has_any_accel:
                 A = predict_acceleration_los(
                     r, sin_phi, cos_phi, D_A, M_BH, sin_i)
-                var_a = sa2i + sigma_a_floor2
+                var_a = sa2i + jnp.where(
+                    isc2i, sigma_a_floor_clump2_2, sigma_a_floor2)
                 nhc = nhc + neg_half_chi2_acceleration(
                     ai, A, var_a, hai)
             return -_compile_friendly_logsumexp(nhc + log_w_phi)
@@ -1338,7 +1411,7 @@ class MaserDiskModel(ModelBase):
 
         spot_data = (x_g, y_g, v_g, a_g,
                      sx2_g, sy2_g, sv2_g, sa2_g,
-                     has_a_g, is_hv_g)
+                     has_a_g, is_hv_g, is_clump2_g)
 
         def optim_one(a, b, spot):
             return brent_1d(
@@ -1392,6 +1465,10 @@ class MaserDiskModel(ModelBase):
                       i0, di_dr, Omega0, dOmega_dr,
                       sigma_x_floor2, sigma_y_floor2,
                       var_v_sys, var_v_hv, sigma_a_floor2,
+                      sigma_x_floor_clump2_2=None,
+                      sigma_y_floor_clump2_2=None,
+                      var_v_clump2=None,
+                      sigma_a_floor_clump2_2=None,
                       d2i_dr2=0.0, d2Omega_dr2=0.0,
                       e_x=None, e_y=None, dperiapsis_dr=0.0,
                       dv_sys=0.0, has_any_accel=True):
@@ -1414,6 +1491,16 @@ class MaserDiskModel(ModelBase):
         sa2 = self._all_sigma_a2[idx]
         has_a = self._all_has_accel[idx].astype(r_ang.dtype)
         is_hv = self.is_highvel[idx]
+        is_clump2 = self._all_is_clump2[idx]
+
+        if sigma_x_floor_clump2_2 is None:
+            sigma_x_floor_clump2_2 = sigma_x_floor2
+        if sigma_y_floor_clump2_2 is None:
+            sigma_y_floor_clump2_2 = sigma_y_floor2
+        if var_v_clump2 is None:
+            var_v_clump2 = var_v_sys
+        if sigma_a_floor_clump2_2 is None:
+            sigma_a_floor_clump2_2 = sigma_a_floor2
 
         i_r, Om_r = warp_geometry(
             r_ang, r_ang_ref_i, r_ang_ref_Omega,
@@ -1464,9 +1551,13 @@ class MaserDiskModel(ModelBase):
             velocity_zg = gravitational_redshift_minus1(
                 r_ang, D_A, M_BH)
 
-        var_x = sx2 + sigma_x_floor2
-        var_y = sy2 + sigma_y_floor2
-        var_v = sv2 + jnp.where(is_hv, var_v_hv, var_v_sys)
+        var_x = sx2 + jnp.where(
+            is_clump2, sigma_x_floor_clump2_2, sigma_x_floor2)
+        var_y = sy2 + jnp.where(
+            is_clump2, sigma_y_floor_clump2_2, sigma_y_floor2)
+        var_v = sv2 + jnp.where(
+            is_clump2, var_v_clump2,
+            jnp.where(is_hv, var_v_hv, var_v_sys))
         weight_x = -0.5 / var_x
         weight_y = -0.5 / var_y
         weight_v = -0.5 / var_v
@@ -1479,7 +1570,8 @@ class MaserDiskModel(ModelBase):
             # spots without a real acceleration measurement, so var_a
             # stays strictly positive. has_a then zeroes out both the
             # log-norm and the residual contribution for those spots.
-            var_a = sa2 + sigma_a_floor2
+            var_a = sa2 + jnp.where(
+                is_clump2, sigma_a_floor_clump2_2, sigma_a_floor2)
             weight_a = -0.5 * has_a / var_a
             lnorm_a = -0.5 * (LOG_2PI + jnp.log(var_a)) * has_a
         else:
@@ -2148,6 +2240,17 @@ class MaserDiskModel(ModelBase):
 
         return total
 
+    def _clump2_phys_floors(self, get_param, standard_floors2):
+        if not self.use_clump2_floors:
+            return ()
+        names = (
+            "sigma_x_floor_clump2", "sigma_y_floor_clump2",
+            "sigma_v_floor_clump2", "sigma_a_floor_clump2")
+        return tuple(
+            get_param(name) ** 2 if name in self.clump2_floor_names
+            else standard
+            for name, standard in zip(names, standard_floors2))
+
     def phys_from_sample(self, sample):
         """Reconstruct (phys_args, phys_kw, diag) from a single posterior draw.
 
@@ -2182,6 +2285,14 @@ class MaserDiskModel(ModelBase):
 
         v_sys = self.v_sys_obs + g("dv_sys", 0.0)
 
+        sigma_x_floor2 = g("sigma_x_floor") ** 2
+        sigma_y_floor2 = g("sigma_y_floor") ** 2
+        var_v_sys = g("sigma_v_sys") ** 2
+        sigma_a_floor2 = g("sigma_a_floor") ** 2
+        clump2_floors = self._clump2_phys_floors(
+            g, (sigma_x_floor2, sigma_y_floor2,
+                var_v_sys, sigma_a_floor2))
+
         phys_args = (
             g("x0"), g("y0"),
             D_A, M_BH, v_sys,
@@ -2191,11 +2302,12 @@ class MaserDiskModel(ModelBase):
             _np.deg2rad(g("di_dr")),
             _np.deg2rad(g("Omega0")),
             _np.deg2rad(g("dOmega_dr")),
-            g("sigma_x_floor") ** 2,
-            g("sigma_y_floor") ** 2,
-            g("sigma_v_sys") ** 2,
+            sigma_x_floor2,
+            sigma_y_floor2,
+            var_v_sys,
             g("sigma_v_hv") ** 2,
-            g("sigma_a_floor") ** 2,
+            sigma_a_floor2,
+            *clump2_floors,
         )
 
         phys_kw = {"dv_sys": g("dv_sys", 0.0)}
@@ -2244,15 +2356,23 @@ class MaserDiskModel(ModelBase):
         M_BH = 10.0 ** (log_MBH - 7.0)
         v_sys = self.v_sys_obs + g("dv_sys", default=0.0)
 
+        sigma_x_floor2 = g("sigma_x_floor") ** 2
+        sigma_y_floor2 = g("sigma_y_floor") ** 2
+        var_v_sys = g("sigma_v_sys") ** 2
+        sigma_a_floor2 = g("sigma_a_floor") ** 2
+        clump2_floors = self._clump2_phys_floors(
+            g, (sigma_x_floor2, sigma_y_floor2,
+                var_v_sys, sigma_a_floor2))
+
         phys_args = (
             g("x0"), g("y0"), D_A, M_BH, v_sys,
             self._r_ang_ref_i, self._r_ang_ref_Omega,
             self._r_ang_ref_periapsis,
             jnp.deg2rad(g("i0")), jnp.deg2rad(g("di_dr")),
             jnp.deg2rad(g("Omega0")), jnp.deg2rad(g("dOmega_dr")),
-            g("sigma_x_floor") ** 2, g("sigma_y_floor") ** 2,
-            g("sigma_v_sys") ** 2, g("sigma_v_hv") ** 2,
-            g("sigma_a_floor") ** 2)
+            sigma_x_floor2, sigma_y_floor2,
+            var_v_sys, g("sigma_v_hv") ** 2,
+            sigma_a_floor2, *clump2_floors)
 
         phys_kw = {"dv_sys": g("dv_sys", default=0.0)}
         if self.use_quadratic_warp:

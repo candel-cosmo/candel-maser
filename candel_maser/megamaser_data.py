@@ -294,7 +294,6 @@ def load_NGC5765b_spots(root, v_sys_obs=None):
         "galaxy_name": "NGC5765b",
         "v_sys_obs": float(v_sys_obs),
     }
-
     # Convert positions from mas to μas for float32 precision
     for key in ("x", "y", "sigma_x", "sigma_y"):
         if key in data:
@@ -770,6 +769,12 @@ def load_megamaser_spots(root, galaxy="CGCG074-064", v_sys_obs=None, *,
         for key in ("x", "y", "sigma_x", "sigma_y"):
             if key in data:
                 data[key] = data[key] * 1000.0
+
+    if galaxy == "NGC5765b":
+        data["clump2_floor_mask"] = (
+            (data["velocity"] >= 8290.0) & (data["velocity"] < 8340.0))
+        fprint("classified NGC5765b clump-2 rows; measurement values and "
+               "uncertainties are unchanged.")
 
     # Classify spots: use spot_type from data if available, else k-means
     n = data["n_spots"]

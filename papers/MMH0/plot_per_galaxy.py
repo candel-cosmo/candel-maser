@@ -28,7 +28,7 @@ from palette import PALETTE
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "scripts" / "megamaser" / "config_maser.toml"
-DATASET = "original_published"
+DATASET = "fiducial"
 RESULTS = ROOT / "results" / "Megamaser" / DATASET
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
 C_KMS = 299792.458
@@ -80,9 +80,12 @@ def fig_distance_redshift(out):
         for i, g in enumerate(GALAXIES):
             ax.errorbar(dmed[i], z[i], xerr=[[dlo[i]], [dhi[i]]], yerr=zerr,
                         fmt="o", ms=4, color=PAL[i % len(PAL)], capsize=2)
+            below = g == "NGC6323"  # label collides with the H0 lines above
             ax.annotate(GAL_LABEL[g], (dmed[i], z[i]),
-                        textcoords="offset points", xytext=(0, 4),
-                        ha="center", va="bottom", fontsize=8,
+                        textcoords="offset points",
+                        xytext=(0, -4 if below else 4),
+                        ha="center", va="top" if below else "bottom",
+                        fontsize=8,
                         bbox=dict(boxstyle="round,pad=0.15", fc="white",
                                   ec="none", alpha=0.7))
         ax.set_xlabel(

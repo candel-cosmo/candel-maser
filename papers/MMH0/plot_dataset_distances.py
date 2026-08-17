@@ -9,6 +9,7 @@ Run from the repository root with::
     venv_candel/bin/python scripts/megamaser/plot_dataset_distances.py
 """
 import argparse
+import sys
 from pathlib import Path
 
 import h5py
@@ -19,6 +20,8 @@ from maser_config import check_chain_dataset
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "notebooks" / "paper_MMH0"))
+from palette import BROWN, GOLD, RED, TEAL  # noqa: E402
 GALAXIES = (
     "CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789")
 GALAXY_LABELS = {
@@ -28,21 +31,28 @@ GALAXY_LABELS = {
     "NGC6323": "NGC 6323",
     "UGC3789": "UGC 3789",
 }
-DATASETS = ("original_published", "fiducial", "unpruned", "clipped")
+DATASETS = ("fiducial", "original_published", "unpruned", "clipped")
 DATASET_LABELS = {
-    "original_published": "Original published",
-    "fiducial": "Fiducial",
-    "unpruned": "Unpruned",
-    "clipped": "Clipped",
+    "original_published": "Original",
+    "fiducial": "P20 table",
+    "unpruned": "Revised",
+    "clipped": "Revised-clipped",
 }
 COLORS = {
-    "original_published": "#0077BB",
-    "fiducial": "#EE7733",
-    "unpruned": "#00A650",
-    "clipped": "#EE3377",
+    "original_published": TEAL,
+    "fiducial": RED,
+    "unpruned": BROWN,
+    "clipped": GOLD,
+}
+# Thinner lines for the two secondary tables.
+LINEWIDTHS = {
+    "original_published": 2.0,
+    "fiducial": 2.0,
+    "unpruned": 1.4,
+    "clipped": 1.4,
 }
 DOM_ROOT = ROOT / "data" / "Megamaser" / "external" / "Dom_data"
-DOM_LABEL = "P20 (Dom)"
+DOM_LABEL = "P20 posterior"
 DOM_COLOR = "#111111"
 
 
@@ -117,9 +127,13 @@ def main(argv=None):
     import matplotlib.pyplot as plt
     import scienceplots  # noqa: F401  (registers the science style)
 
+    # ponytail: 2x3 grid, not 3x3 -- 5 galaxies + legend fill it exactly.
     with plt.style.context(["science"]):
-        fig, axes = plt.subplots(1, len(GALAXIES), figsize=(11.0, 2.35))
-        for i, (ax, galaxy) in enumerate(zip(axes, GALAXIES)):
+        fig, axes = plt.subplots(2, 3, figsize=(11.0, 6.6))
+        legend_ax = axes[1, 0]
+        legend_ax.axis("off")
+        panels = [axes[0, 0], axes[0, 1], axes[0, 2], axes[1, 1], axes[1, 2]]
+        for i, (ax, galaxy) in enumerate(zip(panels, GALAXIES)):
             limits = [np.percentile(chains[dataset, galaxy], [0.1, 99.9])
                       for dataset in DATASETS]
             limits.append(np.percentile(dom_chains[galaxy], [0.1, 99.9]))
@@ -133,31 +147,31 @@ def main(argv=None):
                 color = COLORS[dataset]
                 label = DATASET_LABELS[dataset] if i == 0 else None
                 ax.plot(grid, gaussian_kde(samples)(grid), color=color,
-                        lw=1.3, ls=":" if dataset == "fiducial" else "-",
-                        label=label)
-                ax.axvline(np.median(samples), color=color, lw=0.8, ls="--")
+                        lw=LINEWIDTHS[dataset], label=label)
 
             samples = dom_chains[galaxy]
             ax.plot(grid, gaussian_kde(samples)(grid), color=DOM_COLOR,
-                    lw=1.8, ls="--", label=DOM_LABEL if i == 0 else None,
+                    lw=2.2, ls="--", label=DOM_LABEL if i == 0 else None,
                     zorder=5)
-            ax.axvline(np.median(samples), color=DOM_COLOR, lw=1.0,
-                       ls="--", zorder=5)
 
             ax.text(0.96, 0.95, GALAXY_LABELS[galaxy], transform=ax.transAxes,
-                    ha="right", va="top", fontsize=8)
+                    ha="right", va="top", fontsize=14)
             ax.set_xlabel(r"$D_\mathrm{A}\ [\mathrm{Mpc}]$")
             ax.set_xlim(grid[0], grid[-1])
             ax.set_ylim(bottom=0.0)
             ax.set_yticks([])
-        axes[0].set_ylabel("Posterior density")
+        axes[0, 0].set_ylabel("Posterior density")
+        axes[1, 1].set_ylabel("Posterior density")
 
-        handles, labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc="upper center", ncol=5,
-                   frameon=False, bbox_to_anchor=(0.5, 1.01))
-        fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90), w_pad=0.6)
+        handles, labels = panels[0].get_legend_handles_labels()
+        leg = legend_ax.legend(handles, labels, loc="center", frameon=False,
+                               fontsize=15, handlelength=2.0,
+                               labelspacing=1.0)
+        for line in leg.get_lines():
+            line.set_linewidth(1.5 * line.get_linewidth())
+        fig.tight_layout(w_pad=0.8, h_pad=1.2)
         output.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output, dpi=300, bbox_inches="tight")
+        fig.savefig(output, dpi=600, bbox_inches="tight")
         plt.close(fig)
     print(f"wrote {output}")
 

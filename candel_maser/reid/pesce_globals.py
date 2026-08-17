@@ -257,6 +257,9 @@ def candel_theta_from_point(point, galaxy, master, target):
             theta["ecc"] = point.get("ecc", 0.0)
             theta["periapsis"] = point.get("periapsis", 0.0)
             theta["dperiapsis_dr"] = point.get("dperiapsis_dr", 0.0)
+    if target.model.use_clump2_floors:
+        theta.update({name: theta[source] for name, source in
+                      target.model.clump2_floor_pairs})
 
     missing = [name for name in target.names if name not in theta]
     if missing:

@@ -38,6 +38,7 @@ SELECTION="redshift"
 SEL_EXPLICIT=false
 ADD_QW=false
 DISTANCE_SOURCE="candel"
+TEMP_OUTPUT=false
 
 usage() {
     cat <<EOF
@@ -45,7 +46,7 @@ Usage: $0 (--local | -q QUEUE) [--galaxy GAL,GAL,...|all] [--cpus N] [--mem GB] 
           [--gpu-mem GB] [--num-warmup N] [--num-samples N] [--num-chains N] \\
           [--max-tree-depth N] [--dataset NAME[,NAME,...]] [--reconstruction LIST] \\
           [--distance-source candel|p20] \\
-          [--dry] [-y] \\
+          [--temp-output] [--dry] [-y] \\
           [-- extra submit.sh args]
 
 Runs the joint-H0 sweep over the GALAXIES set (default: $GALAXIES),
@@ -82,6 +83,7 @@ visible in each output filename.
   --distance-source candel|p20
                      Stage-1 distance posteriors (default: candel). p20 uses
                      the archived Dom files and removes their log(D_A) prior.
+  --temp-output      Forward submit.sh --temp-output for every joint run.
   --leave-one-out    LOO mode: one joint job per dropped galaxy at a single
                      fixed config, instead of the eleven-run sweep. Needs >=2 galaxies
                      (--galaxy all expands to the five MCP galaxies).
@@ -111,6 +113,7 @@ while [[ $# -gt 0 ]]; do
         --max-tree-depth) MAX_TREE_DEPTH="$2"; shift 2 ;;
         --dataset) DATASETS="$2"; shift 2 ;;
         --distance-source) DISTANCE_SOURCE="$2"; shift 2 ;;
+        --temp-output) TEMP_OUTPUT=true; shift ;;
         --leave-one-out) LEAVE_ONE_OUT=true; shift ;;
         --selection) SELECTION="$2"; SEL_EXPLICIT=true; shift 2 ;;
         --add-quadratic-warp) ADD_QW=true; shift ;;
@@ -186,6 +189,7 @@ common=("--infer-H0")
 [[ -n "$NUM_CHAINS" ]] && common+=(--num-chains "$NUM_CHAINS")
 [[ -n "$MAX_TREE_DEPTH" ]] && common+=(--max-tree-depth "$MAX_TREE_DEPTH")
 [[ "$DRY" == true ]] && common+=(--dry)
+[[ "$TEMP_OUTPUT" == true ]] && common+=(--temp-output)
 [[ ${#EXTRA[@]} -gt 0 ]] && common+=("${EXTRA[@]}")
 
 # Build the job list. Each entry is

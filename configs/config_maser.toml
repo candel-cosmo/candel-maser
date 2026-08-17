@@ -19,6 +19,8 @@ reflect_prob = 0.25
 Om = 0.315
 use_selection = false
 sigma_v_default = 0.25
+use_ngc5765b_clump2_floors = true
+ngc5765b_clump2_acceleration_only = false
 D_c_prior = "uniform_D_A"
 mass_parameterization = "eta"  # choices: "eta", "log_mbh"
 R_phys_lo = 0.01
@@ -48,8 +50,8 @@ phi_sys_ranges_deg = [[-180, 180]]
 n_phi_sys = 10001
 
 # Conditional r_ang MAP grid used by the DE objective and numerical
-# quadrature diagnostics. The explicit MCMC sampler uses the non-centred
-# log residual z_r = log(r_ang / r_hat(theta)).
+# quadrature diagnostics. For NGC5765b, explicit MCMC converts these bounds
+# once to a fixed angular interval using v_cmb_kms and H0_ref.
 n_r_local = 256
 # Production policy: use the same 176-node full-support discovery grid for
 # every galaxy, disk variant, and phi-integration method.  This deliberately
@@ -132,37 +134,39 @@ loc = 0.0
 scale = 90.0
 
 [model.priors.sigma_x_floor]
-dist = "truncated_normal"
-mean = 10.0
-scale = 5.0
+# dist = "truncated_normal"
+# mean = 10.0
+# scale = 5.0
+dist = "log_uniform"
 low = 0.5
 high = 100.0
 
 [model.priors.sigma_y_floor]
-dist = "truncated_normal"
-mean = 10.0
-scale = 5.0
+# dist = "truncated_normal"
+# mean = 10.0
+# scale = 5.0
+dist = "log_uniform"
 low = 0.5
 high = 100.0
 
 [model.priors.sigma_v_sys]
-dist = "truncated_normal"
-mean = 2.0
-scale = 1.0
+dist = "log_uniform"
+# mean = 2.0
+# scale = 1.0
 low = 0.1
 high = 100.0
 
 [model.priors.sigma_v_hv]
-dist = "truncated_normal"
-mean = 2.0
-scale = 1.0
+dist = "log_uniform"
+# mean = 2.0
+# scale = 1.0
 low = 0.1
 high = 100.0
 
 [model.priors.sigma_a_floor]
-dist = "truncated_normal"
-mean = 0.3
-scale = 0.15
+dist = "log_uniform"
+# mean = 0.3
+# scale = 0.15
 low = 0.02
 high = 0.75
 

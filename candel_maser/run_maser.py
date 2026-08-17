@@ -104,7 +104,9 @@ import candel.model.maser_physics as maser_physics  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
 from candel.model.maser_blackjax import (  # noqa: E402
-    nudge_initial_params_inside_support, run_blackjax_mcmc)
+    _ngc5765b_reference_r_ang_bounds,
+    nudge_initial_params_inside_support, prepare_floor_init,
+    run_blackjax_mcmc)
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
 from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
 from candel.pvdata.megamaser_data import (  # noqa: E402
@@ -266,7 +268,7 @@ def _clean_init(model, init_cfg):
     else:
         init_params.setdefault("d2i_dr2", jnp.asarray(0.0))
         init_params.setdefault("d2Omega_dr2", jnp.asarray(0.0))
-    return init_params
+    return prepare_floor_init(model, init_params)
 
 
 def _paper_init(target, galaxy, master):
@@ -445,6 +447,8 @@ def _print_global_summary(samples):
         "e_x", "e_y", "dperiapsis_dr",
         "x0", "y0", "dv_sys", "sigma_x_floor", "sigma_y_floor",
         "sigma_v_sys", "sigma_v_hv", "sigma_a_floor",
+        "sigma_x_floor_clump2", "sigma_y_floor_clump2",
+        "sigma_v_floor_clump2", "sigma_a_floor_clump2",
     )
     printable = {}
     for key in global_keys:
@@ -582,7 +586,9 @@ def _print_summary(samples, info, result):
                 "d2i_dr2", "d2Omega_dr2",
                 "e_x", "e_y", "dperiapsis_dr",
                 "x0", "y0", "dv_sys", "sigma_x_floor", "sigma_y_floor",
-                "sigma_v_sys", "sigma_v_hv", "sigma_a_floor"):
+                "sigma_v_sys", "sigma_v_hv", "sigma_a_floor",
+                "sigma_x_floor_clump2", "sigma_y_floor_clump2",
+                "sigma_v_floor_clump2", "sigma_a_floor_clump2"):
         if key not in samples:
             continue
         arr = np.asarray(samples[key])
@@ -1390,6 +1396,11 @@ def _variant_suffix(model, args, init_strategy):
         parts.append("matchreid")
     if args.fix_floors_pesce:
         parts.append("fixfloors")
+    if model.galaxy_name == "NGC5765b":
+        if model.clump2_acceleration_only:
+            parts.append("accelfloor")
+        elif not model.use_clump2_floors:
+            parts.append("singlefloor")
     # Always tag the resolved init strategy (median/config/reid) last, so runs
     # that differ only by initialisation stay apart and glob cleanly.
     parts.append(f"init{init_strategy}")
@@ -1500,6 +1511,16 @@ def main(argv=None):
                              "sigma_a_floor) fixed at the published "
                              "Pesce/Reid values; the MCMC samples all globals "
                              "the per-spot (r, phi) latents.")
+    floor_mode = parser.add_mutually_exclusive_group()
+    floor_mode.add_argument(
+        "--single-error-floor", action="store_true",
+        help="For NGC5765b, disable the separate clump-2 floors and use "
+             "only the standard sampled floor for each observable. "
+             "Other galaxies are unchanged.")
+    floor_mode.add_argument(
+        "--clump2-acceleration-floor-only", action="store_true",
+        help="For NGC5765b, sample a separate clump-2 acceleration floor "
+             "only; position and velocity use the standard floors.")
     parser.add_argument("--match-reid", action="store_true",
                         help="Diagnostic mode: use Reid fit_disk physical "
                              "constants and circular-speed SR gamma "
@@ -1532,6 +1553,9 @@ def main(argv=None):
                         help="Disable the MAP overlay on the corner plot.")
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args(argv)
+    if args.clump2_acceleration_floor_only and args.fix_floors_pesce:
+        parser.error("--clump2-acceleration-floor-only cannot be combined "
+                     "with --fix-floors-pesce")
     if args.compare_reid_2x and not args.compare_reid:
         raise SystemExit("--compare-reid-2x requires --compare-reid.")
     if args.no_ecc and args.add_ecc:
@@ -1663,6 +1687,11 @@ def main(argv=None):
     if args.mass_parameterization is not None:
         config["model"]["galaxies"][args.galaxy][
             "mass_parameterization"] = args.mass_parameterization
+    if args.single_error_floor or args.fix_floors_pesce:
+        config["model"]["use_ngc5765b_clump2_floors"] = False
+    elif args.clump2_acceleration_floor_only:
+        config["model"]["use_ngc5765b_clump2_floors"] = True
+        config["model"]["ngc5765b_clump2_acceleration_only"] = True
 
     tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False)
     tomli_w.dump(config, tmp)
@@ -1739,7 +1768,15 @@ def main(argv=None):
     fprint(f"global kernel: NUTS; max_tree_depth={max_tree_depth}")
     fprint(f"phi_step_size={phi_step_size}; reflect_prob={reflect_prob}")
     fprint("phi: sampled explicitly")
-    fprint("r_ang: sampled as z_r = log(r_ang / r_hat(theta))")
+    if model.galaxy_name == "NGC5765b":
+        r_min, r_max, D_A_ref = _ngc5765b_reference_r_ang_bounds(
+            model, _h_ref(model))
+        fprint(
+            f"r_ang support: fixed [{float(r_min):.4f}, "
+            f"{float(r_max):.4f}] mas at D_A_ref={float(D_A_ref):.2f} "
+            "Mpc from v_cmb and H0_ref; independent of sampled D_A")
+    else:
+        fprint("r_ang support: improper flat measure for r_ang > 0")
     fprint(f"mass: {model.mass_parameterization}")
 
     t0 = time.time()
@@ -1820,6 +1857,8 @@ def main(argv=None):
         "save_latents": bool(args.save_latents),
         "precision": precision,
     }
+    if hasattr(model, "error_floor_policy"):
+        metadata["error_floor_policy"] = str(model.error_floor_policy)
     log_density_flat = np.asarray(result.log_density, dtype=float).reshape(-1)
     log_density_finite = log_density_flat[np.isfinite(log_density_flat)]
     if log_density_finite.size:

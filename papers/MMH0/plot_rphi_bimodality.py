@@ -47,7 +47,9 @@ HDF5 = (f"results/Megamaser/{DATASET}/{GALAXY}/"
 GLOBAL_KEYS = ("D_A", "D_c", "eta", "log_MBH", "i0", "di_dr", "Omega0",
                "dOmega_dr",
                "x0", "y0", "dv_sys", "sigma_x_floor", "sigma_y_floor",
-               "sigma_v_sys", "sigma_v_hv", "sigma_a_floor")
+               "sigma_v_sys", "sigma_v_hv", "sigma_a_floor",
+               "sigma_x_floor_clump2", "sigma_y_floor_clump2",
+               "sigma_v_floor_clump2", "sigma_a_floor_clump2")
 
 
 def median_globals(path):

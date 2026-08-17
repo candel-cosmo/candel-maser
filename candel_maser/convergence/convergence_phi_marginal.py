@@ -152,9 +152,11 @@ def eval_grid_logl(model, master_cfg, galaxy, n_high, n_low, n_sys,
     return per_type_logl(ll, m_t), m_t
 
 
-def estimate_r_ang(model, D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv):
+def estimate_r_ang(model, D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+                   sigma_a_floor_clump2_2=None):
     r_est, _, _, _ = model._closed_form_seeds(
-        D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv)
+        D_A, M_BH, v_sys, sigma_a_floor2, i0, var_v_hv,
+        sigma_a_floor_clump2_2)
     return np.asarray(r_est)
 
 
@@ -249,7 +251,9 @@ def main():
         sigma_a_floor2 = phys_args[16]
         var_v_hv = phys_args[15]
         r_est = estimate_r_ang(model, D_A, M_BH, v_sys,
-                               sigma_a_floor2, i0, var_v_hv)
+                               sigma_a_floor2, i0, var_v_hv,
+                               (phys_args[20]
+                                if len(phys_args) > 20 else None))
         print(f"  D_A={D_A:.2f} Mpc, n_spots={model.n_spots}")
 
         _r_ang_lo, _r_ang_hi = model.r_ang_range(D_A)

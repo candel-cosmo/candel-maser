@@ -25,13 +25,14 @@ DRY=false
 YES=false
 EVIDENCE=false
 SKIP_DONE=false
+TEMP_OUTPUT=false
 EXTRA=()
 
 usage() {
     cat <<EOF
 Usage: $0 (--local | -q QUEUE) [--cpus N] [--mem GB] \\
           [--num-warmup N] [--num-samples N] [--num-chains N] [--evidence] \\
-          [--skip-done] [--dry] [-y] [-- extra submit.sh args]
+          [--skip-done] [--temp-output] [--dry] [-y] [-- extra submit.sh args]
 
 Runs the 2x2 megamaser MCMC sweep over the GALAXIES set at the top of this
 script (default: $GALAXIES):
@@ -58,6 +59,7 @@ diagnostics for existing HDF5 chains; they are not rigorous absolute evidence.
                      CPU limits.
   --evidence         Submit marginal-objective diagnostics instead of MCMC.
   --skip-done        Forward submit.sh --skip-done; skip existing MCMC HDF5s.
+  --temp-output      Forward submit.sh --temp-output for every sweep run.
   --gpu-mem GB       Forwarded to submit.sh --evidence.
   --dry              Forward --dry: print the runner commands without submitting.
   -y, --yes          Do not ask for confirmation before submitting.
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --num-chains) NUM_CHAINS="$2"; shift 2 ;;
         --evidence) EVIDENCE=true; shift ;;
         --skip-done) SKIP_DONE=true; shift ;;
+        --temp-output) TEMP_OUTPUT=true; shift ;;
         --gpu-mem) GPU_MEM="$2"; shift 2 ;;
         --dry) DRY=true; shift ;;
         -y|--yes) YES=true; shift ;;
@@ -122,6 +125,7 @@ else
     [[ "$SKIP_DONE" == true ]] && common+=(--skip-done)
 fi
 [[ "$DRY" == true ]] && common+=(--dry)
+[[ "$TEMP_OUTPUT" == true ]] && common+=(--temp-output)
 [[ ${#EXTRA[@]} -gt 0 ]] && common+=("${EXTRA[@]}")
 
 gal_arr=($GALAXIES)

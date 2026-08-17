@@ -116,6 +116,19 @@ def _apply_chain_attrs_to_config(cfg, galaxy, attrs):
         gblk["use_ecc"] = _attr_bool(attrs, "use_ecc")
     if _attr_bool(attrs, "uniform_da_prior"):
         cfg["model"]["D_c_prior"] = "uniform_D_A"
+    if galaxy == "NGC5765b":
+        if "error_floor_policy" in attrs:
+            policy = _attr_str(attrs, "error_floor_policy")
+            cfg["model"]["use_ngc5765b_clump2_floors"] = (
+                policy != "sampled_ngc5765b_single_floor")
+            cfg["model"]["ngc5765b_clump2_acceleration_only"] = (
+                policy == "sampled_ngc5765b_clump2_acceleration_only")
+        elif "theta_sites" in attrs:
+            sites = set(_attr_str(attrs, "theta_sites").split(","))
+            use_clump2 = "sigma_a_floor_clump2" in sites
+            cfg["model"]["use_ngc5765b_clump2_floors"] = use_clump2
+            cfg["model"]["ngc5765b_clump2_acceleration_only"] = (
+                use_clump2 and "sigma_x_floor_clump2" not in sites)
     return gblk
 
 

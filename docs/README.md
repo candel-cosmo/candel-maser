@@ -53,6 +53,11 @@ resolved command without running or submitting it. On Glamdring, use
 `redwood`, `berg`, or `cmb` for CPU work and `gpulong`, `cmbgpu`, or `optgpu`
 for GPU work; ARC uses `short`, `medium`, or `long`.
 
+For disposable tests, add `--temp-output`. Every standard submission mode and
+sweep then writes below `results_test/Megamaser/<dataset>/` instead of the
+production results tree. Iterative clipping retains its test manifest there
+without promoting it into `data/Megamaser/clipped/`.
+
 ```bash
 # Inspect a DE submission, then submit it on a GPU queue.
 bash scripts/megamaser/submit.sh -q cmbgpu --galaxy NGC6323 \
@@ -326,6 +331,18 @@ scripts and `check_reid/prepare_reid_data.py`):
 | `fiducial` | the tables Pesce et al. (2020) actually fitted, released with their erratum — **the default** |
 | `unpruned` | published rows restored for clipping tests; UGC3789 prefers complete fiducial rows where matched, and NGC6323 is identical to `fiducial` |
 | `clipped` | the `unpruned` tables filtered by the matching stabilised iterative-DE model-variant mask, falling back to the linear mask |
+
+By default, NGC5765b in every dataset uses separate sampled east-position,
+north-position, velocity, and acceleration floors for the retained channels
+from 8290 to 8340 km/s (clump 2), in place of the corresponding standard
+floors. Each floor is added in quadrature to the quoted measurement error;
+all measurement values and quoted uncertainties remain unchanged. The four
+clump-2 parameters reuse the corresponding standard floor priors. Pass
+`--clump2-acceleration-floor-only` to retain only the separate sampled
+acceleration floor, with the standard position and velocity floors applied to
+both clumps. Pass `--single-error-floor` to use only the standard floor for
+each observable throughout NGC5765b; `--fix-floors-pesce` implies that mode.
+Other galaxies are unchanged.
 
 They differ for NGC5765b, NGC6264, NGC6323 and UGC3789 (spots removed in MCP
 vetting, NGC6323 augmented, NGC6264 acceleration uncertainties replaced).
@@ -630,8 +647,10 @@ Important explicit-latent controls:
 phi_sys_ranges_deg = [[-180, 180]]
 ```
 
-MCMC samples non-centred log-radius residuals,
-`z_r = log(r_ang / r_hat(theta))`. Per-spot `r_ang`/`phi` samples are not
+MCMC uses an improper flat angular measure with `r_ang > 0`, except for
+NGC5765b. For NGC5765b, fixed angular bounds are computed once from
+`R_phys_lo`/`R_phys_hi` at the distance implied by `v_cmb_kms` and `H0_ref`,
+and do not move with sampled `D_A`. Per-spot `r_ang`/`phi` samples are not
 written by default; pass `--save-latents` to keep them in the HDF5 output.
 Multiple chains use fixed, phase-specific progress rows for latent burn-in,
 MCMC warmup, and sampling. They run concurrently, capped at the allocated or
