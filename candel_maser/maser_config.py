@@ -166,6 +166,8 @@ def apply_dataset(cfg, dataset=None):
     _merge_init(cfg, dataset)
     _namespace_root_output(cfg, dataset)
     cfg.setdefault("io", {})["dataset"] = dataset
+    cfg.setdefault("model", {})["use_ngc5765b_clump2_floors"] = (
+        dataset != "fiducial")
     fprint(f"megamaser dataset: {dataset} "
            f"(root_output '{cfg['io'].get('root_output')}').")
     return dataset

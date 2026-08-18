@@ -75,8 +75,9 @@ Required:
                          (glamdring CPU: redwood|berg|cmb;
                          glamdring GPU: gpulong|cmbgpu|optgpu;
                          arc: short|medium|long).
-  --dataset original_published|fiducial|unpruned|clipped
-                         Spot-table dataset. Default: [io].dataset from
+  --dataset NAME[,NAME,...]
+                         Spot-table dataset(s): original_published, fiducial,
+                         unpruned, or clipped. Default: [io].dataset from
                          config_maser.toml (currently fiducial). Selects the tables,
                          the init_<dataset>.toml best points, and the
                          <root_output>/<dataset>/ results namespace.
@@ -511,9 +512,33 @@ if [[ -z "$GALAXY" ]]; then
 fi
 [[ -z "$DATASET" ]] && DATASET="$(config_value io dataset)"
 [[ -z "$DATASET" ]] && DATASET="fiducial"
-if [[ "$DATASET" != "original_published" && "$DATASET" != "fiducial" && "$DATASET" != "unpruned" && "$DATASET" != "clipped" ]]; then
-    echo "[ERROR] --dataset must be original_published, fiducial, unpruned, or clipped"
-    exit 1
+if [[ "$DATASET" == ,* || "$DATASET" == *, || "$DATASET" == *,,* ]]; then
+    echo "[ERROR] --dataset contains an empty entry"; exit 1
+fi
+IFS=',' read -ra DATASETS <<< "$DATASET"
+for dataset in "${DATASETS[@]}"; do
+    case "$dataset" in
+        original_published|fiducial|unpruned|clipped) ;;
+        *) echo "[ERROR] --dataset must contain only original_published, fiducial, unpruned, or clipped"; exit 1 ;;
+    esac
+done
+if [[ ${#DATASETS[@]} -gt 1 ]]; then
+    if [[ "$ITERATIVE_CLIP" == true ]]; then
+        echo "[ERROR] --iterative-clip-sigma requires only --dataset unpruned"
+        exit 1
+    fi
+    for dataset in "${DATASETS[@]}"; do
+        child_args=("${ORIG_ARGS[@]}")
+        for ((i = 0; i + 1 < ${#child_args[@]}; i++)); do
+            if [[ "${child_args[$i]}" == "--dataset" ]]; then
+                child_args[$((i + 1))]="$dataset"
+                break
+            fi
+        done
+        echo "[submit] === dataset=$dataset ==="
+        "$ROOT/scripts/megamaser/submit.sh" "${child_args[@]}"
+    done
+    exit 0
 fi
 RUNNER_ENV=(/usr/bin/env)
 RUNNER_ENV_STR="/usr/bin/env"

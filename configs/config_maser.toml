@@ -19,7 +19,7 @@ reflect_prob = 0.25
 Om = 0.315
 use_selection = false
 sigma_v_default = 0.25
-use_ngc5765b_clump2_floors = true
+use_ngc5765b_clump2_floors = false
 ngc5765b_clump2_acceleration_only = false
 D_c_prior = "uniform_D_A"
 mass_parameterization = "eta"  # choices: "eta", "log_mbh"
@@ -134,39 +134,37 @@ loc = 0.0
 scale = 90.0
 
 [model.priors.sigma_x_floor]
-# dist = "truncated_normal"
-# mean = 10.0
-# scale = 5.0
-dist = "log_uniform"
+dist = "truncated_normal"
+mean = 10.0
+scale = 5.0
 low = 0.5
 high = 100.0
 
 [model.priors.sigma_y_floor]
-# dist = "truncated_normal"
-# mean = 10.0
-# scale = 5.0
-dist = "log_uniform"
+dist = "truncated_normal"
+mean = 10.0
+scale = 5.0
 low = 0.5
 high = 100.0
 
 [model.priors.sigma_v_sys]
-dist = "log_uniform"
-# mean = 2.0
-# scale = 1.0
+dist = "truncated_normal"
+mean = 2.0
+scale = 1.0
 low = 0.1
 high = 100.0
 
 [model.priors.sigma_v_hv]
-dist = "log_uniform"
-# mean = 2.0
-# scale = 1.0
+dist = "truncated_normal"
+mean = 2.0
+scale = 1.0
 low = 0.1
 high = 100.0
 
 [model.priors.sigma_a_floor]
-dist = "log_uniform"
-# mean = 0.3
-# scale = 0.15
+dist = "truncated_normal"
+mean = 0.3
+scale = 0.15
 low = 0.02
 high = 0.75
 
@@ -270,6 +268,20 @@ mcmc_sample_n_inner = 60
 n_phi_partition_sys = 97
 n_phi_partition_hv = 49
 n_r_local = 321
+
+[model.galaxies.NGC5765b.priors.sigma_x_floor_clump2]
+dist = "truncated_normal"
+mean = 10.0
+scale = 5.0
+low = 0.5
+high = 15
+
+[model.galaxies.NGC5765b.priors.sigma_y_floor_clump2]
+dist = "truncated_normal"
+mean = 10.0
+scale = 5.0
+low = 0.5
+high = 15
 
 [model.galaxies.NGC6264]
 ra = 254.3172

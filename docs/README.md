@@ -332,12 +332,15 @@ scripts and `check_reid/prepare_reid_data.py`):
 | `unpruned` | published rows restored for clipping tests; UGC3789 prefers complete fiducial rows where matched, and NGC6323 is identical to `fiducial` |
 | `clipped` | the `unpruned` tables filtered by the matching stabilised iterative-DE model-variant mask, falling back to the linear mask |
 
-By default, NGC5765b in every dataset uses separate sampled east-position,
-north-position, velocity, and acceleration floors for the retained channels
-from 8290 to 8340 km/s (clump 2), in place of the corresponding standard
-floors. Each floor is added in quadrature to the quoted measurement error;
-all measurement values and quoted uncertainties remain unchanged. The four
-clump-2 parameters reuse the corresponding standard floor priors. Pass
+By default, fiducial NGC5765b uses one shared floor per observable because the
+P20-vetted table is already clipped. The `original_published`, `unpruned`, and
+`clipped` datasets instead use separate sampled east-position, north-position,
+velocity, and acceleration floors for the retained channels from 8290 to 8340
+km/s (clump 2). Each floor is added in quadrature to the quoted measurement
+error; all measurement values and quoted uncertainties remain unchanged. The
+four clump-2 parameters inherit the corresponding standard floor priors unless
+overridden under `model.galaxies.NGC5765b.priors`; the default config gives
+`sigma_x_floor_clump2` and `sigma_y_floor_clump2` their own prior blocks. Pass
 `--clump2-acceleration-floor-only` to retain only the separate sampled
 acceleration floor, with the standard position and velocity floors applied to
 both clumps. Pass `--single-error-floor` to use only the standard floor for

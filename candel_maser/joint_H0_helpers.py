@@ -34,8 +34,7 @@ from candel.model.utils import log_prob_integrand_sel
 from candel.pvdata.field_cache import (_field_cache_dir_from_config,
                                        _field_cache_enabled_from_config)
 from candel.pvdata.volume_density import _load_volume_data_for_H0
-from candel.util import (SPEED_OF_LIGHT, data_path, fprint, load_config,
-                         radec_to_cartesian)
+from candel.util import SPEED_OF_LIGHT, fprint, load_config, radec_to_cartesian
 
 # -----------------------------------------------------------------------
 # Shared paths and galaxy data
@@ -67,11 +66,11 @@ def _cache_digest(payload, length=24):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:length]
 
 
-def _toy_vlos_cache_path(payload):
+def _toy_vlos_cache_path(payload, config):
     recon = str(payload["reconstruction"])
     digest = _cache_digest(payload)
-    return data_path("field_cache", "toy_maser_vlos", recon,
-                     f"{digest}.npz")
+    return os.path.join(_field_cache_dir_from_config(config),
+                        "toy_maser_vlos", recon, f"{digest}.npz")
 
 
 def _manticore_index_root(reconstruction, field_kwargs):
@@ -186,7 +185,7 @@ def _load_or_build_vlos_cache(reconstruction, field_config_path,
         "dec": dec,
         "velocity_field_smoothing_scale": float(velocity_smoothing_scale),
     }
-    cache_path = _toy_vlos_cache_path(payload)
+    cache_path = _toy_vlos_cache_path(payload, field_config)
     if os.path.exists(cache_path) and not overwrite:
         print(f"Loading velocity LOS cache: {cache_path}", flush=True)
         with np.load(cache_path, allow_pickle=False) as f:
