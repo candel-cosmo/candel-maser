@@ -357,14 +357,15 @@ class MaserDiskModel(ModelBase):
             if "clump2_floor_mask" not in data:
                 raise ValueError("NGC5765b clump-2 floors require a mask.")
             for target, source in self.clump2_floor_pairs:
-                self.priors[target] = self.priors[source]
-                self.prior_dist_name[target] = self.prior_dist_name[source]
+                if target not in gal_priors:
+                    self.priors[target] = self.priors[source]
+                    self.prior_dist_name[target] = self.prior_dist_name[source]
             if self.clump2_acceleration_only:
                 fprint("only the clump-2 acceleration floor is sampled with "
-                       "the standard acceleration-floor prior")
+                       "its configured prior")
             else:
-                fprint("clump-2 floors are sampled with the corresponding "
-                       "standard floor priors")
+                fprint("clump-2 floors are sampled with their configured "
+                       "priors")
         if gname == "NGC5765b":
             if self.clump2_acceleration_only:
                 self.error_floor_policy = (
