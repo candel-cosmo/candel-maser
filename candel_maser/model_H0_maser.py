@@ -509,7 +509,7 @@ class MaserDiskModel(ModelBase):
         # with it.  Fix it for galaxies with no radial lever arm on the warp
         # (see the per-galaxy prior overrides in config_maser.toml).
         self.sample_periapsis_warp = not isinstance(
-            self.priors["dperiapsis_dr"], Delta)
+            self.priors.get("dperiapsis_dr"), Delta)
         flags = []
         if self.use_ecc:
             flags.append("ecc" + ("(cart)" if self.ecc_cartesian else "")

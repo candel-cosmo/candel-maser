@@ -73,6 +73,19 @@ def test_eccentric_model_accepts_a_fixed_periapsis_warp():
     assert model.sample_periapsis_warp is True
 
 
+def test_circular_model_does_not_require_a_periapsis_prior():
+    """A model with no dperiapsis_dr prior must still build.
+
+    The warp prior is only meaningful under use_ecc, so reading it
+    unconditionally would break every circular configuration that omits it.
+    """
+    model = object.__new__(MaserDiskModel)
+    model.config = {"model": {"use_ecc": False}}
+    model.priors = {}
+    model._configure_features({})
+    assert model.sample_periapsis_warp is True
+
+
 def test_reid_speed_constant_reaches_optimised_eccentric_velocity():
     model = object.__new__(MaserDiskModel)
     r_pre = {

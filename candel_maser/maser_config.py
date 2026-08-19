@@ -195,5 +195,6 @@ def variant_init_block(gal_cfg, model):
             fprint(f"init block: [{name}]")
             return gal_cfg[name]
     if names:
-        fprint(f"init block: [{names[0]}] absent, falling back to [init]")
+        tried = "/".join(f"[{n}]" for n in names)
+        fprint(f"init block: {tried} absent, falling back to [init]")
     return gal_cfg.get("init", {})

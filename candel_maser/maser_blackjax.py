@@ -1528,6 +1528,9 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
     # conditional typical set and seed the per-side covariance before theta
     # NUTS / step-size adaptation begins. The migrated state and accumulated
     # Welford cov_state both flow into warmup, which keeps adapting.
+    # Built outside the branch because the conditional-metric measurement
+    # below reuses this same kernel for its spacing sweeps.  `_scan_fn` jits
+    # lazily, so constructing it when unused costs nothing.
     burnin_body = _make_mcmc_latent_burnin_step(
         target, cov_init, is_hv, phi_centre, n_inner=n_inner,
         target_accept_latent=target_accept_latent, adapt_rate=adapt_rate,
@@ -1558,6 +1561,7 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
             burnin_bar.close()
         state, cov_state, rng_key = bcarry
 
+    metric_draws_used = 0
     if conditional_mass:
         # Measure the conditional Hessian at the end of the latent burn-in --
         # typical-set latent draws, which is what NUTS actually conditions on.
@@ -1566,6 +1570,9 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         # The target is E_z[H], so average over _METRIC_DRAWS draws separated
         # by _METRIC_SPACING sweeps rather than trusting one: theta is held
         # fixed here, so these are the same fixed-theta moves as the burn-in.
+        # With the burn-in disabled the caller has ruled those moves out (see
+        # run_maser.py, which disables it for non-config/reid init because
+        # theta is fixed), so fall back to the single-draw estimate.
         u_h = state.theta.position
         theta_h, _ = target.constrain(u_h)
 
@@ -1576,7 +1583,12 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
 
         lds = [_metric_logdensity(state)]
         step0 = int(num_latent_burnin)
-        for j in range(_METRIC_DRAWS - 1):
+        n_draws = _METRIC_DRAWS if step0 > 0 else 1
+        metric_draws_used = n_draws
+        if n_draws > 1:
+            fprint(f"   measuring the conditional metric over {n_draws} "
+                   f"latent draws ({_METRIC_SPACING} sweeps apart)")
+        for j in range(n_draws - 1):
             mcarry, _ = burnin_scan(
                 (state, cov_state, rng_key),
                 jnp.arange(step0 + j * _METRIC_SPACING,
@@ -1670,8 +1682,7 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         "sample_n_inner": np.asarray(sample_n_inner),
         "transport_systemic_phi": np.asarray(transport_systemic_phi),
         "conditional_mass": np.asarray(conditional_mass),
-        "metric_draws": np.asarray(
-            _METRIC_DRAWS if conditional_mass else 0),
+        "metric_draws": np.asarray(metric_draws_used),
     }
     return MaserBlackJaxResult(
         samples=_concat_dicts(sample_rows),
