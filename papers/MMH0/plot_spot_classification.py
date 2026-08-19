@@ -20,7 +20,8 @@ from spot_classification import plot_spot_classification  # noqa: E402
 REPO = abspath(join(dirname(__file__), "..", ".."))
 CONFIG = join(REPO, "scripts", "megamaser", "config_maser.toml")
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
-DATASET = "original_published"
+# The paper caption reads this figure as the updated-MCP tables.
+DATASET = "fiducial"
 
 # Display name -> config key.
 GALAXIES = {

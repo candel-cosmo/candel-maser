@@ -32,7 +32,10 @@ from candel.field.field_interp import (_get_grid_params,
 from candel.model.pv_utils import _R_ICRS_TO_GAL, _R_ICRS_TO_SUPERGAL
 from candel.model.utils import log_prob_integrand_sel
 from candel.pvdata.field_cache import (_field_cache_dir_from_config,
-                                       _field_cache_enabled_from_config)
+                                       _field_cache_enabled_from_config,
+                                       _field_cache_portable_loader_kwargs,
+                                       _field_cache_product_path,
+                                       _field_cache_scope)
 from candel.pvdata.volume_density import _load_volume_data_for_H0
 from candel.util import SPEED_OF_LIGHT, fprint, load_config, radec_to_cartesian
 
@@ -43,6 +46,7 @@ from candel.util import SPEED_OF_LIGHT, fprint, load_config, radec_to_cartesian
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
 DEFAULT_FIELD_CONFIG = os.path.join(
     os.path.dirname(__file__), "..", "runs", "configs", "config.toml")
+FIELD_CACHE_PROJECT = "MMH0"
 
 
 def _jsonable(value):
@@ -68,9 +72,33 @@ def _cache_digest(payload, length=24):
 
 def _toy_vlos_cache_path(payload, config):
     recon = str(payload["reconstruction"])
-    digest = _cache_digest(payload)
-    return os.path.join(_field_cache_dir_from_config(config),
-                        "toy_maser_vlos", recon, f"{digest}.npz")
+    portable_payload = dict(payload)
+    field_kwargs = portable_payload.get("field_kwargs")
+    if isinstance(field_kwargs, dict):
+        portable_payload["field_kwargs"] = (
+            _field_cache_portable_loader_kwargs(field_kwargs))
+    digest = _cache_digest(portable_payload)
+    return _field_cache_product_path(
+        _field_cache_dir_from_config(config), FIELD_CACHE_PROJECT, recon,
+        "toy_maser_vlos", _field_cache_scope(payload), f"{digest}.npz")
+
+
+def _toy_vlos_cache_payload(reconstruction, field_kwargs, field_indices, r,
+                            galaxy_data, velocity_smoothing_scale=0.0):
+    """Return the complete cache identity for a joint-H0 velocity LOS."""
+    return {
+        "version": 1,
+        "product": "toy_maser_vlos",
+        "reconstruction": reconstruction,
+        "field_kwargs": field_kwargs,
+        "field_indices": [int(index) for index in field_indices],
+        "r": np.asarray(r, dtype=np.float32),
+        "galaxy_names": [gd["name"] for gd in galaxy_data],
+        "RA": np.asarray([gd["RA"] for gd in galaxy_data], dtype=np.float64),
+        "dec": np.asarray(
+            [gd["dec"] for gd in galaxy_data], dtype=np.float64),
+        "velocity_field_smoothing_scale": float(velocity_smoothing_scale),
+    }
 
 
 def _manticore_index_root(reconstruction, field_kwargs):
@@ -170,21 +198,12 @@ def _load_or_build_vlos_cache(reconstruction, field_config_path,
                 f"Field indices {missing} are unavailable for "
                 f"`{reconstruction}`. Available: {available}.")
 
-    names = [gd["name"] for gd in galaxy_data]
-    RA = np.asarray([gd["RA"] for gd in galaxy_data], dtype=np.float64)
-    dec = np.asarray([gd["dec"] for gd in galaxy_data], dtype=np.float64)
-    payload = {
-        "version": 1,
-        "product": "toy_maser_vlos",
-        "reconstruction": reconstruction,
-        "field_kwargs": field_kwargs,
-        "field_indices": field_indices,
-        "r": np.asarray(r, dtype=np.float32),
-        "galaxy_names": names,
-        "RA": RA,
-        "dec": dec,
-        "velocity_field_smoothing_scale": float(velocity_smoothing_scale),
-    }
+    payload = _toy_vlos_cache_payload(
+        reconstruction, field_kwargs, field_indices, r, galaxy_data,
+        velocity_smoothing_scale)
+    names = payload["galaxy_names"]
+    RA = payload["RA"]
+    dec = payload["dec"]
     cache_path = _toy_vlos_cache_path(payload, field_config)
     if os.path.exists(cache_path) and not overwrite:
         print(f"Loading velocity LOS cache: {cache_path}", flush=True)
@@ -275,6 +294,7 @@ def _load_volume_selection_data(reconstruction, field_config_path,
         load_velocity=True,
         geometry=geometry,
         cache_dir=cache_dir,
+        cache_project=FIELD_CACHE_PROJECT,
         cache_enabled=cache_enabled,
         store_rhat=True,
         supersample_factor=supersample_factor,

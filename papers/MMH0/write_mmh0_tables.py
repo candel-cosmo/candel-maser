@@ -53,6 +53,15 @@ BASE_ROWS = [
      "sigma_v_hv (km/s)"),
     ("sigma_a_floor", r"$\sigma_a$ ($\kmsecyr$)",
      "sigma_a (km/s/yr)"),
+    # NGC 5765b only; blank elsewhere (see table_rows).
+    ("sigma_x_floor_clump2", r"$\sigma_x^{(2)}$ ($\mu$as)",
+     "sigma_x clump2 (uas)"),
+    ("sigma_y_floor_clump2", r"$\sigma_y^{(2)}$ ($\mu$as)",
+     "sigma_y clump2 (uas)"),
+    ("sigma_v_floor_clump2", r"$\sigma_{v,\mathrm{sys}}^{(2)}$ ($\kmsec$)",
+     "sigma_v_sys clump2 (km/s)"),
+    ("sigma_a_floor_clump2", r"$\sigma_a^{(2)}$ ($\kmsecyr$)",
+     "sigma_a clump2 (km/s/yr)"),
 ]
 QW_ROWS = BASE_ROWS[:6] + [
     ("d2i_dr2", r"$\mathrm{d}^2i/\mathrm{d}r^2$ (deg mas$^{-2}$)",
@@ -133,8 +142,14 @@ def table_rows(chains, rows, latex):
         ]
 
     for key, tex_label, md_label in rows:
+        # The clump-2 floors are sampled for NGC 5765b only, and only on the
+        # tables that retain the second systemic clump. Skip a row no galaxy
+        # has; dash the galaxies that lack one the others have.
+        if not any(key in chains[g] for g in GALAXIES):
+            continue
         label = tex_label if latex else md_label
-        vals = [fmt_interval(chains[g][key], latex) for g in GALAXIES]
+        vals = [fmt_interval(chains[g][key], latex) if key in chains[g]
+                else ("---" if latex else "-") for g in GALAXIES]
         if latex:
             out.append(label + " & " + " & ".join(vals) + r" \\")
         else:
