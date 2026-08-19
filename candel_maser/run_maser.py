@@ -32,6 +32,7 @@ import numpy as np
 import tomli
 import tomli_w
 from h5py import File as H5File
+from scipy.signal import correlate
 
 _LOCAL_CONFIG = os.path.join(
     os.path.dirname(__file__), "../../local_config.toml")
@@ -121,6 +122,7 @@ _PESCE_FLOOR_UNITS = (("sigma_x_floor", "uas"), ("sigma_y_floor", "uas"),
                       ("sigma_a_floor", "km/s/yr"))
 _PESCE_FLOOR_NAMES = tuple(name for name, _ in _PESCE_FLOOR_UNITS)
 _REID_CLIGHT = 2.997925e5
+_LATENT_SUMMARY_SPOT_CHUNK = 8
 
 
 class _StdoutTee:
@@ -377,7 +379,7 @@ def _ess_1d(x):
     var = np.dot(y, y) / n
     if not np.isfinite(var) or var <= 0:
         return float(n)
-    acov = np.correlate(y, y, mode="full")[n - 1:] / n
+    acov = correlate(y, y, mode="full", method="fft")[n - 1:] / n
     rho = acov / acov[0]
     tau = 1.0
     for value in rho[1:]:
@@ -501,12 +503,26 @@ def _print_r_ang_summary(samples):
                "(need >=20 for diagnostics).")
         return
 
-    r_flat = r_chains.reshape(-1, r_chains.shape[-1])
-    neff, rhat = _ess_rhat(r_chains)
-    mean = np.mean(r_flat, axis=0)
-    sd = np.std(r_flat, axis=0)
-    q05, q50, q95 = np.quantile(r_flat, [0.05, 0.50, 0.95], axis=0)
-    move = np.mean(np.abs(np.diff(r_chains, axis=1)) > 0, axis=(0, 1))
+    n_spots = r_chains.shape[-1]
+    mean = np.empty(n_spots)
+    sd = np.empty(n_spots)
+    q05 = np.empty(n_spots)
+    q50 = np.empty(n_spots)
+    q95 = np.empty(n_spots)
+    neff = np.empty(n_spots)
+    rhat = np.empty(n_spots)
+    move = np.empty(n_spots)
+    for start in range(0, n_spots, _LATENT_SUMMARY_SPOT_CHUNK):
+        idx = slice(start, start + _LATENT_SUMMARY_SPOT_CHUNK)
+        block = r_chains[..., idx]
+        flat = block.reshape(-1, block.shape[-1])
+        neff[idx], rhat[idx] = _ess_rhat(block)
+        mean[idx] = np.mean(flat, axis=0)
+        sd[idx] = np.std(flat, axis=0)
+        q05[idx], q50[idx], q95[idx] = np.quantile(
+            flat, [0.05, 0.50, 0.95], axis=0)
+        move[idx] = np.mean(
+            np.abs(np.diff(block, axis=1)) > 0, axis=(0, 1))
 
     fsection("r_ang Summary")
     print(f"  n_spots              = {r_chains.shape[-1]}", flush=True)
@@ -543,21 +559,35 @@ def _print_phi_summary(samples):
                "(need >=20 for diagnostics).")
         return
 
-    phi_flat = phi_chains.reshape(-1, phi_chains.shape[-1])
-    sin_mean = np.mean(np.sin(phi_flat), axis=0)
-    cos_mean = np.mean(np.cos(phi_flat), axis=0)
-    centre = np.arctan2(sin_mean, cos_mean)
-    centred = centre + np.angle(
-        np.exp(1j * (phi_chains - centre[None, None, :])))
-    centred_deg = np.degrees(centred.reshape(-1, phi_chains.shape[-1]))
-    neff, rhat = _ess_rhat(centred)
-    R = np.clip(np.hypot(sin_mean, cos_mean), 1e-300, 1.0)
-    mean = np.degrees(centre)
-    sd = np.degrees(np.sqrt(-2.0 * np.log(R)))
-    q05, q50, q95 = np.quantile(
-        centred_deg, [0.05, 0.50, 0.95], axis=0)
-    step = np.abs(np.angle(np.exp(1j * np.diff(phi_chains, axis=1))))
-    move = np.mean(step > 0, axis=(0, 1))
+    n_spots = phi_chains.shape[-1]
+    mean = np.empty(n_spots)
+    sd = np.empty(n_spots)
+    q05 = np.empty(n_spots)
+    q50 = np.empty(n_spots)
+    q95 = np.empty(n_spots)
+    neff = np.empty(n_spots)
+    rhat = np.empty(n_spots)
+    move = np.empty(n_spots)
+    for start in range(0, n_spots, _LATENT_SUMMARY_SPOT_CHUNK):
+        idx = slice(start, start + _LATENT_SUMMARY_SPOT_CHUNK)
+        block = phi_chains[..., idx]
+        flat = block.reshape(-1, block.shape[-1])
+        sin_mean = np.mean(np.sin(flat), axis=0)
+        cos_mean = np.mean(np.cos(flat), axis=0)
+        centre = np.arctan2(sin_mean, cos_mean)
+        centred = centre + np.angle(
+            np.exp(1j * (block - centre[None, None, :])))
+        neff[idx], rhat[idx] = _ess_rhat(centred)
+        np.degrees(centred, out=centred)
+        q05[idx], q50[idx], q95[idx] = np.quantile(
+            centred.reshape(-1, block.shape[-1]),
+            [0.05, 0.50, 0.95], axis=0)
+        R = np.clip(np.hypot(sin_mean, cos_mean), 1e-300, 1.0)
+        mean[idx] = np.degrees(centre)
+        sd[idx] = np.degrees(np.sqrt(-2.0 * np.log(R)))
+        del centred
+        step = np.abs(np.angle(np.exp(1j * np.diff(block, axis=1))))
+        move[idx] = np.mean(step > 0, axis=(0, 1))
 
     fsection("phi Summary")
     print(f"  n_spots              = {phi_chains.shape[-1]}", flush=True)
@@ -1493,6 +1523,16 @@ def main(argv=None):
     phi_transport.add_argument(
         "--no-transport-systemic-phi", dest="transport_systemic_phi",
         action="store_false")
+    cond_mass = parser.add_mutually_exclusive_group()
+    cond_mass.add_argument(
+        "--conditional-mass", dest="conditional_mass",
+        action="store_true", default=None,
+        help="Use the inverse conditional Hessian of the NUTS target as the "
+             "dense mass matrix instead of BlackJAX's adapted (marginal) "
+             "estimate. Default: config value.")
+    cond_mass.add_argument(
+        "--no-conditional-mass", dest="conditional_mass",
+        action="store_false")
     parser.add_argument("--max-tree-depth", type=int, default=None)
     parser.add_argument("--no-ecc", action="store_true")
     parser.add_argument("--add-ecc", action="store_true")
@@ -1620,6 +1660,10 @@ def main(argv=None):
             gcfg_master.get(
                 "mcmc_transport_systemic_phi",
                 inf_cfg.get("transport_systemic_phi", False))))
+    conditional_mass = (
+        bool(args.conditional_mass)
+        if args.conditional_mass is not None
+        else bool(inf_cfg.get("conditional_mass", True)))
     target_accept_r = (
         args.target_accept_r if args.target_accept_r is not None
         else _required_inference(inf_cfg, "target_accept_r"))
@@ -1765,6 +1809,7 @@ def main(argv=None):
     fprint(f"target_accept_theta={target_accept_theta}; "
            f"target_accept_latent={target_accept_r}")
     fprint(f"transport_systemic_phi={transport_systemic_phi}")
+    fprint(f"conditional_mass={conditional_mass}")
     fprint(f"global kernel: NUTS; max_tree_depth={max_tree_depth}")
     fprint(f"phi_step_size={phi_step_size}; reflect_prob={reflect_prob}")
     fprint("phi: sampled explicitly")
@@ -1798,6 +1843,7 @@ def main(argv=None):
         num_latent_burnin=latent_burnin,
         sample_n_inner=sample_n_inner,
         transport_systemic_phi=transport_systemic_phi,
+        conditional_mass=conditional_mass,
         progress_bar=True,
         jit_steps=True,
     )
@@ -1832,6 +1878,7 @@ def main(argv=None):
         "n_inner": int(n_inner),
         "sample_n_inner": int(sample_n_inner),
         "transport_systemic_phi": bool(transport_systemic_phi),
+        "conditional_mass": bool(conditional_mass),
         "latent_burnin": int(latent_burnin),
         "target_accept_r": float(target_accept_r),
         "initial_step_size": float(initial_step_size),

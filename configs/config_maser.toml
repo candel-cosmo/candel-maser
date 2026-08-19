@@ -14,6 +14,13 @@ target_accept_r = 0.35
 blackjax_initial_step_size = 0.005
 phi_step_size = 0.05
 reflect_prob = 0.25
+# Use the inverse conditional Hessian of the NUTS target as the dense mass
+# matrix, measured once at the end of the latent burn-in, and adapt only the
+# step size thereafter.  BlackJAX's window adaptation Welford-averages theta
+# across latent Gibbs sweeps, so it estimates the MARGINAL covariance while
+# NUTS integrates the CONDITIONAL target; where those differ sharply the
+# warmup step size collapses and trajectories grow to hundreds of steps.
+conditional_mass = true
 
 [model]
 Om = 0.315
@@ -224,10 +231,12 @@ force_f64 = true
 use_ecc = false
 ecc_cartesian = true
 use_quadratic_warp = false
-# Move systemic phi with its fixed linear astrometric-centre response during
-# each global NUTS update. This weakens the x0/dv_sys/eta--phi ridge while
-# leaving the conditional latent Gibbs target and every high-velocity phi
-# unchanged.
+# Move systemic phi with its fixed linear response to the astrometric centre
+# AND to dv_sys during each global NUTS update.  This weakens the
+# x0/dv_sys/eta--phi ridge while leaving the conditional latent Gibbs target
+# and every high-velocity phi unchanged.  The mass matrix cannot do this job:
+# the metric only changes how NUTS explores p(theta | latents), whereas the
+# transport changes that conditional itself, which is the Gibbs bottleneck.
 mcmc_transport_systemic_phi = true
 mcmc_target_accept_theta = 0.85
 mcmc_sample_n_inner = 60

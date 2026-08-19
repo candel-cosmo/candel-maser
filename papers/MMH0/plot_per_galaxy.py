@@ -7,11 +7,16 @@
                       LCDM D_C(z, H0) reference lines.  Uses v_sys_obs from
                       config_maser.toml -- the CMB-frame velocity the H0
                       inference actually fits (run_joint_H0) -- not a
-                      re-applied CMB conversion.  -> figs/distance_redshift.pdf
+                      re-applied CMB conversion.  On the `clipped`
+                      (updated-ours) table, as the rest of the paper's
+                      figures.  -> figs/distance_redshift.pdf
 
-  corner            : a corner of the fiducial NGC 5765b global posterior, an
-                      example per-galaxy disc fit for the appendix.  Uses the
-                      standard candel plot_corner under the science style.
+  corner            : a corner of the NGC 5765b global posterior on the
+                      `clipped` (updated-ours) table, an example per-galaxy
+                      disc fit for the appendix.  That table is used rather
+                      than `fiducial` because it is the one carrying the
+                      clump-2 error floors.  Uses the standard candel
+                      plot_corner under the science style.
                       -> figs/corner_NGC5765b.pdf
 
 Run from the repo root with venv_candel:
@@ -28,7 +33,7 @@ from palette import PALETTE
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "scripts" / "megamaser" / "config_maser.toml"
-DATASET = "fiducial"
+DATASET = "clipped"
 RESULTS = ROOT / "results" / "Megamaser" / DATASET
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
 C_KMS = 299792.458
@@ -40,8 +45,9 @@ GAL_LABEL = {
 }
 
 
-def chain_path(galaxy):
-    return RESULTS / galaxy / f"{galaxy}_blackjax_mcmc_rphi_initconfig.hdf5"
+def chain_path(galaxy, dataset=DATASET):
+    return (ROOT / "results" / "Megamaser" / dataset / galaxy
+            / f"{galaxy}_blackjax_mcmc_rphi_initconfig.hdf5")
 
 
 def fig_distance_redshift(out):
@@ -104,13 +110,15 @@ def fig_distance_redshift(out):
               f"-{dl:.1f}/+{dh:.1f} Mpc")
 
 
-def fig_corner(out, galaxy="NGC5765b"):
+def fig_corner(out, galaxy="NGC5765b", dataset="clipped"):
     import matplotlib.pyplot as plt
     import scienceplots  # noqa: F401
 
     from candel.plotting.corner import plot_corner
 
-    path = chain_path(galaxy)
+    # The clump-2 floors exist only on the tables the MCP cut is not applied
+    # to, so the corner comes from `clipped` (updated-ours), not `fiducial`.
+    path = chain_path(galaxy, dataset)
     with h5py.File(path, "r") as f:
         theta = [s for s in
                  str(dict(f.attrs).get("theta_sites", "")).split(",")
@@ -129,7 +137,7 @@ def fig_corner(out, galaxy="NGC5765b"):
                                         "axes.titlesize": 14}]):
         plot_corner({k: samples[k] for k in keys}, keys=keys,
                     show_fig=False, filename=out, smooth=None)
-    print(f"wrote {out}  ({galaxy}, {len(keys)} params)")
+    print(f"wrote {out}  ({galaxy}, {dataset}, {len(keys)} params)")
 
 
 def main(argv=None):

@@ -27,14 +27,16 @@ import numpy as np
 from palette import PALETTE, PLANCK_C, RED, SELECTION, SHOES_C, TEAL
 
 ROOT = Path(__file__).resolve().parents[2]
-DATASET = "original_published"
+DATASET = "clipped"
 RESULTS = ROOT / "results" / "Megamaser" / DATASET / "H0"
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
 
 # The forest figure compares the two baseline input spot tables at fixed
 # modelling variant.  The published catalogues are deliberately not shown:
 # they are the historical reference and live in the H0-variants table only.
-# The other figures in this module stay on DATASET.
+# The other figures in this module stay on DATASET, which is `clipped`
+# (updated-ours) so that the population corners are shown on a baseline
+# table rather than on the historical catalogues.
 H0_ROOT = ROOT / "results" / "Megamaser"
 DATASETS = ["fiducial", "clipped"]
 DATASET_LABEL = {"fiducial": "P20",

@@ -52,7 +52,7 @@ import numpy as np
 from numpyro.distributions import Delta, Uniform
 from numpyro.distributions.transforms import biject_to
 
-from ..util import get_nested
+from ..util import fprint, get_nested
 from . import maser_physics
 
 # phys_args positional indices.
@@ -60,6 +60,8 @@ from . import maser_physics
  _I_I0, _I_DI, _I_OMEGA0, _I_DOMEGA, _I_SXF2, _I_SYF2, _I_VARVHV,
  _I_SAF2) = (0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 15, 16)
 _I_SXF2_CLUMP2, _I_SYF2_CLUMP2 = 17, 18
+_I_VARVSYS = 14
+_I_VARV_CLUMP2 = 19
 
 
 def _require_blackjax():
@@ -548,9 +550,16 @@ def _r_ang_from_z(model, theta, h, z_r):
             log_dr_dz)
 
 
-def _systemic_phi_xy_coefficients(model, r_ang, phys_args, phys_kw):
-    """Fixed linear response of systemic phi to the astrometric centre."""
-    _, Omega_r = maser_physics.warp_geometry(
+def _systemic_phi_coefficients(model, r_ang, phys_args, phys_kw):
+    """Fixed linear response of systemic phi to (x0, y0, dv_sys).
+
+    Returns the variance-weighted least-squares coefficients (kx, ky, kv):
+    the shift in systemic phi that minimises the chi^2 increase caused by a
+    unit shift in each global, i.e. d(obs)/dphi / var, divided by the TOTAL
+    Fisher information in phi summed over the position and velocity channels.
+    High-velocity spots get zero (they are never transported).
+    """
+    i_r, Omega_r = maser_physics.warp_geometry(
         r_ang, phys_args[_I_RREF_I], phys_args[_I_RREF_OMEGA],
         phys_args[_I_I0], phys_args[_I_DI],
         phys_args[_I_OMEGA0], phys_args[_I_DOMEGA],
@@ -570,11 +579,29 @@ def _systemic_phi_xy_coefficients(model, r_ang, phys_args, phys_kw):
         floor_x2, floor_y2 = phys_args[_I_SXF2], phys_args[_I_SYF2]
     var_x = model._all_sigma_x2 + floor_x2
     var_y = model._all_sigma_y2 + floor_y2
-    denom = dx_dphi**2 / var_x + dy_dphi**2 / var_y
+    # dV/dphi = B(r)*cos(phi) ~ B at the systemic locus.  The velocity channel
+    # must be in this least-squares denominator: for NGC4258 it carries ~92
+    # per cent of the Fisher information on systemic phi (sigma_v is 0.01 km/s
+    # in the Reid table), so an x/y-only denominator makes kx, ky overshoot by
+    # ~13x, and without the kv leg the dv_sys arm of the ridge is never
+    # transported at all -- measured as the worst-mixing parameter.
+    _, dv_dphi = maser_physics.velocity_rel_affine(
+        r_ang, phys_args[_I_DA], phys_args[_I_MBH],
+        phys_args[_I_VSYS], 0.0, jnp.sin(i_r))
+    if getattr(model, "use_clump2_floors", False):
+        var_v_sys = jnp.where(
+            model._all_is_clump2,
+            phys_args[_I_VARV_CLUMP2], phys_args[_I_VARVSYS])
+    else:
+        var_v_sys = phys_args[_I_VARVSYS]
+    var_v = model._all_sigma_v2 + var_v_sys
+    denom = (dx_dphi**2 / var_x + dy_dphi**2 / var_y
+             + dv_dphi**2 / var_v)
     denom = jnp.maximum(denom, jnp.finfo(r_ang.dtype).tiny)
     active = ~model.is_highvel
     return (jnp.where(active, dx_dphi / var_x / denom, 0.0),
-            jnp.where(active, dy_dphi / var_y / denom, 0.0))
+            jnp.where(active, dy_dphi / var_y / denom, 0.0),
+            jnp.where(active, dv_dphi / var_v / denom, 0.0))
 
 
 def _ll_fixed_phi_per_spot(model, r_spots, phi, phys_args, phys_kw):
@@ -853,13 +880,13 @@ class MaserBlackJaxTarget:
             biject_to(prior.support) for _, _, prior in self.sites)
         self.names = tuple(site for site, _, _ in self.sites)
         self._check_init(init_params)
-        self._phi_transport_xy = None
+        self._phi_transport_k = None
         if transport_systemic_phi:
             u_theta, z_r = self.initial_state(init_params)
             theta, _ = self.constrain(u_theta)
             r_ang, _, _, _, phys_args, phys_kw, _ = _r_ang_from_z(
                 self.model, theta, self.h, z_r)
-            self._phi_transport_xy = _systemic_phi_xy_coefficients(
+            self._phi_transport_k = _systemic_phi_coefficients(
                 self.model, r_ang, phys_args, phys_kw)
 
     def _check_init(self, init_params):
@@ -938,11 +965,16 @@ class MaserBlackJaxTarget:
         lp = self.constrained_logdensity_z_phi(theta, z_r, phi)
         return lp + jnp.where(jnp.isfinite(lp), log_det, 0.0)
 
+    def _transport_centre(self, phys_args):
+        """Systemic phi offset that co-moves with (x0, y0, dv_sys)."""
+        kx, ky, kv = self._phi_transport_k
+        return -(kx * phys_args[_I_X0] + ky * phys_args[_I_Y0]
+                 + kv * phys_args[_I_VSYS])
+
     def phi_transport_residual(self, theta, phi):
         """Systemic phi residual transported with the astrometric centre."""
         phys_args, _ = self.model.phys_from_params_jax(theta, self.h)
-        kx, ky = self._phi_transport_xy
-        centre = -(kx * phys_args[_I_X0] + ky * phys_args[_I_Y0])
+        centre = self._transport_centre(phys_args)
         lo, hi, _ = _phi_support_arrays(self.model, phi.dtype)
         shifted = _wrap_interval(phi - centre, lo, hi)
         return jnp.where(self.model.is_highvel, phi, shifted)
@@ -950,8 +982,7 @@ class MaserBlackJaxTarget:
     def phi_from_transport_residual(self, theta, phi_residual):
         """Physical phi corresponding to an astrometric-centre residual."""
         phys_args, _ = self.model.phys_from_params_jax(theta, self.h)
-        kx, ky = self._phi_transport_xy
-        centre = -(kx * phys_args[_I_X0] + ky * phys_args[_I_Y0])
+        centre = self._transport_centre(phys_args)
         lo, hi, _ = _phi_support_arrays(self.model, phi_residual.dtype)
         shifted = _wrap_interval(phi_residual + centre, lo, hi)
         return jnp.where(self.model.is_highvel, phi_residual, shifted)
@@ -962,8 +993,7 @@ class MaserBlackJaxTarget:
         (r_ang, _, r_min, r_max, phys_args, phys_kw,
          log_dr_dz) = _r_ang_from_z(
             self.model, theta, self.h, z_r)
-        kx, ky = self._phi_transport_xy
-        centre = -(kx * phys_args[_I_X0] + ky * phys_args[_I_Y0])
+        centre = self._transport_centre(phys_args)
         lo, hi, _ = _phi_support_arrays(self.model, z_r.dtype)
         shifted = _wrap_interval(phi_residual + centre, lo, hi)
         phi = jnp.where(self.model.is_highvel, phi_residual, shifted)
@@ -1203,6 +1233,57 @@ def _make_mcmc_latent_burnin_step(target, cov_init, is_hv, phi_centre, *,
     return body
 
 
+def _theta_logdensity_at_latents(target, theta_params, z_r, phi,
+                                 transport_systemic_phi):
+    """Conditional theta log-density, and the phi coordinate NUTS moves in.
+
+    Every NUTS step -- and the conditional-Hessian metric measured for it --
+    must use exactly this density, so it is built in one place.
+    """
+    if not transport_systemic_phi:
+        return (lambda u_theta: target.logdensity_explicit(u_theta, z_r, phi),
+                phi)
+    phi_nuts = target.phi_transport_residual(theta_params, phi)
+    return (lambda u_theta: target.logdensity_explicit_transported(
+        u_theta, z_r, phi_nuts), phi_nuts)
+
+
+def _conditional_inverse_mass(logdensity, u_theta, floor=1e-8):
+    """Inverse conditional Hessian of `logdensity` at `u_theta`, regularised.
+
+    Window adaptation estimates the mass matrix from theta positions taken
+    across latent sweeps, i.e. the MARGINAL covariance, while NUTS integrates
+    the CONDITIONAL target.  For a stiff likelihood the two differ by orders of
+    magnitude in the tightest directions, which forces a tiny step size and
+    very long trajectories.  This uses the conditional curvature directly.
+    """
+    H = jax.hessian(logdensity)(u_theta)
+    H = 0.5 * (H + H.T)
+    if not bool(jnp.all(jnp.isfinite(H))):
+        raise FloatingPointError(
+            "conditional Hessian is not finite at the metric measurement "
+            "point; the log-density or one of its second derivatives blew up. "
+            "Re-run with --no-conditional-mass to fall back to the adapted "
+            "mass matrix, and check the init point.")
+    w, V = jnp.linalg.eigh(-H)
+    w_raw = np.asarray(w)
+    wmax = float(jnp.max(jnp.abs(w)))
+    lo = floor * wmax
+    n_negative = int(np.sum(w_raw < 0.0))
+    n_floored = int(np.sum(np.abs(w_raw) <= lo))
+    # Absolute-value eigenvalue modification.  At a saddle (the DE-MAP point
+    # can sit on a prior bound for a floor parameter) some curvatures are
+    # negative; taking |w| gives those directions a width matched to the
+    # curvature SCALE, so the preconditioned curvature is O(1) instead of the
+    # O(1e2) that a hard floor leaves behind and the leapfrog stays stable.
+    w = jnp.maximum(jnp.abs(w), lo)
+    fprint(f"   conditional mass matrix: {len(w_raw)} dims, "
+           f"|eig(-H)| in [{np.abs(w_raw).min():.4g}, {wmax:.4g}], "
+           f"cond={wmax / float(jnp.min(w)):.4g}, "
+           f"{n_negative} negative (sign-flipped), {n_floored} floored.")
+    return (V / w) @ V.T
+
+
 def _make_mcmc_warmup_step(blackjax, target, adapt_step, cov_init, is_hv,
                            phi_centre, *, n_inner, target_accept_latent,
                            adapt_rate, reflect_prob, max_num_doublings,
@@ -1226,16 +1307,8 @@ def _make_mcmc_warmup_step(blackjax, target, adapt_step, cov_init, is_hv,
             n_inner=n_inner, reflect_prob=reflect_prob,
             latent_mean=state.latent_mean, latent_cov=state.cov)
 
-        if transport_systemic_phi:
-            phi_nuts = target.phi_transport_residual(
-                theta_params, phi)
-
-            def logdensity_theta(u_theta):
-                return target.logdensity_explicit_transported(
-                    u_theta, z_r, phi_nuts)
-        else:
-            def logdensity_theta(u_theta):
-                return target.logdensity_explicit(u_theta, z_r, phi)
+        logdensity_theta, phi_nuts = _theta_logdensity_at_latents(
+            target, theta_params, z_r, phi, transport_systemic_phi)
 
         theta_state = blackjax.nuts.init(
             state.theta.position, logdensity_theta)
@@ -1294,16 +1367,8 @@ def _make_mcmc_sample_step(blackjax, target, sample_parameters, *,
             n_inner=n_inner, reflect_prob=reflect_prob,
             latent_mean=state.latent_mean, latent_cov=state.cov)
 
-        if transport_systemic_phi:
-            phi_nuts = target.phi_transport_residual(
-                theta_params, phi)
-
-            def logdensity_theta(u_theta):
-                return target.logdensity_explicit_transported(
-                    u_theta, z_r, phi_nuts)
-        else:
-            def logdensity_theta(u_theta):
-                return target.logdensity_explicit(u_theta, z_r, phi)
+        logdensity_theta, phi_nuts = _theta_logdensity_at_latents(
+            target, theta_params, z_r, phi, transport_systemic_phi)
 
         theta_state = blackjax.nuts.init(
             state.theta.position, logdensity_theta)
@@ -1347,6 +1412,7 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
                            max_num_doublings=10, num_latent_burnin=0,
                            sample_n_inner=None,
                            transport_systemic_phi=False,
+                           conditional_mass=True,
                            progress_bar=True, jit_steps=True,
                            progress_label="1/1", progress_positions=None):
     """Run one explicit-phi NUTS-within-adaptive-Metropolis chain."""
@@ -1400,7 +1466,13 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         is_mass_matrix_diagonal=False,
         target_acceptance_rate=target_accept_theta)
     adaptation_state = adapt_init(u_theta, theta_step_init)
-    schedule = window_adaptation.build_schedule(int(num_warmup))
+    if conditional_mass:
+        # Only the step size is adapted; the metric is set once, below.
+        # build_schedule returns an (N, 2) int array of (stage, is_window_end);
+        # all-zero rows mean "fast window, never re-estimate the mass matrix".
+        schedule = jnp.zeros((int(num_warmup), 2), dtype=jnp.int32)
+    else:
+        schedule = window_adaptation.build_schedule(int(num_warmup))
 
     cov_state = (_welford_init(model.n_spots, dtype),
                  _welford_init(model.n_spots, dtype))
@@ -1450,6 +1522,22 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         if burnin_bar is not None:
             burnin_bar.close()
         state, cov_state, rng_key = bcarry
+
+    if conditional_mass:
+        # Measure the conditional Hessian at the end of the latent burn-in --
+        # a typical-set latent draw, which is what NUTS actually conditions on.
+        # (The per-spot latent MAP was measured and is worse: the mode is
+        # stiffer than a typical draw, so it mis-scales the metric.)
+        u_h = state.theta.position
+        theta_h, _ = target.constrain(u_h)
+        _ld, _ = _theta_logdensity_at_latents(
+            target, theta_h, state.z_r, state.phi, transport_systemic_phi)
+
+        imm = _conditional_inverse_mass(_ld, u_h)
+        adaptation_state = adaptation_state._replace(
+            imm_state=adaptation_state.imm_state._replace(
+                inverse_mass_matrix=imm),
+            inverse_mass_matrix=imm)
 
     carry = (state, adaptation_state, cov_state, rng_key)
     step_idx = jnp.arange(int(num_warmup))
@@ -1530,6 +1618,7 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         "reflect_prob": np.asarray(reflect_prob),
         "sample_n_inner": np.asarray(sample_n_inner),
         "transport_systemic_phi": np.asarray(transport_systemic_phi),
+        "conditional_mass": np.asarray(conditional_mass),
     }
     return MaserBlackJaxResult(
         samples=_concat_dicts(sample_rows),
@@ -1553,6 +1642,7 @@ def run_blackjax_mcmc(model, init_params, rng_key, *,
                       max_num_doublings=10, num_latent_burnin=0,
                       sample_n_inner=None,
                       transport_systemic_phi=False,
+                      conditional_mass=True,
                       progress_bar=True, jit_steps=True):
     """Run explicit-phi chains with bounded CPU parallelism."""
     num_chains = int(num_chains)
@@ -1581,6 +1671,7 @@ def run_blackjax_mcmc(model, init_params, rng_key, *,
         num_latent_burnin=num_latent_burnin,
         sample_n_inner=sample_n_inner,
         transport_systemic_phi=transport_systemic_phi,
+        conditional_mass=conditional_mass,
         progress_bar=progress_bar,
         jit_steps=jit_steps,
     )

@@ -45,7 +45,7 @@ usage() {
 Usage: $0 (--local | -q QUEUE) [--galaxy GAL,GAL,...|all] [--cpus N] [--mem GB] \\
           [--gpu-mem GB] [--num-warmup N] [--num-samples N] [--num-chains N] \\
           [--max-tree-depth N] [--dataset NAME[,NAME,...]] [--reconstruction LIST] \\
-          [--distance-source candel|p20] \\
+          [--distance-source candel|p20] [--add-quadratic-warp] \\
           [--temp-output] [--dry] [-y] \\
           [-- extra submit.sh args]
 
@@ -90,7 +90,7 @@ visible in each output filename.
   --selection SEL    LOO only: none|distance|redshift for the fixed config
                      (default redshift).
   --add-quadratic-warp
-                     LOO only: enable the quadratic warp in the fixed config.
+                     Select quadratic-warp distance chains for every run.
   --dry              Forward --dry: print the runner commands without submitting.
   -y, --yes          Do not ask for confirmation before submitting.
   -- extra...        Everything after -- is forwarded verbatim to every submit.sh
@@ -131,9 +131,8 @@ fi
 if [[ "$LOCAL" == false && -z "$QUEUE" ]]; then
     echo "[ERROR] pass --local or -q QUEUE"; exit 1
 fi
-if [[ "$LEAVE_ONE_OUT" == false
-      && ( "$SEL_EXPLICIT" == true || "$ADD_QW" == true ) ]]; then
-    echo "[ERROR] --selection/--add-quadratic-warp are only valid with --leave-one-out"
+if [[ "$LEAVE_ONE_OUT" == false && "$SEL_EXPLICIT" == true ]]; then
+    echo "[ERROR] --selection is only valid with --leave-one-out"
     echo "        (without it the fixed eleven-run configuration is used)"
     exit 1
 fi
@@ -195,6 +194,8 @@ common=("--infer-H0")
 # Build the job list. Each entry is
 # DATASET<US>GALSET<US>SELECTION<US>RECON<US>PRIOR<US>WARPFLAG<US>DROPPED.
 jobs=()
+warp_flag=""
+[[ "$ADD_QW" == true ]] && warp_flag="--add-quadratic-warp"
 if [[ "$LEAVE_ONE_OUT" == true ]]; then
     base="$GALAXIES"
     [[ "$base" == "all" ]] && base="$MCP_ALL"
@@ -203,8 +204,6 @@ if [[ "$LEAVE_ONE_OUT" == true ]]; then
     if (( n < 2 )); then
         echo "[ERROR] --leave-one-out needs >=2 galaxies (got: $base)"; exit 1
     fi
-    warp_flag=""
-    [[ "$ADD_QW" == true ]] && warp_flag="--add-quadratic-warp"
     for dataset in "${dataset_arr[@]}"; do
         for recon in "${recon_arr[@]}"; do
             for ((i = 0; i < n; i++)); do
@@ -221,16 +220,16 @@ else
     for dataset in "${dataset_arr[@]}"; do
         for sel in distance redshift; do
             for recon in "${recon_arr[@]}"; do
-                jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"${sel}"$'\x1f'"${recon}"$'\x1f'"volume"$'\x1f')
+                jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"${sel}"$'\x1f'"${recon}"$'\x1f'"volume"$'\x1f'"${warp_flag}"$'\x1f')
             done
         done
         for prior in volume distance log-distance; do
-            jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"none"$'\x1f'"${prior}"$'\x1f')
+            jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"none"$'\x1f'"${prior}"$'\x1f'"${warp_flag}"$'\x1f')
         done
         for recon in "${recon_arr[@]}"; do
             if [[ "$recon" == "Carrick2015" ]]; then
                 for prior in distance log-distance; do
-                    jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"${recon}"$'\x1f'"${prior}"$'\x1f')
+                    jobs+=("${dataset}"$'\x1f'"${GALAXIES}"$'\x1f'"none"$'\x1f'"${recon}"$'\x1f'"${prior}"$'\x1f'"${warp_flag}"$'\x1f')
                 done
             fi
         done
