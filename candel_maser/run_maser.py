@@ -114,7 +114,7 @@ from candel.pvdata.megamaser_data import (  # noqa: E402
     maser_data_root, megamaser_velocity_frame, v_sys_from_cmb)
 from candel.util import fprint, fsection, results_path  # noqa: E402
 from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
-                          check_init_block)
+                          check_init_block, variant_init_block)
 
 # Per-observable noise floors held fixed by --fix-floors-pesce, with units.
 _PESCE_FLOOR_UNITS = (("sigma_x_floor", "uas"), ("sigma_y_floor", "uas"),
@@ -313,21 +313,7 @@ def _make_init(model, init_cfg, strategy, num_samples, rng_key, *,
         "Megamaser init_strategy must be 'median', 'config', or 'reid'.")
 
 
-def _init_block(gal_cfg, model):
-    """Variant-specific [init...] block (init_ecc / init_qw / init_ecc_qw)
-    selected by use_ecc/use_quadratic_warp, falling back to [init]."""
-    parts = []
-    if model.use_ecc:
-        parts.append("ecc")
-    if model.use_quadratic_warp:
-        parts.append("qw")
-    if parts:
-        name = "init_" + "_".join(parts)
-        if name in gal_cfg:
-            fprint(f"init block: [{name}]")
-            return gal_cfg[name]
-        fprint(f"init block: [{name}] absent, falling back to [init]")
-    return gal_cfg.get("init", {})
+_init_block = variant_init_block
 
 
 def _print_init(init_params):

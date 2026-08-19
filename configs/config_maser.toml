@@ -198,7 +198,12 @@ dist = "normal"
 loc = 0.0
 scale = 0.025
 
-# Sample the periapsis warp whenever eccentricity is enabled.
+# Periapsis warp, sampled by default when eccentricity is enabled.  It enters
+# the likelihood only as a rotation of (e_x, e_y), so it is unidentified where
+# eccentricity is, and sampling it then funnels.  Diagnostic before trusting an
+# --add-ecc fit: compare the dperiapsis_dr posterior sd against this prior's
+# 207.85; at a ratio near 1 the fit is reporting the prior back, and the warp
+# should be fixed with a per-galaxy `dist = "delta"` override (see NGC6323).
 [model.priors.dperiapsis_dr]
 dist = "uniform"
 low = -360.0
@@ -315,6 +320,15 @@ D_hi = 500.0
 D_de_lo = 85.0
 D_de_hi = 135.0
 mcmc_sample_n_inner = 60
+
+# 68 spots spanning r_ang 0.28-0.58 mas is too short a lever arm for a
+# periapsis warp: under --add-ecc the dperiapsis_dr posterior sd came back at
+# 208.69 against the U(-360, 360) prior sd of 207.85, i.e. exactly the prior,
+# and the unidentified angle dragged dv_sys/x0/y0 to r_hat 1.53/1.16/1.28.
+# Fixing it restores r_hat <= 1.11 everywhere; (e_x, e_y) are still sampled.
+[model.galaxies.NGC6323.priors.dperiapsis_dr]
+dist = "delta"
+value = 0.0
 
 [model.galaxies.UGC3789]
 ra = 109.87872

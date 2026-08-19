@@ -1248,6 +1248,17 @@ def _theta_logdensity_at_latents(target, theta_params, z_r, phi,
         u_theta, z_r, phi_nuts), phi_nuts)
 
 
+# Draws averaged into E_z[H], and the fixed-theta latent sweeps between them.
+# Costs ~200 extra sweeps and one Hessian trace per draw (each is a distinct
+# closure): 13.3 s per chain on CPU for NGC4258, once, before warmup.
+# Measured benefit is small and specific -- chain-to-chain metric widths only
+# tighten 1.04x -> 1.02x -- so the case for it is the correct estimand plus
+# removal of the spurious sign-flipped eigenvalue, seen in 2 of 7 galaxy
+# configurations.  It does not reduce the floored count.
+_METRIC_DRAWS = 8
+_METRIC_SPACING = 25
+
+
 def _conditional_inverse_mass(logdensity, u_theta, floor=1e-8):
     """Inverse conditional Hessian of `logdensity` at `u_theta`, regularised.
 
@@ -1256,8 +1267,28 @@ def _conditional_inverse_mass(logdensity, u_theta, floor=1e-8):
     the CONDITIONAL target.  For a stiff likelihood the two differ by orders of
     magnitude in the tightest directions, which forces a tiny step size and
     very long trajectories.  This uses the conditional curvature directly.
+
+    `logdensity` may be one callable or a sequence of them, one per latent
+    draw at the same theta; then the estimand is E_z[H] and the HESSIANS are
+    averaged before the eigendecomposition.  Not the inverses -- the widest,
+    least trustworthy draw would dominate -- and not in eigen-space, where
+    the bases rotate between draws.  A single draw is a poor estimator: the
+    softest curvature spans 0.014 to 27.2 across NGC4258 latent draws (the
+    stiffest is stable to 1e-4) and single draws come out indefinite in the
+    error-floor directions.
+
+    `floor` is deliberately left at 1e-8 * max|eig| even though it clips
+    resolvable curvature: flooring makes a direction NARROWER, the benign
+    failure mode, and costs nothing measurable (the floored direction has
+    among the best ESS in production, while the bottleneck is D_A -- Gibbs
+    theta-latent coupling, not the metric).  Lowering it would hand an
+    exactly-flat direction, e.g. a DE-MAP point on a prior bound, a
+    near-unbounded width.
     """
-    H = jax.hessian(logdensity)(u_theta)
+    lds = (logdensity,) if callable(logdensity) else tuple(logdensity)
+    if not lds:
+        raise ValueError("need at least one log-density to measure.")
+    H = sum(jax.hessian(f)(u_theta) for f in lds) / len(lds)
     H = 0.5 * (H + H.T)
     if not bool(jnp.all(jnp.isfinite(H))):
         raise FloatingPointError(
@@ -1277,9 +1308,13 @@ def _conditional_inverse_mass(logdensity, u_theta, floor=1e-8):
     # curvature SCALE, so the preconditioned curvature is O(1) instead of the
     # O(1e2) that a hard floor leaves behind and the leapfrog stays stable.
     w = jnp.maximum(jnp.abs(w), lo)
-    fprint(f"   conditional mass matrix: {len(w_raw)} dims, "
-           f"|eig(-H)| in [{np.abs(w_raw).min():.4g}, {wmax:.4g}], "
-           f"cond={wmax / float(jnp.min(w)):.4g}, "
+    # Report the measured spread AND the metric's own: the latter is capped at
+    # 1/floor by construction, so on its own it reads as a constant, not data.
+    wmin_raw = float(np.abs(w_raw).min())
+    fprint(f"   conditional mass matrix: {len(w_raw)} dims, {len(lds)} latent "
+           f"draw(s), |eig(-H)| in [{wmin_raw:.4g}, {wmax:.4g}] "
+           f"(measured cond={wmax / wmin_raw if wmin_raw > 0 else np.inf:.4g})"
+           f", metric cond={wmax / float(jnp.min(w)):.4g}, "
            f"{n_negative} negative (sign-flipped), {n_floored} floored.")
     return (V / w) @ V.T
 
@@ -1493,13 +1528,13 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
     # conditional typical set and seed the per-side covariance before theta
     # NUTS / step-size adaptation begins. The migrated state and accumulated
     # Welford cov_state both flow into warmup, which keeps adapting.
+    burnin_body = _make_mcmc_latent_burnin_step(
+        target, cov_init, is_hv, phi_centre, n_inner=n_inner,
+        target_accept_latent=target_accept_latent, adapt_rate=adapt_rate,
+        reflect_prob=reflect_prob,
+        cov_start=int(_COV_BURN_FRAC * int(num_latent_burnin)))
+    burnin_scan = _scan_fn(burnin_body, jit_steps)
     if int(num_latent_burnin) > 0:
-        burnin_body = _make_mcmc_latent_burnin_step(
-            target, cov_init, is_hv, phi_centre, n_inner=n_inner,
-            target_accept_latent=target_accept_latent, adapt_rate=adapt_rate,
-            reflect_prob=reflect_prob,
-            cov_start=int(_COV_BURN_FRAC * int(num_latent_burnin)))
-        burnin_scan = _scan_fn(burnin_body, jit_steps)
         burnin_idx = jnp.arange(int(num_latent_burnin))
         burnin_bar = _step_bar(
             int(num_latent_burnin), progress_bar,
@@ -1525,15 +1560,31 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
 
     if conditional_mass:
         # Measure the conditional Hessian at the end of the latent burn-in --
-        # a typical-set latent draw, which is what NUTS actually conditions on.
+        # typical-set latent draws, which is what NUTS actually conditions on.
         # (The per-spot latent MAP was measured and is worse: the mode is
         # stiffer than a typical draw, so it mis-scales the metric.)
+        # The target is E_z[H], so average over _METRIC_DRAWS draws separated
+        # by _METRIC_SPACING sweeps rather than trusting one: theta is held
+        # fixed here, so these are the same fixed-theta moves as the burn-in.
         u_h = state.theta.position
         theta_h, _ = target.constrain(u_h)
-        _ld, _ = _theta_logdensity_at_latents(
-            target, theta_h, state.z_r, state.phi, transport_systemic_phi)
 
-        imm = _conditional_inverse_mass(_ld, u_h)
+        def _metric_logdensity(st):
+            ld, _ = _theta_logdensity_at_latents(
+                target, theta_h, st.z_r, st.phi, transport_systemic_phi)
+            return ld
+
+        lds = [_metric_logdensity(state)]
+        step0 = int(num_latent_burnin)
+        for j in range(_METRIC_DRAWS - 1):
+            mcarry, _ = burnin_scan(
+                (state, cov_state, rng_key),
+                jnp.arange(step0 + j * _METRIC_SPACING,
+                           step0 + (j + 1) * _METRIC_SPACING))
+            state, cov_state, rng_key = mcarry
+            lds.append(_metric_logdensity(state))
+
+        imm = _conditional_inverse_mass(lds, u_h)
         adaptation_state = adaptation_state._replace(
             imm_state=adaptation_state.imm_state._replace(
                 inverse_mass_matrix=imm),
@@ -1619,6 +1670,8 @@ def _run_blackjax_mcmc_one(model, init_params, rng_key, *,
         "sample_n_inner": np.asarray(sample_n_inner),
         "transport_systemic_phi": np.asarray(transport_systemic_phi),
         "conditional_mass": np.asarray(conditional_mass),
+        "metric_draws": np.asarray(
+            _METRIC_DRAWS if conditional_mass else 0),
     }
     return MaserBlackJaxResult(
         samples=_concat_dicts(sample_rows),

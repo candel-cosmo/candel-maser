@@ -171,3 +171,29 @@ def apply_dataset(cfg, dataset=None):
     fprint(f"megamaser dataset: {dataset} "
            f"(root_output '{cfg['io'].get('root_output')}').")
     return dataset
+
+
+def variant_init_block(gal_cfg, model):
+    """Variant-specific [init...] block, preferring the closest match.
+
+    An ecc+quadratic-warp run wants [init_ecc_qw], but the quadratic
+    coefficients are the expensive ones to find, so fall back to [init_qw]
+    (then [init_ecc], then the linear [init]) rather than dropping straight
+    to linear. `_clean_init` zeroes whatever coordinates the chosen block
+    lacks and strips any the model does not use.
+    """
+    if model.use_ecc and model.use_quadratic_warp:
+        names = ("init_ecc_qw", "init_qw", "init_ecc")
+    elif model.use_quadratic_warp:
+        names = ("init_qw",)
+    elif model.use_ecc:
+        names = ("init_ecc",)
+    else:
+        names = ()
+    for name in names:
+        if name in gal_cfg:
+            fprint(f"init block: [{name}]")
+            return gal_cfg[name]
+    if names:
+        fprint(f"init block: [{names[0]}] absent, falling back to [init]")
+    return gal_cfg.get("init", {})

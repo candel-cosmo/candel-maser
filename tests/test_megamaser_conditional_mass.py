@@ -64,3 +64,61 @@ def test_conditional_inverse_mass_rejects_a_non_finite_hessian():
 
     with pytest.raises(FloatingPointError, match="not finite"):
         _conditional_inverse_mass(logdensity, jnp.zeros(3, dtype=jnp.float64))
+
+
+def test_conditional_inverse_mass_averages_over_latent_draws():
+    """A sequence of log-densities is averaged as PRECISIONS, not widths."""
+    P1 = np.diag([100.0, 4.0, 1.0])
+    P2 = np.diag([100.0, 4.0, 9.0])
+
+    def make(P):
+        return lambda u: -0.5 * u @ jnp.asarray(P) @ u
+
+    M = np.asarray(_conditional_inverse_mass(
+        [make(P1), make(P2)], jnp.zeros(3, dtype=jnp.float64)))
+    np.testing.assert_allclose(M, np.linalg.inv(0.5 * (P1 + P2)), rtol=1e-8,
+                               atol=1e-12)
+    # mean of precisions, not mean of covariances: 1/5 != 0.5*(1/1 + 1/9)
+    assert not np.isclose(M[2, 2], 0.5 * (1.0 + 1.0 / 9.0))
+
+
+def test_conditional_inverse_mass_averaging_repairs_an_indefinite_draw():
+    """One bad latent draw must not set the metric on its own.
+
+    Measured on NGC4258: across decorrelated latent draws at fixed theta the
+    softest curvature spans 0.014 to 27.2, and single draws come out
+    indefinite in the error-floor directions.
+    """
+    bad = np.diag([1.0e6, -0.5])           # indefinite
+    good = np.diag([1.0e6, 4.0])
+
+    def make(P):
+        return lambda u: -0.5 * u @ jnp.asarray(P) @ u
+
+    u0 = jnp.zeros(2, dtype=jnp.float64)
+    M_bad = np.asarray(_conditional_inverse_mass([make(bad)], u0))
+    M_avg = np.asarray(_conditional_inverse_mass([make(bad), make(good)], u0))
+    assert np.all(np.linalg.eigvalsh(M_avg) > 0)
+    # the single bad draw reports width 1/|-0.5|; the average reports 1/1.75
+    np.testing.assert_allclose(M_bad[1, 1], 1.0 / 0.5, rtol=1e-8)
+    np.testing.assert_allclose(M_avg[1, 1], 1.0 / 1.75, rtol=1e-8)
+
+
+def test_conditional_inverse_mass_single_callable_still_accepted():
+    P = np.diag([9.0, 1.0])
+
+    def logdensity(u):
+        return -0.5 * u @ jnp.asarray(P) @ u
+
+    u0 = jnp.zeros(2, dtype=jnp.float64)
+    one = np.asarray(_conditional_inverse_mass(logdensity, u0))
+    seq = np.asarray(_conditional_inverse_mass([logdensity], u0))
+    np.testing.assert_allclose(one, seq, rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(one, np.linalg.inv(P), rtol=1e-8, atol=1e-12)
+
+
+def test_conditional_inverse_mass_rejects_an_empty_sequence():
+    import pytest
+
+    with pytest.raises(ValueError, match="at least one"):
+        _conditional_inverse_mass([], jnp.zeros(2, dtype=jnp.float64))

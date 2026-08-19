@@ -10,8 +10,7 @@ Run:  venv_candel/bin/python -m pytest tests/test_megamaser_ecc_smoothness.py
 """
 import jax
 import jax.numpy as jnp
-import pytest
-from numpyro.distributions import Delta
+from numpyro.distributions import Delta, Uniform
 
 from candel.model import maser_physics
 from candel.model.model_H0_maser import MaserDiskModel
@@ -52,12 +51,26 @@ def test_circular_limit_matches_zero_ecc():
     assert jnp.allclose(ecc, circ, atol=1e-4), (ecc, circ)
 
 
-def test_eccentric_model_rejects_fixed_periapsis_warp():
+def test_eccentric_model_accepts_a_fixed_periapsis_warp():
+    """A Delta prior fixes the warp rather than being refused.
+
+    Making (e_x, e_y) smooth through e=0 did not remove the funnel, it moved
+    it: the likelihood sees the triple only through R(delta) . e, so the
+    rotation angle delta = dperiapsis_dr * (r - r_ref) is unidentified as
+    |e| -> 0.  Sampling it anyway is what broke NGC6323 (--add-ecc, 5000
+    draws): dperiapsis_dr came back at its prior (posterior sd 208.69 vs
+    prior sd 207.85) while dragging dv_sys/x0/y0 to r_hat 1.53/1.16/1.28.
+    Fixing it restored r_hat <= 1.11 on every site.
+    """
     model = object.__new__(MaserDiskModel)
     model.config = {"model": {"use_ecc": True}}
     model.priors = {"dperiapsis_dr": Delta(0.0)}
-    with pytest.raises(ValueError, match="must sample dperiapsis_dr"):
-        model._configure_features({})
+    model._configure_features({})
+    assert model.sample_periapsis_warp is False
+
+    model.priors = {"dperiapsis_dr": Uniform(-360.0, 360.0)}
+    model._configure_features({})
+    assert model.sample_periapsis_warp is True
 
 
 def test_reid_speed_constant_reaches_optimised_eccentric_velocity():

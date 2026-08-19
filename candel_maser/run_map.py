@@ -41,7 +41,7 @@ from candel.pvdata.megamaser_data import (  # noqa: E402
     load_megamaser_spots, maser_data_root)
 from candel.util import get_nested, results_path  # noqa: E402
 from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
-                          check_init_block)
+                          check_init_block, variant_init_block)
 
 
 def _h_ref(model):
@@ -62,11 +62,7 @@ def _variant_suffix(model):
     return "_" + "_".join(parts) if parts else ""
 
 
-def _init_block(gal_cfg, model):
-    suffix = _variant_suffix(model)
-    if suffix and ("init" + suffix) in gal_cfg:
-        return gal_cfg["init" + suffix]
-    return gal_cfg.get("init", {})
+_init_block = variant_init_block
 
 
 def _clean_init(model, init_cfg):

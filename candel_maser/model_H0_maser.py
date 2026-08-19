@@ -500,14 +500,21 @@ class MaserDiskModel(ModelBase):
         self.use_ecc = gal_cfg.get("use_ecc", use_ecc)
         self.ecc_cartesian = gal_cfg.get("ecc_cartesian", True)
         self.use_quadratic_warp = gal_cfg.get("use_quadratic_warp", use_qw)
-        if self.use_ecc and isinstance(
-                self.priors["dperiapsis_dr"], Delta):
-            raise ValueError(
-                "Eccentric megamaser models must sample dperiapsis_dr; "
-                "its prior cannot be Delta.")
+        # A Delta prior on dperiapsis_dr fixes the periapsis warp rather than
+        # sampling it, which this used to refuse.  The likelihood sees
+        # (e_x, e_y, dperiapsis_dr) only through R(delta) . e with
+        # delta = dperiapsis_dr * (r - r_ref), so the rotation angle is
+        # unidentified as |e| -> 0 and sampling it funnels: it adds a
+        # dimension carrying no information and drags the astrometric centre
+        # with it.  Fix it for galaxies with no radial lever arm on the warp
+        # (see the per-galaxy prior overrides in config_maser.toml).
+        self.sample_periapsis_warp = not isinstance(
+            self.priors["dperiapsis_dr"], Delta)
         flags = []
         if self.use_ecc:
-            flags.append("ecc" + ("(cart)" if self.ecc_cartesian else ""))
+            flags.append("ecc" + ("(cart)" if self.ecc_cartesian else "")
+                         + ("" if self.sample_periapsis_warp
+                            else ", fixed periapsis warp"))
         if self.use_quadratic_warp:
             flags.append("quad_warp")
         fprint("features: " + (", ".join(flags) if flags else "none"))

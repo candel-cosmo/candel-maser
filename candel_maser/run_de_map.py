@@ -110,7 +110,8 @@ from candel.pvdata.megamaser_data import (  # noqa: E402
 from candel.util import (fprint, fsection, get_nested,  # noqa: E402
                          results_path)
 from maser_config import (ROOT_OUTPUT_ENV, add_dataset_arg,  # noqa: E402
-                          apply_dataset, check_init_block)
+                          apply_dataset, check_init_block,
+                          variant_init_block)
 
 if _F64_ENABLED_HERE:
     print(f"float64 enabled ({_F64_REASON})", flush=True)
@@ -1345,17 +1346,7 @@ def _objective_policy(model, fixed_params=None):
         f"{radial}{phi}{geometry}{physics}{fixed}")
 
 
-def _init_block(gal_cfg, model):
-    """Variant-specific [init...] block (init_ecc / init_qw / init_ecc_qw)
-    selected by use_ecc/use_quadratic_warp, falling back to [init]."""
-    suffix = _variant_suffix(model)
-    if suffix:
-        name = "init" + suffix
-        if name in gal_cfg:
-            fprint(f"init block: [{name}]")
-            return gal_cfg[name]
-        fprint(f"init block: [{name}] absent, falling back to [init]")
-    return gal_cfg.get("init", {})
+_init_block = variant_init_block
 
 
 _DE_HISTORY_KEYS = ("history_generation", "history_logp", "history_D_A")
