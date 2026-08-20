@@ -995,7 +995,8 @@ def _lshade_trials(population, fitness, mutation_archive, m_f, m_cr, rng,
                   + f[:, None] * (pop[r1] - union[r2]))
 
     # Triangle-wave fold of out-of-bounds values back into [0, 1], in the
-    # population dtype (matches candel.inference.optimise._reflect_bounds).
+    # population dtype. Reflecting rather than clipping avoids the boundary
+    # attractor where clipped difference vectors collapse.
     mutants = np.abs(mutants)
     cycle = np.floor(mutants).astype(np.int32)
     frac = mutants - np.floor(mutants)

@@ -14,10 +14,9 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 """Shared bound/selection helpers for global parameter searches.
 
-Pure NumPy/JAX utilities used by the megamaser differential-evolution MAP
-driver (``scripts/megamaser/run_de_map.py``) and the nested sampler.
+Pure NumPy utilities used by the megamaser differential-evolution MAP
+driver (``scripts/megamaser/run_de_map.py``).
 """
-import jax.numpy as jnp
 import numpy as np
 
 # -----------------------------------------------------------------------
@@ -74,20 +73,6 @@ def _prior_bounds(dist, sobol_n_sigma=5):
     lb = max(lb, tight_lo) if np.isfinite(lb) else tight_lo
     ub = min(ub, tight_hi) if np.isfinite(ub) else tight_hi
     return lb, ub
-
-
-def _reflect_bounds(x):
-    """Reflect out-of-bounds values back into [0, 1].
-
-    Uses triangle-wave folding so that values beyond the boundary are
-    reflected rather than clipped. This prevents boundary-attractor
-    pathology in DE where clipping causes difference vectors to
-    collapse.
-    """
-    x = jnp.abs(x)
-    cycle = jnp.floor(x).astype(jnp.int32)
-    frac = x - jnp.floor(x)
-    return jnp.where(cycle % 2 == 0, frac, 1.0 - frac)
 
 
 def _select_distinct(points, logp_vals, M, min_dist_frac=0.01):
