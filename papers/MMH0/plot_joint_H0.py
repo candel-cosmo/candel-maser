@@ -348,12 +348,18 @@ def fig_corner(selection, out):
     ranges = {"sigma_pec": [0, None]}
     ranges.update({k: sel_range[k] for k in sel_keys})
 
+    # The distance-threshold priors extend far past the posterior (99th
+    # percentile 182 and 121 Mpc), so clip the plotted axes without touching
+    # the KDE boundaries above.
+    param_limits = {"D_lim": [15.0, 250.0], "D_width": [15.0, 150.0]}
+    param_limits = {k: v for k, v in param_limits.items() if k in sel_keys}
+
     os.makedirs(os.path.dirname(out), exist_ok=True)
     plot_corner_getdist(
         samples_list, labels=labels, keys=keys, cols=[TEAL, RED],
         filled=True, show_fig=False, filename=out, fontsize=17,
         legend_fontsize=24, mag_range=[0.0, 300.0], ell_range=[0.0, 360.0],
-        b_range=[-90.0, 90.0], ranges=ranges)
+        b_range=[-90.0, 90.0], ranges=ranges, param_limits=param_limits)
 
 
 if __name__ == "__main__":
