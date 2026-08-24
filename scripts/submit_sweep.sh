@@ -41,8 +41,8 @@ script (default: $GALAXIES):
   init strategy  : config, reid   (reid = published Pesce/Reid globals)
 
 = 4 submit.sh calls, one single-galaxy job per galaxy each.
-Default mode adds --compare-reid --sampler mcmc and does not run the
-marginal-objective diagnostic. --evidence mode submits only those GPU
+Default mode runs --sampler mcmc and does not run the marginal-objective
+diagnostic. --evidence mode submits only those GPU
 diagnostics for existing HDF5 chains; they are not rigorous absolute evidence.
 
   --local            Run locally (submit.sh --local), one job at a time.
@@ -116,7 +116,7 @@ if [[ "$EVIDENCE" == true ]]; then
     [[ -n "$MEM" ]] && common+=(--mem "$MEM")
     [[ -n "$GPU_MEM" ]] && common+=(--gpu-mem "$GPU_MEM")
 else
-    common=(--galaxy "$GALAXIES" --sampler mcmc --compare-reid)
+    common=(--galaxy "$GALAXIES" --sampler mcmc)
     [[ -n "$CPUS" ]] && common+=(--cpus "$CPUS")
     [[ -n "$MEM" ]] && common+=(--mem "$MEM")
     [[ -n "$NUM_WARMUP" ]] && common+=(--num-warmup "$NUM_WARMUP")

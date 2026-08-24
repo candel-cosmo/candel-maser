@@ -29,14 +29,15 @@ from ..util import SPEED_OF_LIGHT
 
 # Internal units: M_BH in 1e7 M_sun, sky positions in μas,
 # r_ang in mas, D in Mpc.  These retain the rounded constants used by the
-# production model and its validated chains; --match-reid swaps in Reid's
-# independently rounded convention.  They are not CODATA-precision values.
+# production model and its validated chains. They are not CODATA-precision
+# values.
 C_v = 2978.8656    # km/s: sqrt(G * 1e7 M_sun / (1 mas * 1 Mpc))
 C_a = 1.872e3      # km/s/yr: 1e7 M_sun * G * yr / (1 mas * 1 Mpc)^2
 C_g = 1.974e-4     # dimensionless: 2*G * 1e7 M_sun / (c^2 * 1 mas * 1 Mpc)
 # When True, the eccentric SR gamma uses the circular speed Vcirc (Reid
 # fit_disk convention) instead of the true orbital speed. Read at trace time;
-# set via run_maser --match-reid. Affects only the eccentric branch.
+# used by the standalone Reid-validation scripts. Affects only the eccentric
+# branch.
 REID_CIRCULAR_GAMMA = False
 LOG_2PI = 1.8378770664093453  # jnp.log(2 * pi), precomputed
 

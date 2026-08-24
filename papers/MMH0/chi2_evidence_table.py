@@ -1,5 +1,5 @@
 """chi^2 (this work vs P20) at the posterior-median disc, paired with the
-latent-marginalised logP_2d already stored in the --compare-reid run logs.
+latent-marginalised logP_2d stored in the legacy comparison run logs.
 
 No marginal recompute: Delta lnP_2D is read from the logs (analyse_sweep), the
 same values behind evidence_vs_distance.pdf.  Only the total chi^2 is computed

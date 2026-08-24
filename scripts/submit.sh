@@ -33,8 +33,6 @@ PHI_INTEGRATION=""
 PEAK_CANDIDATES_PER_WAVE=""
 ADD_ECC=false
 ADD_QW=false
-MATCH_REID=false
-FIX_FLOORS_PESCE=false
 SINGLE_ERROR_FLOOR=false
 CLUMP2_ACCELERATION_FLOOR_ONLY=false
 TEMP_OUTPUT=false
@@ -70,7 +68,7 @@ Required:
                          <root_output>/<dataset>/<gal>/logs/
                          <gal>_<sampler><variant>_<stamp>.log
                          (root_output from config_maser.toml [io], e.g.
-                         results/Megamaser; full transcript incl. Reid/Pesce).
+                         results/Megamaser; full runner transcript).
   -q, --queue QUEUE      Queue/partition for batch submission
                          (glamdring CPU: redwood|berg|cmb;
                          glamdring GPU: gpulong|cmbgpu|optgpu;
@@ -149,10 +147,6 @@ Common options passed to run_maser.py:
   --f64                  Force float64 for DE; MCMC already always uses it.
   --seed N               Random seed (all samplers; default: config
                          inference/seed). DE checkpoints are separated by seed.
-  --fix-floors-pesce     Hold the five error floors fixed at the published
-                         Pesce/Reid values. de: dropped from the DE search;
-                         mcmc: dropped from the sampled sites. For NGC5765b,
-                         this implies --single-error-floor.
   --single-error-floor   NGC5765b only: disable its separate sampled clump-2
                          floors and use the standard floor per observable.
   --clump2-acceleration-floor-only
@@ -176,12 +170,6 @@ MCMC/joint quick overrides passed to the Python runner:
                          inference; mcmc + joint only).
 
 Experimental MCMC options passed to run_maser.py --sampler mcmc:
-  --compare-reid        After sampling, run the expensive Pesce/Reid/config/
-                         MCMC fixed-global comparison. Disabled by default.
-  --match-reid          Diagnostic: use Reid fit_disk physical constants.
-                         Reid scatter always uses the same D_A.
-  --compare-reid-2x     With --compare-reid, also run the 2x-denser-grid
-                         logZ check. Disabled by default.
   --compute-evidence    Not supported through submit.sh; run a separate
                          --evidence diagnostic after the chain finishes.
   --save-latents        Save per-spot r_ang/phi samples in the HDF5 output.
@@ -201,8 +189,6 @@ DE optimiser options passed to run_maser.py --sampler de:
                          r_ang MAP at the config [init] globals.
   --fix-globals-pesce    Like --fix-globals but at the published Pesce/Reid
                          globals, scoring the data-only marginal.
-  --fix-floors-pesce     Run the full DE but hold the five error floors at the
-                         published Pesce/Reid values (all other globals free).
   --phi-integration fixed-grid|peak-partition
                          Phi integration for the 2D marginal. Default:
                          config_maser.toml (currently peak-partition).
@@ -347,8 +333,6 @@ chain_variant_suffix() {
     local parts=()
     [[ "$ADD_ECC" == true ]] && parts+=("ecc")
     [[ "$ADD_QW" == true ]] && parts+=("qw")
-    [[ "$MATCH_REID" == true ]] && parts+=("matchreid")
-    [[ "$FIX_FLOORS_PESCE" == true ]] && parts+=("fixfloors")
     if [[ "$galaxy" == "NGC5765b" \
           && "$CLUMP2_ACCELERATION_FLOOR_ONLY" == true ]]; then
         parts+=("accelfloor")
@@ -416,8 +400,7 @@ while [[ $# -gt 0 ]]; do
         --num-warmup|--num-samples|--output|\
             --max-tree-depth|--target-accept-theta)
             MCMC_JOINT_ARGS+=("$1" "$2"); shift 2 ;;
-        --compare-reid|--match-reid|--compare-reid-2x|--compute-evidence)
-            [[ "$1" == "--match-reid" ]] && MATCH_REID=true
+        --compute-evidence)
             [[ "$1" == "--compute-evidence" ]] && COMPUTE_EVIDENCE=true
             MCMC_ARGS+=("$1"); shift ;;
         --save-latents)
@@ -455,18 +438,8 @@ while [[ $# -gt 0 ]]; do
         --resume|--fix-globals|--skip-base-model-seed)
             [[ "$1" == "--fix-globals" ]] && FIX_GLOBALS=true
             DE_ARGS+=("$1"); shift ;;
-        --fix-globals-pesce|--fix-floors-pesce)
-            case "$1" in
-                --fix-floors-pesce)
-                    FIX_FLOORS_PESCE=true
-                    SINGLE_ERROR_FLOOR=true ;;
-            esac
-            case "$1" in
-                --fix-globals-pesce)
-                    DE_ARGS+=("$1") ;;
-                *)
-                    SINGLE_ARGS+=("$1") ;;
-            esac
+        --fix-globals-pesce)
+            DE_ARGS+=("$1")
             shift ;;
         --)
             shift
@@ -631,10 +604,7 @@ if [[ "$EVIDENCE" == true ]]; then
     bad_args=()
     [[ ${#JOINT_ARGS[@]} -gt 0 ]] && bad_args+=("${JOINT_ARGS[@]}")
     [[ ${#DE_ARGS[@]} -gt 0 ]] && bad_args+=("${DE_ARGS[@]}")
-    for arg in ${MCMC_ARGS[@]+"${MCMC_ARGS[@]}"}; do
-        [[ "$arg" == "--match-reid" ]] && continue
-        bad_args+=("$arg")
-    done
+    [[ ${#MCMC_ARGS[@]} -gt 0 ]] && bad_args+=("${MCMC_ARGS[@]}")
     [[ ${#MCMC_JOINT_ARGS[@]} -gt 0 ]] && bad_args+=("${MCMC_JOINT_ARGS[@]}")
     [[ ${#bad_args[@]} -gt 0 ]] && fail_if_args "--evidence" "${bad_args[@]}"
 elif [[ "$JOINT_H0_MODE" == true ]]; then
@@ -927,9 +897,6 @@ if [[ ${#RUN_ARGS[@]} -gt 0 ]]; then
         case "$a" in
             --add-quadratic-warp) variant_tag="${variant_tag}_qw" ;;
             --add-ecc)            variant_tag="${variant_tag}_ecc" ;;
-            --compare-reid)       variant_tag="${variant_tag}_reid" ;;
-            --match-reid)         variant_tag="${variant_tag}_matchreid" ;;
-            --fix-floors-pesce)   variant_tag="${variant_tag}_fixfloors" ;;
             --single-error-floor) variant_tag="${variant_tag}_singlefloor" ;;
             --clump2-acceleration-floor-only)
                 variant_tag="${variant_tag}_accelfloor" ;;

@@ -449,8 +449,7 @@ def analyse_galaxy(galaxy, gdir, make_plots=True):
               f"({'mine preferred' if d > 0 else 'Pesce preferred'}); "
               f"D_A mine={mcmc['D_A']:.1f}  Pesce={pesce['D_A']:.1f} Mpc")
     if not shown:
-        print("  no comparison table found in logs "
-              "(was the run --compare-reid?).")
+        print("  no legacy comparison table found in logs.")
 
     if make_plots:
         made = plot_init_comparison(galaxy, gdir, chains)

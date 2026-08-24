@@ -1227,8 +1227,8 @@ def _phi_integration_suffix(model):
             if model.phi_integration == "peak-partition" else "")
 
 
-def _de_checkpoint_filename(model, seed, fix_floors_pesce=False):
-    floor_suffix = "_pescefloors" if fix_floors_pesce else ""
+def _de_checkpoint_filename(model, seed):
+    floor_suffix = ""
     if getattr(model, "galaxy_name", None) == "NGC5765b":
         if getattr(model, "clump2_acceleration_only", False):
             floor_suffix += "_accelfloor"
@@ -1625,8 +1625,7 @@ def _clip_run_tag(args, seed):
             key: getattr(args, key) for key in (
                 "f64", "no_ecc", "add_ecc", "no_quadratic_warp",
                 "add_quadratic_warp", "mass_parameterization",
-                "phi_integration", "fix_floors_pesce",
-                "single_error_floor")},
+                "phi_integration", "single_error_floor")},
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode()).hexdigest()[:10]
@@ -2025,12 +2024,11 @@ def _print_required_de_seeds(names, seed_points, fitness,
         fprint(f"initial-population rank = {rank}/{fitness.size}")
 
 
-# Per-observable noise floors, in the order candel_theta_from_point emits them.
-_PESCE_FLOOR_UNITS = (("sigma_x_floor", "uas"), ("sigma_y_floor", "uas"),
-                      ("sigma_v_sys", "km/s"), ("sigma_v_hv", "km/s"),
-                      ("sigma_a_floor", "km/s/yr"))
-_PESCE_FLOOR_NAMES = tuple(name for name, _ in _PESCE_FLOOR_UNITS)
-_FLOOR_UNIT = dict(_PESCE_FLOOR_UNITS)
+_FLOOR_UNIT = {
+    "sigma_x_floor": "uas", "sigma_y_floor": "uas",
+    "sigma_v_sys": "km/s", "sigma_v_hv": "km/s",
+    "sigma_a_floor": "km/s/yr",
+}
 _DISTANCE_SLICE_FRACTIONS = np.asarray(
     (0.001, 0.003, 0.01, 0.03, 0.1, 0.2))
 
@@ -2563,12 +2561,6 @@ def main(argv=None):
                              "published Pesce/Reid values (with their exact "
                              "paper error floors) and score the data-only "
                              "sum_i 2D (r,phi) marginal (no global priors).")
-    parser.add_argument("--fix-floors-pesce", action="store_true",
-                        help="Run the full DE but hold the five error floors "
-                             "(sigma_x_floor, sigma_y_floor, sigma_v_sys, "
-                             "sigma_v_hv, sigma_a_floor) fixed at the "
-                             "published Pesce/Reid values; all other globals "
-                             "searched.")
     floor_mode = parser.add_mutually_exclusive_group()
     floor_mode.add_argument(
         "--single-error-floor", action="store_true",
@@ -2644,10 +2636,6 @@ def main(argv=None):
                              "ARC: request N with submit.sh --gpu-count N "
                              "(-> --gres=gpu:N).")
     args = parser.parse_args(argv)
-    if args.clump2_acceleration_floor_only and args.fix_floors_pesce:
-        parser.error("--clump2-acceleration-floor-only cannot be combined "
-                     "with --fix-floors-pesce")
-
     if args.no_ecc and args.add_ecc:
         raise SystemExit("--no-ecc and --add-ecc are mutually exclusive.")
     if args.patience is not None and args.patience < 1:
@@ -2659,10 +2647,6 @@ def main(argv=None):
     if args.fix_globals and args.fix_globals_pesce:
         raise SystemExit(
             "--fix-globals and --fix-globals-pesce are mutually exclusive.")
-    if args.fix_floors_pesce and (args.fix_globals or args.fix_globals_pesce):
-        raise SystemExit(
-            "--fix-floors-pesce only applies to the DE; it cannot combine "
-            "with --fix-globals/--fix-globals-pesce (those skip the DE).")
     master_cfg = _MASTER_CFG
     dataset = apply_dataset(master_cfg, args.dataset)
     galaxies = master_cfg["model"]["galaxies"]
@@ -2801,7 +2785,7 @@ def main(argv=None):
     if args.mass_parameterization is not None:
         config["model"]["galaxies"][args.galaxy][
             "mass_parameterization"] = args.mass_parameterization
-    if args.single_error_floor or args.fix_floors_pesce:
+    if args.single_error_floor:
         config["model"]["use_ngc5765b_clump2_floors"] = False
     elif args.clump2_acceleration_floor_only:
         config["model"]["use_ngc5765b_clump2_floors"] = True
@@ -2875,7 +2859,6 @@ def main(argv=None):
     pesce_logp = None
     pesce_params = None
     pesce_status = ()
-    fixed_floors = None
     if args.fix_globals_pesce:
         try:
             init_params, pesce_status = _pesce_init(target, args.galaxy,
@@ -2890,14 +2873,8 @@ def main(argv=None):
         try:
             pesce_params, pesce_status = _pesce_init(
                 target, args.galaxy, master_cfg)
-            if args.fix_floors_pesce:
-                fixed_floors = {n: pesce_params[n] for n in _PESCE_FLOOR_NAMES
-                                if n in target.names}
         except KeyError as exc:
             fprint(f"Pesce/Reid baseline unavailable: {exc}")
-            if args.fix_floors_pesce:
-                raise SystemExit(
-                    f"--fix-floors-pesce needs Pesce floors: {exc}") from exc
     r_refinement = (
         "three-point global-scan interpolation"
         if model.phi_integration == "peak-partition"
@@ -2935,8 +2912,7 @@ def main(argv=None):
                 os.environ[_CLIP_TAG_ENV], f"attempt_{attempt:02d}")
         os.makedirs(ckpt_dir, exist_ok=True)
         ckpt_path = os.path.join(
-            ckpt_dir, _de_checkpoint_filename(
-                model, seed, fix_floors_pesce=args.fix_floors_pesce))
+            ckpt_dir, _de_checkpoint_filename(model, seed))
         fprint(f"DE checkpoint: {ckpt_path}")
         resume_path = (
             ckpt_path if args.resume and os.path.isfile(ckpt_path)
@@ -3047,10 +3023,10 @@ def main(argv=None):
             target, opt_cfg, seed, n_dev=n_dev, devices=gpu_devices,
             checkpoint_path=ckpt_path, resume_path=resume_path,
             checkpoint_interval=args.checkpoint_interval_minutes * 60.0,
-            seed_points=seed_points, fixed_params=fixed_floors,
+            seed_points=seed_points,
             reference_params=pesce_params,
             reference_status=pesce_status,
-            objective_policy=_objective_policy(model, fixed_floors),
+            objective_policy=_objective_policy(model),
             peak_candidates_per_wave=args.peak_candidates_per_wave,
             seed_policy=(
                 _DE_BASE_MODEL_SEED_POLICY

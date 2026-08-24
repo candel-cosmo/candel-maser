@@ -99,8 +99,6 @@ from jax import random  # noqa: E402
 if _F64_ENABLED_HERE:
     print(f"float64 enabled ({_F64_REASON})", flush=True)
 
-from numpyro.distributions import Delta  # noqa: E402
-
 import candel.model.maser_physics as maser_physics  # noqa: E402
 from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
 from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
@@ -110,17 +108,11 @@ from candel.model.maser_blackjax import (  # noqa: E402
     run_blackjax_mcmc)
 from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
 from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
-from candel.pvdata.megamaser_data import (  # noqa: E402
-    maser_data_root, megamaser_velocity_frame, v_sys_from_cmb)
+from candel.pvdata.megamaser_data import maser_data_root  # noqa: E402
 from candel.util import fprint, fsection, results_path  # noqa: E402
 from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
                           check_init_block, variant_init_block)
 
-# Per-observable noise floors held fixed by --fix-floors-pesce, with units.
-_PESCE_FLOOR_UNITS = (("sigma_x_floor", "uas"), ("sigma_y_floor", "uas"),
-                      ("sigma_v_sys", "km/s"), ("sigma_v_hv", "km/s"),
-                      ("sigma_a_floor", "km/s/yr"))
-_PESCE_FLOOR_NAMES = tuple(name for name, _ in _PESCE_FLOOR_UNITS)
 _REID_CLIGHT = 2.997925e5
 _LATENT_SUMMARY_SPOT_CHUNK = 8
 
@@ -182,7 +174,7 @@ def _apply_reid_physics_constants():
     maser_physics.C_g = cg
     maser_physics.SPEED_OF_LIGHT = _REID_CLIGHT
     maser_physics.REID_CIRCULAR_GAMMA = True
-    fprint("match-reid: using Reid fit_disk physics constants "
+    fprint("using Reid fit_disk physics constants "
            f"(C_v={cv:.6g}, C_a={ca:.6g}, C_g={cg:.6g}, "
            f"c={_REID_CLIGHT:.6g}) + circular-speed SR gamma")
 
@@ -810,17 +802,6 @@ def _median_point(result, model):
     return _complete_mass_point(model, point)
 
 
-def _sample_point_at(result, model, idx):
-    point = {}
-    for key, value in result.samples.items():
-        arr = np.asarray(value, dtype=float)
-        if key in ("r_ang", "phi"):
-            point[key] = arr.reshape(-1, arr.shape[-1])[idx]
-        elif arr.ndim <= 2:
-            point[key] = float(arr.reshape(-1)[idx])
-    return _complete_mass_point(model, point)
-
-
 def _D_A_from_point(model, point):
     if "D_A" in point:
         return float(np.asarray(point["D_A"]))
@@ -829,221 +810,10 @@ def _D_A_from_point(model, point):
     return None
 
 
-def _D_c_from_D_A(model, D_A, gcfg):
-    D_A = float(D_A)
-
-    def f(D_c):
-        return float(_D_A_from_D_c(model, D_c)) - D_A
-
-    lo = float(gcfg.get("D_lo", max(1e-6, 0.25 * D_A)))
-    hi = float(gcfg.get("D_hi", max(1.0, 3.0 * D_A)))
-    while f(lo) > 0:
-        lo *= 0.5
-    while f(hi) < 0:
-        hi *= 1.5
-    for _ in range(80):
-        mid = 0.5 * (lo + hi)
-        if f(mid) < 0:
-            lo = mid
-        else:
-            hi = mid
-    return 0.5 * (lo + hi)
-
-
-def _pesce_reported_point(galaxy, master, model):
-    if galaxy == "NGC4258":
-        base_init = _clean_init(
-            model, master["model"]["galaxies"][galaxy].get("init", {}))
-        target = MaserBlackJaxTarget(model, _h_ref(model), base_init)
-        try:
-            theta = _paper_init(target, galaxy, master)
-        except KeyError as exc:
-            return None, str(exc)
-        point = {
-            key: float(np.asarray(value))
-            for key, value in theta.items()
-            if np.asarray(value).ndim == 0
-        }
-        D_A = _D_A_from_point(model, point)
-        if "log_MBH" not in point and "eta" in point:
-            point["log_MBH"] = point["eta"] + np.log10(D_A)
-        if "eta" not in point and "log_MBH" in point:
-            point["eta"] = point["log_MBH"] - np.log10(D_A)
-        return point, "ok"
-
-    path = os.path.join(
-        os.path.dirname(__file__), "check_reid", "pesce_disk_params.toml")
-    if not os.path.exists(path):
-        return None, "missing pesce_disk_params.toml"
-    with open(path, "rb") as f:
-        src = tomli.load(f).get("galaxies", {})
-    if galaxy not in src:
-        return None, "no Pesce/Reid row"
-
-    gcfg = master["model"]["galaxies"][galaxy]
-    p = src[galaxy]
-    D_A = float(p["D_Mpc"])
-    log_mbh = float(np.log10(p["MBH_1e7"] * 1.0e7))
-    ri = float(gcfg["r_ang_ref_i"])
-    rO = float(gcfg["r_ang_ref_Omega"])
-    di = float(p.get("didr_deg_mas", 0.0))
-    dO = float(p.get("dOmegadr_deg_mas", 0.0))
-    v_native = v_sys_from_cmb(
-        p["v_cmb_kms"], megamaser_velocity_frame(galaxy),
-        gcfg["ra"], gcfg["dec"])
-    point = {
-        "log_MBH": log_mbh,
-        "eta": log_mbh - np.log10(D_A),
-        "x0": float(p["x0_mas"]) * 1000.0,
-        "y0": float(p["y0_mas"]) * 1000.0,
-        "i0": float(p["i0_deg"]) + di * ri,
-        "di_dr": di,
-        "Omega0": float(p["Omega0_deg"]) + dO * rO,
-        "dOmega_dr": dO,
-        "dv_sys": float(v_native) - float(gcfg["v_sys_obs"]),
-        "sigma_x_floor": float(p["sigma_x_mas"]) * 1000.0,
-        "sigma_y_floor": float(p["sigma_y_mas"]) * 1000.0,
-        "sigma_v_sys": float(p["sigma_vsys_kms"]),
-        "sigma_v_hv": float(p["sigma_vhv_kms"]),
-        "sigma_a_floor": float(p["sigma_a_kms_yr"]),
-    }
-    if model._D_A_uniform:
-        point["D_A"] = D_A
-    else:
-        point["D_c"] = _D_c_from_D_A(model, D_A, gcfg)
-    if model.use_quadratic_warp:
-        point["d2i_dr2"] = 0.0
-        point["d2Omega_dr2"] = 0.0
-    if model.use_ecc:
-        point["e_x"] = 0.0
-        point["e_y"] = 0.0
-        point["dperiapsis_dr"] = 0.0
-    return point, "ok"
-
-
-def _score_marginal_point(target, point):
-    """Return (logP_2d, logZ_2d) at the given globals: logP_2d = logZ_2d +
-    log p(globals); logZ_2d is the data-only 2D (r_ang, phi) marginal."""
-    from run_de_map import _logp_2d_terms
-
-    theta = {name: jnp.asarray(point[name]) for name in target.names}
-    theta = target.complete_params(theta)
-    lp, ll, _, _ = _logp_2d_terms(target, theta)
-    lp = float(jax.device_get(jax.block_until_ready(lp)))
-    ll = float(jax.device_get(jax.block_until_ready(ll)))
-    return lp + ll, ll
-
-
-def _point_summary(model, gcfg, point):
-    D_A = _D_A_from_point(model, point)
-    log_mbh = point.get("log_MBH")
-    if log_mbh is None:
-        log_mbh = float(point["eta"]) + np.log10(D_A)
-    return {
-        "D_A": D_A,
-        "log_MBH": float(log_mbh),
-        "Vsys": float(gcfg["v_sys_obs"]) + float(point["dv_sys"]),
-    }
-
-
-def _fmt(x):
-    if x is None:
-        return ""
-    if isinstance(x, str):
-        return x
-    x = float(x)
-    if not np.isfinite(x):
-        return "nan"
-    return f"{x:.3f}"
-
-
 def _required_inference(cfg, key):
     if key not in cfg:
         raise KeyError(f"Missing [inference].{key} in {_CONFIG_PATH}")
     return cfg[key]
-
-
-def _print_table(rows, cols):
-    widths = {
-        key: max(len(label), *(len(_fmt(row.get(key))) for row in rows))
-        for key, label in cols
-    }
-    print("  " + "  ".join(
-        label.ljust(widths[key]) for key, label in cols), flush=True)
-    print("  " + "  ".join("-" * widths[key] for key, _ in cols),
-          flush=True)
-    for row in rows:
-        print("  " + "  ".join(
-            _fmt(row.get(key)).ljust(widths[key]) for key, _ in cols),
-            flush=True)
-
-
-_GRID_KEYS = ("n_r_local", "n_r_global", "n_phi_hv_high", "n_phi_hv_low",
-              "n_phi_sys")
-
-
-def _grid_scaled_target(model, h, init, galaxy, data_root, spot_batch, scale):
-    """Rebuild the model + target with the 2D-marginal quadrature grids scaled
-    by ``scale`` (e.g. 2), for a convergence check on the DE-style logZ."""
-    cfg = copy.deepcopy(model.config)
-
-    def _scale(d):
-        for k in _GRID_KEYS:
-            if k in d:
-                d[k] = int(round(int(d[k]) * scale))
-
-    _scale(cfg["model"])
-    _scale(cfg["model"]["galaxies"].get(galaxy, {}))
-    gcfg = cfg["model"]["galaxies"][galaxy]
-    # Silence the data-load + model-build chatter from the rebuild.
-    with contextlib.redirect_stdout(io.StringIO()):
-        data = load_megamaser_spots(
-            data_root, galaxy, v_sys_obs=gcfg["v_sys_obs"],
-            use_ecc=model.use_ecc,
-            use_quadratic_warp=model.use_quadratic_warp)
-        if "D_lo" in gcfg and "D_hi" in gcfg:
-            data["D_lo"] = float(gcfg["D_lo"])
-            data["D_hi"] = float(gcfg["D_hi"])
-        tmp = tempfile.NamedTemporaryFile(
-            mode="wb", suffix=".toml", delete=False)
-        tomli_w.dump(cfg, tmp)
-        tmp.close()
-        try:
-            m2 = MaserDiskModel(tmp.name, data)
-        finally:
-            os.unlink(tmp.name)
-        target = MaserBlackJaxTarget(m2, h, init, spot_batch=spot_batch)
-    return target
-
-
-def _add_logZ_2x(rows, model, init, galaxy, data_root, spot_batch):
-    """Add a 2x-denser-grid logZ_2d to each scored row as a quadrature
-    convergence check.  The doubled-grid model is built once here, at the end,
-    and released straight after, so the dense grids never clog memory."""
-    scored = [r for r in rows if r.get("_point") is not None
-              and r.get("logZ_2d") is not None]
-    if not scored:
-        fprint("2x-grid logZ check: no successfully scored rows.")
-        return
-    try:
-        fprint("2x-grid logZ check: building doubled quadrature target...")
-        target2x = _grid_scaled_target(
-            model, _h_ref(model), init, galaxy,
-            data_root or maser_data_root(master_cfg["io"]["dataset"]),
-            spot_batch, 2)
-    except Exception as exc:                           # diagnostic only
-        fprint(f"2x-grid logZ unavailable: {exc}")
-        return
-    for i, r in enumerate(scored, start=1):
-        label = r.get("point", f"row {i}")
-        fprint(f"2x-grid logZ check: scoring {label} "
-               f"({i}/{len(scored)})...")
-        try:
-            r["logZ_2d_2x"] = _score_marginal_point(target2x, r["_point"])[1]
-        except Exception as exc:                       # diagnostic only
-            fprint(f"2x-grid logZ failed for {r['point']}: {exc}")
-    del target2x
-    fprint("2x-grid logZ check: done.")
 
 
 _REID_GLOBAL_INIT_KEYS = (
@@ -1052,9 +822,6 @@ _REID_GLOBAL_INIT_KEYS = (
     "e_x", "e_y", "dperiapsis_dr",
     "sigma_x_floor", "sigma_y_floor", "sigma_v_sys", "sigma_v_hv",
     "sigma_a_floor")
-
-
-_REID_SCATTER_DRAWS = 20
 
 
 def _reid_loglik_context(galaxy, n_spots, dataset=None, *, use_ecc=False,
@@ -1216,202 +983,12 @@ def _candel_neg_half_chi2(model, target, point, r_ang, phi):
     return full - lnorm
 
 
-def _make_reid_loglik_scatter(galaxy, model, target, result, path):
-    """Per-spot CANDEL vs Reid data-fit scatter (-0.5*chi^2).
-
-    Compares the per-spot DATA-FIT term -0.5*chi^2 (CANDEL ``_eval_phi_fixed``
-    minus its Gaussian normalisation vs Reid's residuals over add_error_floors
-    sigmas).  chi^2 is dimensionless: it carries no -0.5*ln(2*pi) per data
-    point and no uas-vs-mas position-unit zero-point, so the two codes are
-    compared on a true 1:1 line with NO arbitrary additive offset, and the
-    global priors play no role.  Evaluated at the same per-spot (r_ang, phi),
-    globals, and angular-diameter distance for ``_REID_SCATTER_DRAWS`` randomly
-    chosen posterior draws (each a coherent global+latent point), pooling all
-    per-spot pairs.
-    """
-    if "r_ang" not in result.samples or "phi" not in result.samples:
-        fprint("skipping Reid scatter: no per-spot (r_ang, phi) in samples.")
-        return None
-    fprint("Reid log-likelihood scatter: preparing Reid likelihood context...")
-    ctx = _reid_loglik_context(
-        galaxy, model.n_spots, use_ecc=model.use_ecc,
-        use_quadratic_warp=model.use_quadratic_warp)
-    if ctx is None:
-        return None
-
-    n_total = int(np.asarray(result.log_density, dtype=float).reshape(-1).size)
-    n_draws = min(_REID_SCATTER_DRAWS, n_total)
-    idxs = np.random.default_rng(0).choice(
-        n_total, size=n_draws, replace=False)
-    fprint(f"Reid log-likelihood scatter: evaluating {n_draws} posterior "
-           f"draws ({model.n_spots} spots each)...")
-
-    try:
-        from tqdm.auto import tqdm
-        draw_iter = tqdm(
-            idxs, desc="Reid log-likelihood scatter", unit="draw")
-    except Exception:
-        draw_iter = idxs
-
-    candel, reid = [], []
-    for idx in draw_iter:
-        point = _sample_point_at(result, model, int(idx))
-        if point is None:
-            continue
-        r_ang = np.asarray(point["r_ang"], dtype=float)
-        phi = np.asarray(point["phi"], dtype=float)
-        candel.append(_candel_neg_half_chi2(model, target, point, r_ang, phi))
-        D_A = _point_D_A(model, target, point)
-        reid.append(_reid_neg_half_chi2(
-            ctx, galaxy, point, r_ang, phi, D_A=D_A))
-    if not candel:
-        fprint("skipping Reid scatter: no usable posterior draws.")
-        return None
-    candel = np.concatenate(candel)
-    reid = np.concatenate(reid)
-
-    ok = np.isfinite(candel) & np.isfinite(reid)
-    if int(ok.sum()) < 2:
-        fprint("skipping Reid scatter: too few finite per-spot values.")
-        return None
-    diff = candel[ok] - reid[ok]
-    mean = float(np.mean(diff))
-    rms = float(np.sqrt(np.mean(diff ** 2)))
-    med = float(np.median(diff))
-    corr = float(np.corrcoef(candel[ok], reid[ok])[0, 1])
-
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fig, ax = plt.subplots(figsize=(5.0, 5.0), constrained_layout=True)
-    ax.scatter(reid[ok], candel[ok], s=10, alpha=0.4, edgecolor="none")
-    lo = float(min(reid[ok].min(), candel[ok].min()))
-    hi = float(max(reid[ok].max(), candel[ok].max()))
-    ax.plot([lo, hi], [lo, hi], ls=":", color="0.5", lw=1.0)
-    ax.set_xlabel(r"Reid per-spot $-\frac{1}{2}\chi^2$")
-    ax.set_ylabel(r"CANDEL per-spot $-\frac{1}{2}\chi^2$")
-    ax.set_aspect("equal", adjustable="box")
-    ax.text(0.04, 0.96,
-            f"mean$={mean:.3f}$\nRMS$={rms:.3f}$\n"
-            f"median$={med:.3f}$\n$r={corr:.4f}$\n"
-            f"{n_draws} draws, $n={int(ok.sum())}$",
-            transform=ax.transAxes, va="top", ha="left", fontsize=9)
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
-    fprint("Reid data-fit scatter summary: "
-           f"mean(CANDEL-Reid)={mean:.3f}, RMS={rms:.3f}, "
-           f"median={med:.3f}, r={corr:.4f}, "
-           f"n={int(ok.sum())}, draws={n_draws}")
-    fprint(f"saved Reid data-fit (chi^2) scatter to {path} "
-           f"({n_draws} draws)")
-    return path
-
-
-def _print_point_comparison(galaxy, master, model, result, init_cfg,
-                            init_params, spot_batch, data_root=None,
-                            scatter_path=None, compare_reid_2x=False):
-    target_init = (
-        init_params[0] if isinstance(init_params, list) else init_params)
-    target = MaserBlackJaxTarget(
-        model, _h_ref(model), target_init, spot_batch=spot_batch)
-    fsection("MCMC/Pesce comparison setup")
-    fprint("Preparing slow Reid/Pesce comparison diagnostics. "
-           "The final table is printed after all rows are scored.")
-
-    # Make the data-loglik scatter first, so it is always produced even if the
-    # expensive logZ table below is slow, interrupted, or errors.
-    if scatter_path is not None:
-        try:
-            _make_reid_loglik_scatter(galaxy, model, target, result,
-                                      scatter_path)
-        except Exception as exc:                       # never abort the run
-            fprint(f"Reid log-likelihood scatter failed: {exc}")
-
-    gcfg = master["model"]["galaxies"][galaxy]
-    rows = []
-
-    def add(label, point):
-        row = {"point": label}
-        if point is None:
-            fprint(f"comparison row {label}: missing.")
-            row["status"] = "missing"
-            rows.append(row)
-            return
-        try:
-            fprint(f"comparison row {label}: scoring production 2D grid...")
-            row.update(_point_summary(model, gcfg, point))
-            row["logp"], row["logZ_2d"] = _score_marginal_point(target, point)
-            row["_point"] = point
-            fprint(f"comparison row {label}: logP_2d={row['logp']:.3f}, "
-                   f"logZ_2d={row['logZ_2d']:.3f}")
-        except Exception as exc:
-            row["status"] = str(exc)
-            fprint(f"comparison row {label}: failed ({exc})")
-        rows.append(row)
-
-    pesce_point, pesce_status = _pesce_reported_point(galaxy, master, model)
-    add("Pesce/Reid", pesce_point)
-    if pesce_status != "ok":
-        rows[-1]["status"] = pesce_status
-
-    config_point = None
-    if init_cfg:
-        config_point = _complete_mass_point(
-            model, {k: np.asarray(v) for k, v in
-                    _clean_init(model, init_cfg).items()})
-    add("config init", config_point)
-
-    median_point = _median_point(result, model)
-    add("MCMC median", median_point)
-
-    if compare_reid_2x:
-        _add_logZ_2x(rows, model, target_init, galaxy, data_root, spot_batch)
-
-    base = next((row.get("logp") for row in rows
-                 if row.get("logp") is not None
-                 and np.isfinite(row["logp"])), None)
-    if base is not None:
-        for row in rows:
-            if row.get("logp") is not None:
-                row["dlogp"] = row["logp"] - base
-
-    fsection("MCMC/Pesce comparison")
-    msg = ("logP_2d = logZ_2d + log p(globals) is the 2D-marginal "
-           "objective (each spot marginalised over r_ang, phi); logZ_2d is "
-           "the data-only marginal")
-    if compare_reid_2x:
-        msg += ", and logZ_2d(2x) repeats it on a 2x-denser grid"
-    fprint(msg + ". dlogP is relative to the first finite row; positive is "
-           "preferred over that baseline.")
-    cols = [
-        ("point", "point"),
-        ("logp", "logP_2d"),
-        ("dlogp", "dlogP"),
-        ("logZ_2d", "logZ_2d"),
-        ("D_A", "D_A"),
-        ("log_MBH", "log_MBH"),
-        ("Vsys", "Vsys"),
-        ("status", "status"),
-    ]
-    if compare_reid_2x:
-        cols.insert(4, ("logZ_2d_2x", "logZ_2d(2x)"))
-    _print_table(rows, cols)
-
-
 def _variant_suffix(model, args, init_strategy):
     parts = []
     if model.use_ecc:
         parts.append("ecc")
     if model.use_quadratic_warp:
         parts.append("qw")
-    # Flags that change the sampled posterior but are not disc geometry: keep
-    # them in the filename so runs varying them don't overwrite each other.
-    if args.match_reid:
-        parts.append("matchreid")
-    if args.fix_floors_pesce:
-        parts.append("fixfloors")
     if model.galaxy_name == "NGC5765b":
         if model.clump2_acceleration_only:
             parts.append("accelfloor")
@@ -1531,12 +1108,6 @@ def main(argv=None):
     parser.add_argument(
         "--f64", action="store_true", default=_ENABLE_F64,
         help="Accepted for compatibility; MCMC always uses float64.")
-    parser.add_argument("--fix-floors-pesce", action="store_true",
-                        help="Hold the five error floors (sigma_x_floor, "
-                             "sigma_y_floor, sigma_v_sys, sigma_v_hv, "
-                             "sigma_a_floor) fixed at the published "
-                             "Pesce/Reid values; the MCMC samples all globals "
-                             "the per-spot (r, phi) latents.")
     floor_mode = parser.add_mutually_exclusive_group()
     floor_mode.add_argument(
         "--single-error-floor", action="store_true",
@@ -1547,20 +1118,6 @@ def main(argv=None):
         "--clump2-acceleration-floor-only", action="store_true",
         help="For NGC5765b, sample a separate clump-2 acceleration floor "
              "only; position and velocity use the standard floors.")
-    parser.add_argument("--match-reid", action="store_true",
-                        help="Diagnostic mode: use Reid fit_disk physical "
-                             "constants and circular-speed SR gamma "
-                             "(eccentric branch) in CANDEL. Reid scatter "
-                             "comparisons "
-                             "always evaluate both codes at the same D_A.")
-    parser.add_argument("--compare-reid", action="store_true",
-                        help="After sampling, run the expensive Pesce/Reid/"
-                             "config/MCMC fixed-global comparison scored with "
-                             "the DE-style 2D marginal likelihood. Disabled "
-                             "by default.")
-    parser.add_argument("--compare-reid-2x", action="store_true",
-                        help="With --compare-reid, also repeat logZ_2d on a "
-                             "2x-denser quadrature grid. Disabled by default.")
     parser.add_argument("--compute-evidence", action="store_true",
                         help="After sampling, compute the single-galaxy "
                              "finite-support harmonic marginal-objective "
@@ -1579,11 +1136,6 @@ def main(argv=None):
                         help="Disable the MAP overlay on the corner plot.")
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args(argv)
-    if args.clump2_acceleration_floor_only and args.fix_floors_pesce:
-        parser.error("--clump2-acceleration-floor-only cannot be combined "
-                     "with --fix-floors-pesce")
-    if args.compare_reid_2x and not args.compare_reid:
-        raise SystemExit("--compare-reid-2x requires --compare-reid.")
     if args.no_ecc and args.add_ecc:
         raise SystemExit("--no-ecc and --add-ecc are mutually exclusive.")
     if args.no_quadratic_warp and args.add_quadratic_warp:
@@ -1600,9 +1152,6 @@ def main(argv=None):
         raise SystemExit(
             f"Unknown galaxy {args.galaxy!r}. Available: {list(galaxies)}")
     gcfg_master = galaxies[args.galaxy]
-    if args.match_reid:
-        _apply_reid_physics_constants()
-
     if importlib.util.find_spec("blackjax") is None:
         raise SystemExit(
             "BlackJAX is not installed in this environment. Install "
@@ -1717,7 +1266,7 @@ def main(argv=None):
     if args.mass_parameterization is not None:
         config["model"]["galaxies"][args.galaxy][
             "mass_parameterization"] = args.mass_parameterization
-    if args.single_error_floor or args.fix_floors_pesce:
+    if args.single_error_floor:
         config["model"]["use_ngc5765b_clump2_floors"] = False
     elif args.clump2_acceleration_floor_only:
         config["model"]["use_ngc5765b_clump2_floors"] = True
@@ -1730,23 +1279,6 @@ def main(argv=None):
         model = MaserDiskModel(tmp.name, data)
     finally:
         os.unlink(tmp.name)
-
-    floor_point = None
-    if args.fix_floors_pesce:
-        # Delta priors are dropped from the sampled sites (see
-        # _theta_site_prior_pairs) and supplied as fixed constants by
-        # phys_from_params_jax; set them before the sampler reads the sites.
-        floor_point, status = _pesce_reported_point(
-            args.galaxy, master_cfg, model)
-        if floor_point is None:
-            raise SystemExit(
-                f"--fix-floors-pesce needs Pesce floors: {status}")
-        for name in _PESCE_FLOOR_NAMES:
-            model.priors[name] = Delta(jnp.asarray(float(floor_point[name])))
-        fsection(f"Error floors fixed at Pesce/Reid values ({args.galaxy})")
-        for name, unit in _PESCE_FLOOR_UNITS:
-            fprint(f"  {name:16s} = {float(floor_point[name]):8.4g} {unit}")
-        fprint("  held fixed; dropped from the sampled sites")
 
     init_key, nudge_key, run_key = random.split(random.PRNGKey(seed), 3)
     init_cfg = _init_block(config["model"]["galaxies"][args.galaxy], model)
@@ -1764,14 +1296,6 @@ def main(argv=None):
             galaxy=args.galaxy, master=master_cfg, spot_batch=args.spot_batch)
     init_params, boundary_adjustments = _nudge_boundary_init(
         model, _h_ref(model), init_params, nudge_key)
-    if floor_point is not None:
-        # Floors are not sampled; reflect their fixed values in the printed
-        # init so the dump is consistent with the held-fixed section above.
-        floors = {n: jnp.asarray(float(floor_point[n]))
-                  for n in _PESCE_FLOOR_NAMES}
-        for ip in (init_params if isinstance(init_params, list)
-                   else [init_params]):
-            ip.update(floors)
     if str(init_strategy).lower() == "median":
         fprint(f"init: median ({init_num_samples} prior samples)")
     else:
@@ -1881,11 +1405,7 @@ def main(argv=None):
         "max_tree_depth": int(max_tree_depth),
         "phi_step_size": float(phi_step_size),
         "reflect_prob": float(reflect_prob),
-        "fix_floors_pesce": bool(args.fix_floors_pesce),
         "uniform_da_prior": True,
-        "match_reid": bool(args.match_reid),
-        "compare_reid": bool(args.compare_reid),
-        "compare_reid_2x": bool(args.compare_reid_2x),
         "compute_evidence": bool(args.compute_evidence),
         "save_latents": bool(args.save_latents),
         "precision": precision,
@@ -1906,14 +1426,6 @@ def main(argv=None):
 
     log_density_path = os.path.splitext(outpath)[0] + "_log_density.png"
     _make_log_density_plot(result, log_density_path)
-    if args.compare_reid:
-        scatter_path = (
-            os.path.splitext(outpath)[0] + "_reid_loglik_scatter.png")
-        report_sections.append(_capture_stdout(
-            _print_point_comparison,
-            args.galaxy, master_cfg, model, result, init_cfg, init_params,
-            args.spot_batch, data_root=args.data_root,
-            scatter_path=scatter_path, compare_reid_2x=args.compare_reid_2x))
     _write_run_summary(summary_path, report_sections)
     if args.compute_evidence:
         _run_evidence_subprocess(
@@ -1941,19 +1453,6 @@ def main(argv=None):
                 marginal=False, verbose=False)
             corner_map = map_res["point"]
             chi2_line = f"MAP (DE globals): chi2_CANDEL={map_res['chi2']:.3f}"
-            if args.compare_reid:
-                ctx = _reid_loglik_context(
-                    args.galaxy, model.n_spots, use_ecc=model.use_ecc,
-                    use_quadratic_warp=model.use_quadratic_warp)
-                if ctx is not None:
-                    reid_nh = _reid_neg_half_chi2(
-                        ctx, args.galaxy, map_res["point"], map_res["r_ang"],
-                        map_res["phi"], D_A=map_res.get("D_A"))
-                    chi2_reid = float(-2.0 * np.asarray(reid_nh).sum())
-                    rel = (100.0 * abs(map_res["chi2"] - chi2_reid)
-                           / chi2_reid)
-                    chi2_line += (f"  chi2_Reid_code={chi2_reid:.3f}  "
-                                  f"(rel {rel:.2f}%)")
             chi2_line += f"  chi2/dof={map_res['chi2_per_dof']:.3f}"
             fprint(chi2_line)
             # Append to the saved summary so the MCP server can read it back.

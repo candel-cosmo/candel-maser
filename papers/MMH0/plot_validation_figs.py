@@ -11,8 +11,8 @@ results/Megamaser.
   evidence  : prints (no figure) the per-galaxy latent-marginalised data
               log-evidence logZ_2d at our posterior-median disc parameters
               minus that at the published Pesce/Reid fit, for both warp
-              models.  These are NOT recomputed: the main --compare-reid
-              runs already score and print them, and we read the stored
+              models.  These are NOT recomputed: the legacy comparison runs
+              already score and print them, and we read the stored
               values from the run logs (via analyse_sweep).  They are
               tabulated in the paper (tab:evidence) alongside the distance
               estimates.
@@ -150,7 +150,7 @@ def plot_agreement(data, out):
 def _stored_logZ(gdir, galaxy, qw):
     """(logZ_2d at our point, at the Pesce point) from the run logs.
 
-    The main --compare-reid runs already score and print these; we read them
+    The legacy comparison runs already score and print these; we read them
     rather than recompute.  Prefer the config-initialised chain, fall back to
     reid-init (same posterior) where the config row was not logged.
     """
@@ -214,7 +214,7 @@ PESCE_DA_SIG = {"CGCG074-064": 0.5 * (7.9 + 7.2),
 def collect_evidence_vs_distance():
     """Per-galaxy (Delta D_A, Delta logP_2d, sigma_dDA) = ours - P20, linear.
 
-    Delta D_A and Delta logP_2d come from the same --compare-reid log row so
+    Delta D_A and Delta logP_2d come from the same legacy comparison log row so
     they share the scored point; logP_2d carries the global-parameter prior of
     the paper's L_2D (eq:logP2d), i.e. the lnprob the chains report.  sigma_dDA
     propagates the uncertainty on the distance difference: our 68% half-width
@@ -285,7 +285,7 @@ def collect_chi2_vs_evidence():
     Read from chi2_evidence_table.json (written by
     scripts/megamaser/chi2_evidence_table.py):
     the total chi^2 is computed at the median / P20 globals with the latents
-    optimised, and lnP_2D is the value already stored in the --compare-reid
+    optimised, and lnP_2D is the value already stored in the legacy comparison
     logs, i.e. the same quantity as evidence_vs_distance.pdf.
     """
     import json

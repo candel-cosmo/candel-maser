@@ -242,7 +242,7 @@ def _sampled_global_names(target, samples):
             f"chain is missing sampled sites {missing}; cannot score the "
             "marginal posterior. Evidence is scored only in sampled site "
             "coordinates; check the chain metadata (uniform_da_prior, "
-            "mass_parameterization, fix_floors_pesce).")
+            "mass_parameterization).")
     return names
 
 
@@ -373,12 +373,6 @@ def main(argv=None):
         check_chain_dataset(attrs, dataset, args.chain)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    if _attr_bool(attrs, "fix_floors_pesce"):
-        raise SystemExit(
-            "the diagnostic for --fix-floors-pesce chains is not supported "
-            "yet "
-            "(the fixed floors are dropped from the sampled sites).")
-
     fsection(f"Single-galaxy marginal-objective diagnostic: {args.galaxy}")
     fprint(f"chain: {args.chain}")
     gblk = master_cfg["model"]["galaxies"][args.galaxy]
