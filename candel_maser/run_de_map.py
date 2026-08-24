@@ -1262,6 +1262,45 @@ def _objective_data_digest(model):
     return digest.hexdigest()[:16] if found else "none"
 
 
+def _update_prior_digest(digest, value):
+    """Hash a prior pytree by named fields, independent of set iteration."""
+    value_type = type(value)
+    gather_data = getattr(value_type, "gather_pytree_data_fields", None)
+    gather_aux = getattr(value_type, "gather_pytree_aux_fields", None)
+    if gather_data is not None:
+        class_name = f"{value_type.__module__}.{value_type.__qualname__}"
+        digest.update(f"object:{class_name}".encode())
+        fields = set(gather_data())
+        if gather_aux is not None:
+            fields.update(gather_aux())
+        fields.discard("_support")
+        for field in sorted(fields):
+            digest.update(f"field:{field}".encode())
+            _update_prior_digest(digest, value.__dict__.get(field))
+        return
+    if isinstance(value, dict):
+        digest.update(b"dict")
+        for key in sorted(value):
+            _update_prior_digest(digest, key)
+            _update_prior_digest(digest, value[key])
+        return
+    if isinstance(value, (list, tuple)):
+        digest.update(type(value).__name__.encode())
+        for item in value:
+            _update_prior_digest(digest, item)
+        return
+    if value is None:
+        digest.update(b"none")
+        return
+    value = np.ascontiguousarray(np.asarray(value))
+    if value.dtype.hasobject:
+        raise TypeError(
+            f"Cannot fingerprint prior value of type {value_type.__name__}.")
+    digest.update(value.dtype.str.encode())
+    digest.update(np.asarray(value.shape, dtype=np.int64).tobytes())
+    digest.update(value.tobytes())
+
+
 def _objective_prior_digest(model):
     """Digest effective prior families and parameters used by the objective."""
     priors = getattr(model, "priors", None)
@@ -1270,15 +1309,7 @@ def _objective_prior_digest(model):
     digest = hashlib.sha256()
     for name, prior in sorted(priors.items()):
         digest.update(name.encode())
-        digest.update(
-            f"{type(prior).__module__}.{type(prior).__qualname__}".encode())
-        leaves, tree = jax.tree_util.tree_flatten(prior)
-        digest.update(str(tree).encode())
-        for leaf in leaves:
-            value = np.ascontiguousarray(np.asarray(leaf))
-            digest.update(value.dtype.str.encode())
-            digest.update(np.asarray(value.shape, dtype=np.int64).tobytes())
-            digest.update(value.tobytes())
+        _update_prior_digest(digest, prior)
     return digest.hexdigest()[:16]
 
 
@@ -1843,9 +1874,38 @@ def _validate_de_checkpoint_policy(
         str(np.asarray(checkpoint["objective_policy"]).item())
         if "objective_policy" in checkpoint.files else None)
     if saved_objective != objective_policy:
+        prior_pattern = r":priors[0-9a-f]{16}(?=:phys)"
+        saved_without_prior, saved_count = re.subn(
+            prior_pattern, ":priors<digest>", saved_objective or "")
+        requested_without_prior, requested_count = re.subn(
+            prior_pattern, ":priors<digest>", objective_policy)
+        if (saved_count == requested_count == 1
+                and saved_without_prior == requested_without_prior):
+            fprint("Legacy checkpoint has a nondeterministic prior "
+                   "fingerprint and requires exact population revalidation.")
+            return True
         raise ValueError(
             f"Checkpoint objective policy is {saved_objective or 'legacy'!r}, "
             f"requested {objective_policy!r}; start a fresh run.")
+    return False
+
+
+def _revalidate_de_checkpoint_objective(checkpoint, exact_eval):
+    saved = np.asarray(checkpoint["fitness"])
+    current = np.asarray(exact_eval(
+        np.asarray(checkpoint["population"]),
+        desc="Checkpoint objective revalidation"))
+    if saved.shape != current.shape or not np.array_equal(saved, current):
+        finite = np.isfinite(saved) & np.isfinite(current)
+        max_delta = (float(np.max(np.abs(saved[finite] - current[finite])))
+                     if np.any(finite) else float("inf"))
+        raise ValueError(
+            "Checkpoint prior fingerprint mismatch is not serialization-only: "
+            "the exact saved-population fitness changed "
+            f"(max |delta|={max_delta:.6g}); start a fresh run.")
+    fprint("Accepted legacy checkpoint after exact saved-population "
+           "objective revalidation.")
+    return current
 
 
 def _screen_eval(batch_eval, x, desc, chunk=512):
@@ -2047,9 +2107,10 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
     distance_idx = names.index(distance_name)
     N_sobol = 2 ** log2_N
     ckpt = None
+    revalidate_resume_objective = False
     if resume_path is not None:
         ckpt = _load_de_checkpoint(resume_path, lo, hi, names, sizes)
-        _validate_de_checkpoint_policy(
+        revalidate_resume_objective = _validate_de_checkpoint_policy(
             ckpt, resume_path, objective_policy=objective_policy,
             seed_policy=seed_policy, optimizer_seed=seed)
     # seed_points arrive in full target.names order; drop the fixed columns.
@@ -2146,13 +2207,19 @@ def _run_de(target, opt_cfg, seed, n_dev=1, devices=(), checkpoint_path=None,
         fprint("Reference score reused the exact DE objective executable and "
                "was not inserted into the initial population.")
 
+    revalidated_fitness = None
+    if revalidate_resume_objective:
+        revalidated_fitness = _revalidate_de_checkpoint_objective(
+            ckpt, exact_eval)
+
     if resume_path is not None:
         key = np.asarray(ckpt["key"])
         gen_start = int(ckpt["generation_counter"])
         gens_without_improvement = int(ckpt["gens_without_improvement"])
         best_logp_so_far = float(ckpt["best_logp_so_far"])
         population = np.asarray(ckpt["population"])
-        fitness = np.asarray(ckpt["fitness"])
+        fitness = (revalidated_fitness if revalidated_fitness is not None
+                   else np.asarray(ckpt["fitness"]))
         best_solution = np.asarray(ckpt["best_solution"])
         best_fitness = np.asarray(ckpt["best_fitness"])
         initial_pop_size = int(

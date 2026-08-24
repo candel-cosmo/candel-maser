@@ -276,9 +276,11 @@ def _checkpoint_points(
     try:
         checkpoint = de._load_de_checkpoint(
             ckpt_path, lo, hi, names, sizes)
-        de._validate_de_checkpoint_policy(
-            checkpoint, ckpt_path, de._objective_policy(model),
-            optimizer_seed=seed)
+        if de._validate_de_checkpoint_policy(
+                checkpoint, ckpt_path, de._objective_policy(model),
+                optimizer_seed=seed):
+            raise ValueError(
+                "legacy prior fingerprint requires resume revalidation")
     except (KeyError, ValueError) as exc:
         if checkpoint is not None:
             checkpoint.close()
