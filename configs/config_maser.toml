@@ -243,7 +243,8 @@ use_quadratic_warp = false
 # the metric only changes how NUTS explores p(theta | latents), whereas the
 # transport changes that conditional itself, which is the Gibbs bottleneck.
 mcmc_transport_systemic_phi = true
-mcmc_target_accept_theta = 0.85
+# Inherit the global 0.99 target; the legacy 0.85 setting destabilises this
+# fixed metric as the conditional curvature changes across latent sweeps.
 mcmc_sample_n_inner = 60
 # Denser phi grids for NGC4258 (position errors ~3 uas -> narrow phi peaks).
 n_phi_hv_high = 20001
