@@ -72,6 +72,51 @@ QW_ROWS = BASE_ROWS[:6] + [
 ] + BASE_ROWS[6:]
 
 
+# NGC 4258 has a single spot table, so `fiducial` and `original_published`
+# are the same data; the clipped runs drop the spots our own iterative
+# rejection removes under the quadratic warp.
+NGC4258_RUNS = [
+    ("Quadratic", "original_published", "_qw"),
+    ("Quadratic + clipping", "clipped", "_qw"),
+    ("Quadratic + eccentricity", "fiducial", "_ecc_qw"),
+    ("Quadratic + eccentricity + clipping", "clipped", "_ecc_qw"),
+]
+# Labels here use the paper's unit macros, unlike the five-galaxy tables
+# above, so the emitted rows can be pasted into main.tex unedited.
+NGC4258_ROWS = [
+    ("D_A", r"$\DA$ (\Mpc)", "D_A (Mpc)"),
+    ("log_MBH", r"$\log(\MBH/\Msun)$", "log10(M_BH/Msun)"),
+    ("i0", r"$i_0$ (\degunit)", "i0 (deg)"),
+    ("di_dr", r"$\mathrm{d}i/\mathrm{d}r|_{r_\mathrm{ref}}$ (\degmas)",
+     "di/dr (deg/mas)"),
+    ("d2i_dr2",
+     r"$\mathrm{d}^2i/\mathrm{d}r^2|_{r_\mathrm{ref}}$ (\degmassq)",
+     "d2i/dr2 (deg/mas^2)"),
+    ("Omega0", r"$\Omega_0$ (\degunit)", "Omega0 (deg)"),
+    ("dOmega_dr",
+     r"$\mathrm{d}\Omega/\mathrm{d}r|_{r_\mathrm{ref}}$ (\degmas)",
+     "dOmega/dr (deg/mas)"),
+    ("d2Omega_dr2",
+     r"$\mathrm{d}^2\Omega/\mathrm{d}r^2|_{r_\mathrm{ref}}$ (\degmassq)",
+     "d2Omega/dr2 (deg/mas^2)"),
+    ("e", r"$e$", "e"),
+    ("omega0", r"$\omega_0$ (\degunit)", "omega0 (deg)"),
+    ("dperiapsis_dr",
+     r"$\mathrm{d}\omega/\mathrm{d}r|_{r_\mathrm{ref}^{\omega}}$ (\degmas)",
+     "domega/dr (deg/mas)"),
+    ("x0", r"$x_0$ (\muas)", "x0 (uas)"),
+    ("y0", r"$y_0$ (\muas)", "y0 (uas)"),
+    ("dv_sys", r"$\Delta V_\mathrm{sys}$ ($\kmsec$)", "Delta V_sys (km/s)"),
+    ("sigma_x_floor", r"$\sigma_x$ (\muas)", "sigma_x (uas)"),
+    ("sigma_y_floor", r"$\sigma_y$ (\muas)", "sigma_y (uas)"),
+    ("sigma_v_sys", r"$\sigma_{v,\mathrm{sys}}$ ($\kmsec$)",
+     "sigma_v_sys (km/s)"),
+    ("sigma_v_hv", r"$\sigma_{v,\mathrm{hv}}$ ($\kmsec$)",
+     "sigma_v_hv (km/s)"),
+    ("sigma_a_floor", r"$\sigma_a$ ($\kmsecyr$)", "sigma_a (km/s/yr)"),
+]
+
+
 def distance_to_redshift(dc, om=0.315, h=0.73):
     cosmo = FlatLambdaCDM(H0=100, Om0=om)
     z_grid = np.logspace(-8, np.log10(0.5), 1000)
@@ -106,18 +151,26 @@ def interval(x):
     return med, q84 - med, med - q16
 
 
-def decimals_for_uncertainty(err):
+def decimals_for_uncertainty(err, nsig=2):
+    """Decimal places so `err` carries `nsig` significant figures.
+
+    With nsig=1 an uncertainty whose leading digit is 1 keeps two figures,
+    the usual rule: rounding 0.013 to 0.01 would throw away 30 per cent.
+    """
     err = abs(float(err))
     if not math.isfinite(err) or err <= 0:
         return 2
-    return max(0, 1 - math.floor(math.log10(err)))
+    exponent = math.floor(math.log10(err))
+    if nsig == 1 and int(err / 10 ** exponent) == 1:
+        nsig = 2
+    return max(0, nsig - 1 - exponent)
 
 
-def fmt_interval(x, latex):
+def fmt_interval(x, latex, nsig=2):
     med, plus, minus = interval(x)
     ndp = max(
-        decimals_for_uncertainty(plus),
-        decimals_for_uncertainty(minus),
+        decimals_for_uncertainty(plus, nsig),
+        decimals_for_uncertainty(minus, nsig),
     )
     fmt = f"{{:.{ndp}f}}"
     s = f"{fmt.format(med)}^{{+{fmt.format(plus)}}}_{{-{fmt.format(minus)}}}"
@@ -186,6 +239,73 @@ def parameter_table(chains, qw, latex):
         *body,
         r"\end{table*}",
     ])
+
+
+def ngc4258_table(results_root, latex):
+    """Variant table for NGC 4258, one column per disc-model variant."""
+    cols = []
+    for label, dataset, variant in NGC4258_RUNS:
+        path = (Path(results_root).parent / dataset / "NGC4258"
+                / f"NGC4258_blackjax_mcmc_rphi{variant}_initconfig.hdf5")
+        if not path.exists():
+            print(f"# missing, column left blank: {path}")
+            cols.append((label, None, None))
+            continue
+        with h5py.File(path, "r") as f:
+            s = {k: np.asarray(v, dtype=float).ravel()
+                 for k, v in f["samples"].items()}
+            n_spots = int(f.attrs["n_spots"])
+        if "e_x" in s:
+            s["e"] = np.hypot(s["e_x"], s["e_y"])
+            s["omega0"] = np.degrees(np.arctan2(s["e_y"], s["e_x"])) % 360.0
+        cols.append((label, s, n_spots))
+
+    dash = "---" if latex else "-"
+    sep = " & " if latex else " | "
+    out = []
+    if latex:
+        out += [r"\begin{tabular}{l" + "c" * len(cols) + "}", r"\toprule",
+                "Parameter" + sep
+                + sep.join(c[0] for c in cols) + r" \\", r"\midrule"]
+    else:
+        out += ["| Parameter | " + " | ".join(c[0] for c in cols) + " |",
+                "|---|" + "|".join(["---"] * len(cols)) + "|"]
+
+    # One significant figure on the uncertainty, and a decimal count shared
+    # by every column of a row, so the columns line up and can be compared.
+    def fmt_row(key):
+        present = [c[1][key] for c in cols if c[1] is not None and key in c[1]]
+        ndp = max(max(decimals_for_uncertainty(e, nsig=1)
+                      for e in interval(x)[1:]) for x in present)
+        fmt = f"{{:.{ndp}f}}"
+        out = []
+        for c in cols:
+            if c[1] is None or key not in c[1]:
+                out.append(dash)
+                continue
+            med, plus, minus = interval(c[1][key])
+            s = (f"{fmt.format(med)}^{{+{fmt.format(plus)}}}"
+                 f"_{{-{fmt.format(minus)}}}")
+            out.append(f"${s}$" if latex else
+                       f"{fmt.format(med)} (+{fmt.format(plus)}/"
+                       f"-{fmt.format(minus)})")
+        return out
+
+    rows = [("Spots", [dash if c[2] is None else str(c[2]) for c in cols])]
+    for key, tex_label, md_label in NGC4258_ROWS:
+        if not any(c[1] is not None and key in c[1] for c in cols):
+            continue
+        rows.append((tex_label if latex else md_label, fmt_row(key)))
+
+    for label, vals in rows:
+        if latex:
+            out.append(label + sep + sep.join(vals) + r" \\")
+        else:
+            out.append("| " + label + " | " + " | ".join(vals) + " |")
+
+    if latex:
+        out += [r"\bottomrule", r"\end{tabular}"]
+    return "\n".join(out)
 
 
 def load_pesce_distances(path):
@@ -277,6 +397,8 @@ def build_tables(args):
         pieces.append(parameter_table(qw, True, latex))
     if args.table in ("all", "comparison"):
         pieces.append(comparison_table(fid, pesce, latex))
+    if args.table == "ngc4258":
+        pieces.append(ngc4258_table(results_root, latex))
     return "\n\n".join(pieces)
 
 
@@ -288,7 +410,7 @@ def main():
                         help="chain init suffix, e.g. config or reid")
     parser.add_argument("--table",
                         choices=("all", "fiducial", "quadratic",
-                                 "comparison"),
+                                 "comparison", "ngc4258"),
                         default="all")
     parser.add_argument("--format", choices=("markdown", "latex"),
                         default="markdown")

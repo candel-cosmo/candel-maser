@@ -45,9 +45,9 @@ GAL_LABEL = {
 }
 
 
-def chain_path(galaxy, dataset=DATASET):
+def chain_path(galaxy, dataset=DATASET, variant=""):
     return (ROOT / "results" / "Megamaser" / dataset / galaxy
-            / f"{galaxy}_blackjax_mcmc_rphi_initconfig.hdf5")
+            / f"{galaxy}_blackjax_mcmc_rphi{variant}_initconfig.hdf5")
 
 
 def fig_distance_redshift(out):
@@ -110,7 +110,7 @@ def fig_distance_redshift(out):
               f"-{dl:.1f}/+{dh:.1f} Mpc")
 
 
-def fig_corner(out, galaxy="NGC5765b", dataset="clipped"):
+def fig_corner(out, galaxy="NGC5765b", dataset="clipped", variant=""):
     import matplotlib.pyplot as plt
     import scienceplots  # noqa: F401
 
@@ -118,7 +118,7 @@ def fig_corner(out, galaxy="NGC5765b", dataset="clipped"):
 
     # The clump-2 floors exist only on the tables the MCP cut is not applied
     # to, so the corner comes from `clipped` (updated-ours), not `fiducial`.
-    path = chain_path(galaxy, dataset)
+    path = chain_path(galaxy, dataset, variant)
     with h5py.File(path, "r") as f:
         theta = [s for s in
                  str(dict(f.attrs).get("theta_sites", "")).split(",")
@@ -142,7 +142,8 @@ def fig_corner(out, galaxy="NGC5765b", dataset="clipped"):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("fig", choices=("distance_redshift", "corner", "both"),
+    ap.add_argument("fig", choices=("distance_redshift", "corner",
+                                    "corner_ngc4258_ecc", "both"),
                     default="both", nargs="?")
     ap.add_argument("--out-dir", default=OUTDIR)
     args = ap.parse_args(argv)
@@ -152,6 +153,11 @@ def main(argv=None):
                                            "distance_redshift.pdf"))
     if args.fig in ("corner", "both"):
         fig_corner(os.path.join(args.out_dir, "corner_NGC5765b.pdf"))
+    if args.fig == "corner_ngc4258_ecc":
+        # NGC 4258 has one spot table, so `fiducial` is also the published
+        # one; the eccentric variant adds e_x, e_y, and dperiapsis_dr.
+        fig_corner(os.path.join(args.out_dir, "corner_NGC4258_ecc.pdf"),
+                   galaxy="NGC4258", dataset="fiducial", variant="_ecc_qw")
 
 
 if __name__ == "__main__":

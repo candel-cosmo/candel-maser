@@ -35,6 +35,7 @@ ADD_ECC=false
 ADD_QW=false
 SINGLE_ERROR_FLOOR=false
 CLUMP2_ACCELERATION_FLOOR_ONLY=false
+DA2_PRIOR=false
 TEMP_OUTPUT=false
 TEMP_ROOT_OUTPUT="results_test/Megamaser"
 FIX_GLOBALS=false
@@ -152,6 +153,8 @@ Common options passed to run_maser.py:
   --clump2-acceleration-floor-only
                          NGC5765b only: sample a separate clump-2 acceleration
                          floor; position and velocity use the standard floors.
+  --da2-prior            Use p(D_A) proportional to D_A^2 over the configured
+                         D_A bounds instead of the default uniform prior.
 
 MCMC/joint quick overrides passed to the Python runner:
   --num-warmup N
@@ -340,6 +343,7 @@ chain_variant_suffix() {
             && "$SINGLE_ERROR_FLOOR" == true ]]; then
         parts+=("singlefloor")
     fi
+    [[ "$DA2_PRIOR" == true ]] && parts+=("da2")
     parts+=("init${init}")
     local IFS=_
     echo "_${parts[*]}"
@@ -435,6 +439,9 @@ while [[ $# -gt 0 ]]; do
         --clump2-acceleration-floor-only)
             CLUMP2_ACCELERATION_FLOOR_ONLY=true
             VARIANT_ARGS+=("$1"); shift ;;
+        --da2-prior)
+            DA2_PRIOR=true
+            MCMC_ARGS+=("$1"); shift ;;
         --resume|--fix-globals|--skip-base-model-seed)
             [[ "$1" == "--fix-globals" ]] && FIX_GLOBALS=true
             DE_ARGS+=("$1"); shift ;;
@@ -900,6 +907,7 @@ if [[ ${#RUN_ARGS[@]} -gt 0 ]]; then
             --single-error-floor) variant_tag="${variant_tag}_singlefloor" ;;
             --clump2-acceleration-floor-only)
                 variant_tag="${variant_tag}_accelfloor" ;;
+            --da2-prior)         variant_tag="${variant_tag}_da2" ;;
         esac
     done
 fi

@@ -114,7 +114,9 @@ def _apply_chain_attrs_to_config(cfg, galaxy, attrs):
         gblk["use_quadratic_warp"] = _attr_bool(attrs, "use_quadratic_warp")
     if "use_ecc" in attrs:
         gblk["use_ecc"] = _attr_bool(attrs, "use_ecc")
-    if _attr_bool(attrs, "uniform_da_prior"):
+    if "D_c_prior" in attrs:
+        cfg["model"]["D_c_prior"] = _attr_str(attrs, "D_c_prior")
+    elif _attr_bool(attrs, "uniform_da_prior"):
         cfg["model"]["D_c_prior"] = "uniform_D_A"
     if galaxy == "NGC5765b":
         if "error_floor_policy" in attrs:

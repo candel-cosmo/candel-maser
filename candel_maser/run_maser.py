@@ -994,6 +994,8 @@ def _variant_suffix(model, args, init_strategy):
             parts.append("accelfloor")
         elif not model.use_clump2_floors:
             parts.append("singlefloor")
+    if args.da2_prior:
+        parts.append("da2")
     # Always tag the resolved init strategy (median/config/reid) last, so runs
     # that differ only by initialisation stay apart and glob cleanly.
     parts.append(f"init{init_strategy}")
@@ -1105,6 +1107,10 @@ def main(argv=None):
                         choices=("eta", "log_mbh"), default=None,
                         help="Global mass coordinate for the sampler. "
                              "Default: config value, eta in config_maser.")
+    parser.add_argument(
+        "--da2-prior", action="store_true",
+        help="Use p(D_A) proportional to D_A^2 over the configured D_A "
+             "bounds instead of the default uniform D_A prior.")
     parser.add_argument(
         "--f64", action="store_true", default=_ENABLE_F64,
         help="Accepted for compatibility; MCMC always uses float64.")
@@ -1266,6 +1272,8 @@ def main(argv=None):
     if args.mass_parameterization is not None:
         config["model"]["galaxies"][args.galaxy][
             "mass_parameterization"] = args.mass_parameterization
+    if args.da2_prior:
+        config["model"]["D_c_prior"] = "volume_D_A"
     if args.single_error_floor:
         config["model"]["use_ngc5765b_clump2_floors"] = False
     elif args.clump2_acceleration_floor_only:
@@ -1395,7 +1403,7 @@ def main(argv=None):
         "r_parameterization": "log_r_ang_over_seed",
         "phi_parameterization": "explicit_wrapped",
         "mass_parameterization": model.mass_parameterization,
-        "D_c_prior": "uniform_D_A",
+        "D_c_prior": model.D_A_prior,
         "dataset": str(dataset),
         "use_quadratic_warp": bool(model.use_quadratic_warp),
         "use_ecc": bool(model.use_ecc),
@@ -1405,7 +1413,7 @@ def main(argv=None):
         "max_tree_depth": int(max_tree_depth),
         "phi_step_size": float(phi_step_size),
         "reflect_prob": float(reflect_prob),
-        "uniform_da_prior": True,
+        "uniform_da_prior": model.D_A_prior == "uniform_D_A",
         "compute_evidence": bool(args.compute_evidence),
         "save_latents": bool(args.save_latents),
         "precision": precision,
