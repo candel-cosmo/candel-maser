@@ -35,7 +35,7 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 fallback
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 from ..megamaser_data import MASER_DATASETS, maser_data_root  # noqa: E402
-from ..paths import CANDEL_ROOT, CONFIG_PATH  # noqa: E402
+from ..paths import CANDEL_ROOT, CONFIG_PATH, RESULTS_ROOT  # noqa: E402
 from ..maser_config import (add_dataset_arg, dataset_init_path,  # noqa: E402
                             resolve_dataset)
 
@@ -46,7 +46,7 @@ REID_CONTROL_TEMPLATE = REID_DIR / "fit_disk_control.inp"
 DEFAULT_CONFIG = Path(CONFIG_PATH)
 DEFAULT_DATA_NAME = "N4258_disk_data_MarkReid.final"
 # Dataset-agnostic: one Reid run directory tree for every dataset.
-DEFAULT_RESULTS = ROOT / "results/Megamaser/reid_mcmc"
+DEFAULT_RESULTS = Path(RESULTS_ROOT) / "results/Megamaser/reid_mcmc"
 DEFAULT_REID_INIT = SCRIPT_DIR / "reid_ngc4258_init.toml"
 MAX_CORNER_SAMPLES = 20000
 FORT7_WIDTHS = [

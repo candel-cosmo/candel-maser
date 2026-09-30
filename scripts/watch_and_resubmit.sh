@@ -17,7 +17,7 @@
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Core CANDEL checkout (data/, results/, local_config.toml); defaults
+# Core CANDEL checkout (_submit_lib.sh, local_config.toml); defaults
 # to a sibling clone of candel-cosmo/CANDEL.
 ROOT="${CANDEL_ROOT:-$(cd "$PKG_ROOT/../CANDEL" 2>/dev/null && pwd)}"
 [[ -f "$ROOT/scripts/_submit_lib.sh" ]] || {

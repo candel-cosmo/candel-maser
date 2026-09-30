@@ -26,9 +26,9 @@ import h5py
 import numpy as np
 from palette import PALETTE, PLANCK_C, RED, SELECTION, SHOES_C, TEAL
 
-from candel_maser.paths import CANDEL_ROOT  # noqa: E402
+from candel_maser.paths import RESULTS_ROOT  # noqa: E402
 
-ROOT = Path(CANDEL_ROOT)
+ROOT = Path(RESULTS_ROOT)
 DATASET = "clipped"
 RESULTS = ROOT / "results" / "Megamaser" / DATASET / "H0"
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"

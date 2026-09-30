@@ -41,7 +41,7 @@ P20_REPORTED_MEDIANS = {
 
 def _distance_posteriors():
     grids = {}
-    root = Path(joint.ROOT) / "data" / "Megamaser" / "external" / "Dom_data"
+    root = Path(joint.DATA_ROOT) / "data" / "Megamaser" / "external" / "Dom_data"
     for galaxy in P20_GALAXIES[:-1]:
         samples = np.loadtxt(root / f"D_archivedP20_{galaxy}.txt")
         cfg = joint.MASTER_CFG["model"]["galaxies"][galaxy]

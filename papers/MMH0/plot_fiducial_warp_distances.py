@@ -18,7 +18,7 @@ from scipy.stats import gaussian_kde
 from candel_maser.maser_config import check_chain_dataset
 
 
-from candel_maser.paths import CANDEL_ROOT  # noqa: E402
+from candel_maser.paths import CANDEL_ROOT, RESULTS_ROOT  # noqa: E402
 
 ROOT = Path(CANDEL_ROOT)
 DATASET = "fiducial"
@@ -68,7 +68,7 @@ def _interval(samples):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--results-root", default=ROOT / "results" / "Megamaser" / DATASET,
+        "--results-root", default=Path(RESULTS_ROOT) / "results" / "Megamaser" / DATASET,
         help="Directory containing the fiducial per-galaxy results.")
     parser.add_argument(
         "--output",

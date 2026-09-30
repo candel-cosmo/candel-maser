@@ -31,7 +31,8 @@ from numpyro.diagnostics import split_gelman_rubin
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from .run_reid_mcmc import (DEFAULT_CONFIG, PARAM_LABELS, ROOT,  # noqa: E402
+from ..paths import RESULTS_ROOT  # noqa: E402
+from .run_reid_mcmc import (DEFAULT_CONFIG, PARAM_LABELS,  # noqa: E402
                             add_dataset_arg, compute_reid_r_ref,
                             config_D_A_from_D_c, load_config_init,
                             load_galaxy_config, load_toml, parse_data_rows,
@@ -359,9 +360,9 @@ def main(argv=None):
     dataset = resolve_dataset(load_toml(args.config), args.dataset)
     data = args.data or reid_data_path(g, dataset)
     reid_chain = args.reid_chain or (
-        ROOT / f"results/Megamaser/reid_mcmc/{g}_try/global_chain.csv")
+        Path(RESULTS_ROOT) / f"results/Megamaser/reid_mcmc/{g}_try/global_chain.csv")
     candel = args.candel or (
-        ROOT / f"results/Megamaser/{dataset}/{g}/{g}_blackjax_mcmc_rphi{suffix}_initreid.hdf5")  # noqa: E501
+        Path(RESULTS_ROOT) / f"results/Megamaser/{dataset}/{g}/{g}_blackjax_mcmc_rphi{suffix}_initreid.hdf5")  # noqa: E501
     out_dir = args.out_dir or reid_chain.parent
 
     for pth in (data, reid_chain, candel):

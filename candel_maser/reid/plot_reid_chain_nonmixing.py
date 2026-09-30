@@ -60,16 +60,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scienceplots  # noqa: F401
 
-from ..paths import CANDEL_ROOT as _CANDEL_ROOT  # noqa: E402
+from ..paths import RESULTS_ROOT  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 from .run_gibbs_comparison import load_variant_chains  # noqa: E402
 from .run_reid_mcmc import (  # noqa: E402
     DEFAULT_CONFIG, add_dataset_arg, load_toml, resolve_dataset)
 
-ROOT = Path(_CANDEL_ROOT)
+ROOT = Path(RESULTS_ROOT)
 SWEEP = ROOT / "results/Megamaser/reid_mcmc/gibbs_sweep_20260705_014726"
-CANDEL_ROOT = ROOT / "results/Megamaser"
+MASER_RESULTS = ROOT / "results/Megamaser"
 
 # galaxies in paper order (sweep sub-directory stem, display label)
 GALAXIES = [("CGCG074-064", "CGCG 074-064"),
@@ -164,7 +164,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.candel_root is None:
-        args.candel_root = CANDEL_ROOT / resolve_dataset(
+        args.candel_root = MASER_RESULTS / resolve_dataset(
             load_toml(DEFAULT_CONFIG), args.dataset)
 
     label = dict(GALAXIES)

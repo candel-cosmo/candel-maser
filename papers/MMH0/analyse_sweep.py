@@ -38,9 +38,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from candel_maser.paths import CANDEL_ROOT, CONFIG_PATH
+from candel_maser.paths import CONFIG_PATH, RESULTS_ROOT
 
-ROOT = Path(CANDEL_ROOT)
 CONFIG = Path(CONFIG_PATH)
 # Spot-table dataset whose results are analysed; the runners namespace
 # [io].root_output by this name.
@@ -56,7 +55,7 @@ def root_output():
     with open(CONFIG, "rb") as fh:
         cfg = tomllib.load(fh)
     rel = cfg.get("io", {}).get("root_output", "results/Maser")
-    return ROOT / rel / DATASET
+    return Path(RESULTS_ROOT) / rel / DATASET
 
 
 def pct(x):

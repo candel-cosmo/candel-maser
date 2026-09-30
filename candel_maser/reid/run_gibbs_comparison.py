@@ -29,8 +29,7 @@ from pathlib import Path
 import numpy as np
 from scipy.stats import ks_2samp
 
-from ..paths import CANDEL_ROOT as _CANDEL_ROOT  # noqa: E402
-from ..paths import PACKAGE_ROOT  # noqa: E402
+from ..paths import PACKAGE_ROOT, RESULTS_ROOT  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 from . import prepare_reid_data  # noqa: E402
@@ -43,7 +42,6 @@ from .run_reid_mcmc import (  # noqa: E402
     reid_D_A, reid_H0, reid_control_dataset, reid_control_path, reid_data_path,
     resolve_dataset, set_control_numbers)
 
-ROOT = Path(_CANDEL_ROOT)
 RUN_SCRIPT = Path(PACKAGE_ROOT) / "scripts" / "reid" / "run_gibbs_chains.sh"
 
 # (label, use_gibbs, p_reflect, use_gcov, eta, plot color).  eta None
@@ -386,7 +384,7 @@ def main(argv=None):
     data = args.data or reid_data_path(g, dataset)
     suffix = "_qw" if args.variant == "init_qw" else ""
     candel = args.candel or (
-        ROOT / "results/Megamaser" / dataset
+        Path(RESULTS_ROOT) / "results/Megamaser" / dataset
         / f"{g}/{g}_blackjax_mcmc_rphi{suffix}_initreid.hdf5")
 
     if not Path(control_template).exists():

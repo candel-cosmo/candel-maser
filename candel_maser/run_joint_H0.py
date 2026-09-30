@@ -8,7 +8,7 @@ import time
 import numpy as np
 import tomli
 
-from candel_maser.paths import CANDEL_ROOT as ROOT  # noqa: E402
+from candel_maser.paths import DATA_ROOT  # noqa: E402
 from candel_maser.paths import CONFIG_PATH  # noqa: E402
 MCP_GALAXIES = ("CGCG074-064", "NGC5765b", "NGC6264",
                 "NGC6323", "UGC3789")
@@ -253,7 +253,7 @@ def _build_toy_items(galaxies, args, velocity_data=None):
         gcfg = MASTER_CFG["model"]["galaxies"][galaxy]
         if args.distance_source == "p20":
             default_path = os.path.join(
-                ROOT, "data", "Megamaser", "external", "Dom_data",
+                DATA_ROOT, "data", "Megamaser", "external", "Dom_data",
                 f"D_archivedP20_{galaxy}.txt")
         else:
             default_path = _toy_default_distance_file(galaxy, args)

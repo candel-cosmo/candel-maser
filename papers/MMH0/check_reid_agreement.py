@@ -27,7 +27,7 @@ import numpy as np  # noqa: E402
 import tomli_w  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-from candel_maser.paths import CANDEL_ROOT as ROOT  # noqa: E402
+from candel_maser.paths import RESULTS_ROOT  # noqa: E402
 
 import candel_maser.run_maser as rm  # noqa: E402
 
@@ -35,7 +35,7 @@ from candel_maser.maser_blackjax import _initial_phi  # noqa: E402
 from candel_maser.maser_config import (apply_dataset, check_chain_dataset)  # noqa: E402
 
 DATASET = "original_published"
-RESULTS = os.path.join(ROOT, "results", "Megamaser", DATASET)
+RESULTS = os.path.join(RESULTS_ROOT, "results", "Megamaser", DATASET)
 GALAXIES = ["CGCG074-064", "NGC5765b", "UGC3789", "NGC6264", "NGC6323"]
 
 apply_dataset(rm.master_cfg, DATASET)

@@ -34,11 +34,12 @@ from matplotlib.colors import PowerNorm  # noqa: E402
 from candel_maser.convergence.convergence_utils import (build_model)  # noqa: E402
 from candel_maser.maser_config import (apply_dataset, check_chain_dataset)  # noqa: E402
 
-from candel_maser.paths import CONFIG_PATH  # noqa: E402
+from candel_maser.paths import CANDEL_ROOT, CONFIG_PATH, RESULTS_ROOT  # noqa: E402
 GALAXY = "NGC5765b"
 DATASET = "original_published"
-HDF5 = (f"results/Megamaser/{DATASET}/{GALAXY}/"
-        f"{GALAXY}_blackjax_mcmc_rphi_initconfig.hdf5")
+HDF5 = os.path.join(
+    RESULTS_ROOT, f"results/Megamaser/{DATASET}/{GALAXY}/"
+    f"{GALAXY}_blackjax_mcmc_rphi_initconfig.hdf5")
 # Global keys whose posterior median pins the disc; eta drives the mass under
 # mass_parameterization == "eta".
 GLOBAL_KEYS = ("D_A", "D_c", "eta", "log_MBH", "i0", "di_dr", "Omega0",
@@ -219,7 +220,8 @@ def main():
     ap.add_argument("--n-phi", type=int, default=721)
     ap.add_argument("--n-r-final", type=int, default=1400)
     ap.add_argument("--n-phi-final", type=int, default=2800)
-    ap.add_argument("--out-dir", default="plots/megamaser")
+    ap.add_argument("--out-dir", default=os.path.join(
+        os.path.dirname(CANDEL_ROOT), "plots", "megamaser"))
     args = ap.parse_args()
 
     jax.config.update("jax_enable_x64", True)

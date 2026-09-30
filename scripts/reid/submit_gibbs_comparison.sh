@@ -21,7 +21,7 @@
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# Core CANDEL checkout (data/, results/, local_config.toml); defaults
+# Core CANDEL checkout (_submit_lib.sh, local_config.toml); defaults
 # to a sibling clone of candel-cosmo/CANDEL.
 ROOT="${CANDEL_ROOT:-$(cd "$PKG_ROOT/../CANDEL" 2>/dev/null && pwd)}"
 [[ -f "$ROOT/scripts/_submit_lib.sh" ]] || {
@@ -42,7 +42,7 @@ MEM_PER_CHAIN=7
 CONTROL_TEMPLATE=""
 DATA=""
 CANDEL_HDF5=""
-BASE_OUTPUT="$ROOT/results/Megamaser/reid_mcmc"
+BASE_OUTPUT="$CANDEL_ROOT_RESULTS/results/Megamaser/reid_mcmc"
 OUT_DIR=""
 WARMUP=1000000
 SAMPLES=1000000

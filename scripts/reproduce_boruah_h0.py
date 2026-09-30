@@ -85,7 +85,7 @@ VLOS_R = np.arange(0.1, 250.0 + 0.25, 0.5, dtype=np.float32)
 
 def _galaxy_items():
     """Per-galaxy distance likelihood, sky position, and CMB-frame velocity."""
-    root = os.path.join(joint.ROOT, "data", "Megamaser", "external",
+    root = os.path.join(joint.DATA_ROOT, "data", "Megamaser", "external",
                         "Dom_data")
     items = []
     for galaxy in GALAXIES:

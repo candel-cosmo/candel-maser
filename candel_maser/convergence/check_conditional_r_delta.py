@@ -27,11 +27,11 @@ from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
 
-from ..paths import CONFIG_PATH  # noqa: E402
-# Repo-root-relative, like CONFIG_PATH: run this from the CANDEL repo root.
+from ..paths import CONFIG_PATH, RESULTS_ROOT  # noqa: E402
+
 # Not dataset-namespaced -- convergence/ holds grid diagnostics and stays
 # directly under results/Megamaser/.
-OUT_DIR = "results/Megamaser/convergence"
+OUT_DIR = os.path.join(RESULTS_ROOT, "results/Megamaser/convergence")
 
 
 def phys_from_init(model, galaxy, galaxies_cfg):

@@ -24,10 +24,9 @@ import h5py
 import numpy as np
 from palette import BROWN, GOLD, RED, TEAL
 
-from candel_maser.paths import CANDEL_ROOT  # noqa: E402
+from candel_maser.paths import DATA_ROOT, RESULTS_ROOT  # noqa: E402
 
-ROOT = Path(CANDEL_ROOT)
-P20_TABLE = ROOT / "data" / "Megamaser" / "pesce2020_table1.csv"
+P20_TABLE = Path(DATA_ROOT) / "data" / "Megamaser" / "pesce2020_table1.csv"
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
 
 # Plotted in this order, so the legend reads baselines first.  Keys are the
@@ -51,7 +50,7 @@ SLOTS = {"CGCG074-064": (0, 0), "NGC5765b": (0, 1), "NGC6264": (0, 2),
 
 
 def chain_path(dataset, galaxy):
-    return (ROOT / "results" / "Megamaser" / dataset / galaxy
+    return (Path(RESULTS_ROOT) / "results" / "Megamaser" / dataset / galaxy
             / f"{galaxy}_blackjax_mcmc_rphi_initconfig.hdf5")
 
 

@@ -25,7 +25,7 @@ from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
 
-from ..paths import CONFIG_PATH  # noqa: E402
+from ..paths import CONFIG_PATH, RESULTS_ROOT  # noqa: E402
 DEFAULT_GALAXIES = ["UGC3789", "NGC6323"]
 TYPES = ("sys", "red", "blue")
 PHI_KEYS = ("n_phi_hv_high", "n_phi_hv_low", "n_phi_sys")
@@ -268,7 +268,8 @@ def main():
         help="RNG seed for the spot selection.")
     parser.add_argument(
         "--out", type=str,
-        default="results/Megamaser/convergence/r_ang_posteriors.png")
+        default=os.path.join(RESULTS_ROOT, "results/Megamaser/convergence/"
+                             "r_ang_posteriors.png"))
     add_dataset_arg(parser)
     args = parser.parse_args()
 

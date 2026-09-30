@@ -19,7 +19,7 @@ from candel_maser.megamaser_data import (load_megamaser_spots,
 from candel_maser.maser_config import (apply_dataset, check_init_block,
                                        dataset_init_path)
 
-from candel_maser.paths import CANDEL_ROOT, CONFIG_PATH
+from candel_maser.paths import CONFIG_PATH, DATA_ROOT
 
 # Spot counts of each dataset, from the tables themselves. The fiducial counts
 # match the per-galaxy provenance the MCP gave for their vetting (see the
@@ -104,7 +104,7 @@ def test_systemics_without_acceleration_are_retained():
     assert np.all(published["sigma_a"][missing] == 1.0)
 
     printed = np.loadtxt(os.path.join(
-        CANDEL_ROOT, "data", "Megamaser", "NGC5765b_Gao2016_table6_tex.dat"))
+        DATA_ROOT, "data", "Megamaser", "NGC5765b_Gao2016_table6_tex.dat"))
     printed = printed[(printed[:, 5] == 1.0) & (printed[:, 6] == 1.0)]
     by_velocity = {velocity: i for i, velocity in
                    enumerate(published["velocity"])}

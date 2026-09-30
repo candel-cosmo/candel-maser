@@ -18,7 +18,7 @@ from scipy.stats import gaussian_kde
 from candel_maser.maser_config import check_chain_dataset
 
 
-from candel_maser.paths import CANDEL_ROOT  # noqa: E402
+from candel_maser.paths import CANDEL_ROOT, DATA_ROOT, RESULTS_ROOT  # noqa: E402
 
 ROOT = Path(CANDEL_ROOT)
 from palette import BROWN, GOLD, RED, TEAL  # noqa: E402
@@ -51,7 +51,7 @@ LINEWIDTHS = {
     "unpruned": 1.4,
     "clipped": 1.4,
 }
-DOM_ROOT = ROOT / "data" / "Megamaser" / "external" / "Dom_data"
+DOM_ROOT = Path(DATA_ROOT) / "data" / "Megamaser" / "external" / "Dom_data"
 DOM_LABEL = "P20 posterior"
 DOM_COLOR = "#111111"
 
@@ -96,7 +96,7 @@ def _interval(samples):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--results-root", default=ROOT / "results" / "Megamaser",
+        "--results-root", default=Path(RESULTS_ROOT) / "results" / "Megamaser",
         help="Directory containing the four dataset result namespaces.")
     parser.add_argument(
         "--output",

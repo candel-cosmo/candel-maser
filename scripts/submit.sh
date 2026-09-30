@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Core CANDEL checkout (data/, results/, local_config.toml); defaults
+# Core CANDEL checkout (_submit_lib.sh, local_config.toml); defaults
 # to a sibling clone of candel-cosmo/CANDEL.
 ROOT="${CANDEL_ROOT:-$(cd "$PKG_ROOT/../CANDEL" 2>/dev/null && pwd)}"
 [[ -f "$ROOT/scripts/_submit_lib.sh" ]] || {
@@ -530,7 +530,7 @@ RUNNER_ENV_STR="/usr/bin/env"
 if [[ "$TEMP_OUTPUT" == true ]]; then
     RUNNER_ENV+=("CANDEL_MEGAMASER_ROOT_OUTPUT=$TEMP_ROOT_OUTPUT")
     RUNNER_ENV_STR+=" CANDEL_MEGAMASER_ROOT_OUTPUT=$TEMP_ROOT_OUTPUT"
-    echo "[submit] temporary output root: $ROOT/$TEMP_ROOT_OUTPUT/$DATASET"
+    echo "[submit] temporary output root: $CANDEL_ROOT_RESULTS/$TEMP_ROOT_OUTPUT/$DATASET"
 fi
 if [[ "$SAMPLER" != "mcmc" && "$SAMPLER" != "de" ]]; then
     echo "[ERROR] --sampler must be mcmc or de"; exit 1
@@ -799,7 +799,7 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
         [[ -z "$joint_root" ]] && joint_root="results/Megamaser"
         submit_args=(--queue "$QUEUE" --mem "$MEM"
                      --name "$job_name"
-                     --logdir "$ROOT/$joint_root/$DATASET/H0/logs")
+                     --logdir "$CANDEL_ROOT_RESULTS/$joint_root/$DATASET/H0/logs")
         if [[ "$joint_gpu" == true ]]; then
             submit_args=(--gpu "${submit_args[@]}")
         fi
@@ -857,7 +857,7 @@ maser_root_output="$(
 [[ "$TEMP_OUTPUT" == true ]] && maser_root_output="$TEMP_ROOT_OUTPUT"
 # run_maser.py/run_de_map.py namespace root_output by dataset, so mirror that
 # here or the chain and log paths below point at the wrong dataset.
-MASER_OUT="$ROOT/$maser_root_output/$DATASET"
+MASER_OUT="$CANDEL_ROOT_RESULTS/$maser_root_output/$DATASET"
 stamp="$(date '+%Y%m%d_%H%M%S')"
 
 if [[ "$EVIDENCE" == true ]]; then

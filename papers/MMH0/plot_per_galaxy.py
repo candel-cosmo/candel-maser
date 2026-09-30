@@ -31,9 +31,9 @@ import h5py
 import numpy as np
 from palette import PALETTE
 
-from candel_maser.paths import CANDEL_ROOT, CONFIG_PATH  # noqa: E402
+from candel_maser.paths import CONFIG_PATH, RESULTS_ROOT  # noqa: E402
 
-ROOT = Path(CANDEL_ROOT)
+ROOT = Path(RESULTS_ROOT)
 CONFIG = Path(CONFIG_PATH)
 DATASET = "clipped"
 RESULTS = ROOT / "results" / "Megamaser" / DATASET
