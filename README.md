@@ -37,7 +37,7 @@ pip install --no-deps -e ../candel-maser
 Data, results and the machine-local `local_config.toml` live in the CANDEL
 checkout. Python code finds it through the installed `candel`
 (`candel.util.CANDEL_ROOT`); shell scripts use `$CANDEL_ROOT`, defaulting to
-`../CANDEL`.
+`../candel`.
 
 ## Layout
 
