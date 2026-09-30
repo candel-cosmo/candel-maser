@@ -10,7 +10,7 @@ log p(d_i | r_i, globals), normalise each spot's curve by trapezoidal
 integration on r, and overlay the posteriors by spot class.
 
 Usage:
-    python scripts/megamaser/convergence/r_ang_posteriors.py \\
+    python -m candel_maser.convergence.r_ang_posteriors \\
         [--galaxies UGC3789 NGC6323] [--n-r 501] [--out PATH]
 """
 import argparse
@@ -20,12 +20,12 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-from convergence_utils import add_dataset_arg, build_model, load_master_config
+from .convergence_utils import add_dataset_arg, build_model, load_master_config
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
 
-CONFIG_PATH = "scripts/megamaser/config_maser.toml"
+from ..paths import CONFIG_PATH  # noqa: E402
 DEFAULT_GALAXIES = ["UGC3789", "NGC6323"]
 TYPES = ("sys", "red", "blue")
 PHI_KEYS = ("n_phi_hv_high", "n_phi_hv_low", "n_phi_sys")

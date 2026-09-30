@@ -36,7 +36,7 @@ R_phys_hi = 1.5
 # DE phi marginalisation.  The value-only, fixed-shape peak partition is the
 # all-galaxy GPU-validated production default.  "fixed-grid" remains available
 # as the legacy comparison/debug path. See the validation workflow in
-# scripts/megamaser/README.md.
+# packages/candel-maser/docs/README.md.
 phi_integration = "peak-partition"
 n_phi_partition_sys = 129  # nodes in each systemic half-plane
 n_phi_partition_hv = 65    # nodes in the red/blue half-plane
@@ -203,7 +203,7 @@ scale = 0.025
 # eccentricity is, and sampling it then funnels.  Diagnostic before trusting an
 # --add-ecc fit: compare the dperiapsis_dr posterior sd against this prior's
 # 207.85; at a ratio near 1 the fit is reporting the prior back, and the warp
-# should be fixed with a per-galaxy `dist = "delta"` override (see NGC6323).
+# should be fixed with a per-galaxy `dist = "delta"` override.
 [model.priors.dperiapsis_dr]
 dist = "uniform"
 low = -360.0
@@ -401,7 +401,7 @@ upper = 2000.0
 # reconstruction is listed here the joint model samples Vext directly in
 # Cartesian from this Gaussian; a reconstruction absent here falls back to the
 # uniform Vext_mag prior above.  The numbers are fit offline from each
-# reconstruction's own Vext posterior with scripts/megamaser/extract_vext_prior.py
+# reconstruction's own Vext posterior with packages/candel-maser/scripts/extract_vext_prior.py
 # (--files ... --name ...); the model does not read those posteriors at runtime.
 # ManticoreLocalCOLA: |Vext|=111+/-15 km/s, (l,b)=(310,-11) deg.
 [joint.priors.Vext_informative.ManticoreLocalCOLA]

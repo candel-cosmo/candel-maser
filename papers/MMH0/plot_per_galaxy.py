@@ -20,7 +20,7 @@
                       -> figs/corner_NGC5765b.pdf
 
 Run from the repo root with venv_candel:
-    python notebooks/paper_MMH0/plot_per_galaxy.py both
+    python packages/candel-maser/papers/MMH0/plot_per_galaxy.py both
 """
 import argparse
 import os
@@ -31,8 +31,10 @@ import h5py
 import numpy as np
 from palette import PALETTE
 
-ROOT = Path(__file__).resolve().parents[2]
-CONFIG = ROOT / "scripts" / "megamaser" / "config_maser.toml"
+from candel_maser.paths import CANDEL_ROOT, CONFIG_PATH  # noqa: E402
+
+ROOT = Path(CANDEL_ROOT)
+CONFIG = Path(CONFIG_PATH)
 DATASET = "clipped"
 RESULTS = ROOT / "results" / "Megamaser" / DATASET
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"

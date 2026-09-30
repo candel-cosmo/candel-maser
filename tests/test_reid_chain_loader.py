@@ -1,19 +1,13 @@
 """Regression tests for the Reid bridge and fort.7 chain parsing."""
 import math
-import os
-import sys
 
 import pytest
 
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REID_DIR = os.path.join(REPO_ROOT, "scripts", "megamaser", "check_reid")
-if REID_DIR not in sys.path:
-    sys.path.insert(0, REID_DIR)
-
-from run_reid_mcmc import (  # noqa: E402
-    FORT7_WIDTHS, config_D_A_from_D_c, load_chain, load_config_init, reid_H0,
-    shift_warp_pivots)
+from candel_maser.reid.run_reid_mcmc import (FORT7_WIDTHS,
+                                             config_D_A_from_D_c, load_chain,
+                                             load_config_init, reid_H0,
+                                             shift_warp_pivots)
 
 
 VALUES = [

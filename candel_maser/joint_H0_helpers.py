@@ -1,17 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Helpers for stage-2 toy joint-H0 inference from saved distance chains."""
 import hashlib
 import json
@@ -29,23 +17,26 @@ from candel.field.field_interp import (_get_grid_params,
                                        _trilinear_interp_field,
                                        apply_gaussian_smoothing,
                                        prepare_los_geometry)
-from candel.model.pv_utils import _R_ICRS_TO_GAL, _R_ICRS_TO_SUPERGAL
 from candel.model.utils import log_prob_integrand_sel
-from candel.pvdata.field_cache import (_field_cache_dir_from_config,
-                                       _field_cache_enabled_from_config,
-                                       _field_cache_portable_loader_kwargs,
-                                       _field_cache_product_path,
-                                       _field_cache_scope)
-from candel.pvdata.volume_density import _load_volume_data_for_H0
-from candel.util import SPEED_OF_LIGHT, fprint, load_config, radec_to_cartesian
+from candel.field.field_cache import (_field_cache_dir_from_config,
+                                      _field_cache_enabled_from_config,
+                                      _field_cache_portable_loader_kwargs,
+                                      _field_cache_product_path,
+                                      _field_cache_scope)
+from candel.field.volume_density import _load_volume_data_for_H0
+from candel.util import (R_ICRS_TO_GAL, R_ICRS_TO_SUPERGAL, SHARED_CONFIG_DIR,
+                         SPEED_OF_LIGHT, fprint, load_config,
+                         radec_to_cartesian)
+
+_R_ICRS_TO_GAL = jnp.asarray(R_ICRS_TO_GAL)
+_R_ICRS_TO_SUPERGAL = jnp.asarray(R_ICRS_TO_SUPERGAL)
 
 # -----------------------------------------------------------------------
 # Shared paths and galaxy data
 # -----------------------------------------------------------------------
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
-DEFAULT_FIELD_CONFIG = os.path.join(
-    os.path.dirname(__file__), "..", "runs", "configs", "config.toml")
+# Reconstruction and field-cache paths only, from the shared core fragment.
+DEFAULT_FIELD_CONFIG = os.path.join(SHARED_CONFIG_DIR, "config_paths.toml")
 FIELD_CACHE_PROJECT = "MMH0"
 
 
@@ -452,7 +443,7 @@ def _volume_log_Z_redshift(volume_data, H0, sigma_pec, velocity_beta, Vext,
 def main():
     raise SystemExit(
         "joint_H0_helpers.py is helper-only; use "
-        "scripts/megamaser/run_joint_H0.py or submit.sh --infer-H0."
+        "packages/candel-maser/candel_maser/run_joint_H0.py or submit.sh --infer-H0."
     )
 
 

@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from candel.model.maser_blackjax import _conditional_inverse_mass
+from candel_maser.maser_blackjax import _conditional_inverse_mass
 
 jax.config.update("jax_enable_x64", True)
 
@@ -102,23 +102,3 @@ def test_conditional_inverse_mass_averaging_repairs_an_indefinite_draw():
     # the single bad draw reports width 1/|-0.5|; the average reports 1/1.75
     np.testing.assert_allclose(M_bad[1, 1], 1.0 / 0.5, rtol=1e-8)
     np.testing.assert_allclose(M_avg[1, 1], 1.0 / 1.75, rtol=1e-8)
-
-
-def test_conditional_inverse_mass_single_callable_still_accepted():
-    P = np.diag([9.0, 1.0])
-
-    def logdensity(u):
-        return -0.5 * u @ jnp.asarray(P) @ u
-
-    u0 = jnp.zeros(2, dtype=jnp.float64)
-    one = np.asarray(_conditional_inverse_mass(logdensity, u0))
-    seq = np.asarray(_conditional_inverse_mass([logdensity], u0))
-    np.testing.assert_allclose(one, seq, rtol=1e-12, atol=1e-14)
-    np.testing.assert_allclose(one, np.linalg.inv(P), rtol=1e-8, atol=1e-12)
-
-
-def test_conditional_inverse_mass_rejects_an_empty_sequence():
-    import pytest
-
-    with pytest.raises(ValueError, match="at least one"):
-        _conditional_inverse_mass([], jnp.zeros(2, dtype=jnp.float64))

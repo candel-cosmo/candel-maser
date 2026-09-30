@@ -31,11 +31,11 @@ from numpyro.diagnostics import split_gelman_rubin
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from run_reid_mcmc import (DEFAULT_CONFIG, PARAM_LABELS, ROOT,  # noqa: E402
-                           add_dataset_arg, compute_reid_r_ref,
-                           config_D_A_from_D_c, load_config_init,
-                           load_galaxy_config, load_toml, parse_data_rows,
-                           reid_H0, reid_data_path, resolve_dataset)
+from .run_reid_mcmc import (DEFAULT_CONFIG, PARAM_LABELS, ROOT,  # noqa: E402
+                            add_dataset_arg, compute_reid_r_ref,
+                            config_D_A_from_D_c, load_config_init,
+                            load_galaxy_config, load_toml, parse_data_rows,
+                            reid_H0, reid_data_path, resolve_dataset)
 
 # Reid-convention name -> LaTeX label, for the params both samplers constrain.
 SHARED = [

@@ -15,17 +15,19 @@ import argparse
 import os
 import time
 
+import tomli
+
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-from convergence_utils import (add_dataset_arg, build_model, cast_floats,
-                               load_master_config, resolve_grid_for_galaxy)
+from .convergence_utils import (add_dataset_arg, build_model, cast_floats,
+                                load_master_config, resolve_grid_for_galaxy)
 from jax.scipy.special import logsumexp
 
 from candel.model.integration import trapz_log_weights
 
-CONFIG_PATH = "scripts/megamaser/config_maser.toml"
+from ..paths import CONFIG_PATH  # noqa: E402
 # Repo-root-relative, like CONFIG_PATH: run this from the CANDEL repo root.
 # Not dataset-namespaced -- convergence/ holds grid diagnostics and stays
 # directly under results/Megamaser/.

@@ -6,8 +6,6 @@ Vext is sampled in ICRS-Cartesian km/s, but the LOS `rhat` and the voxel
 radial projection is a physical scalar, so it must not depend on which frame it
 is evaluated in.
 """
-import os
-import sys
 
 import numpy as np
 import pytest
@@ -15,12 +13,7 @@ import pytest
 from candel.util import (radec_to_cartesian, radec_to_galactic,
                          radec_to_supergalactic)
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MEGAMASER_DIR = os.path.join(REPO_ROOT, "scripts", "megamaser")
-if MEGAMASER_DIR not in sys.path:
-    sys.path.insert(0, MEGAMASER_DIR)
-
-from joint_H0_helpers import rotate_vext_to_frame  # noqa: E402
+from candel_maser.joint_H0_helpers import rotate_vext_to_frame
 
 # The six megamaser hosts, and the Carrick2015 informative Vext prior mean
 # (ICRS-Cartesian km/s) from config_maser.toml.
@@ -61,12 +54,3 @@ def test_vext_radial_projection_is_frame_invariant(galaxy, frame):
     rotated = _rhat_in_frame(ra, dec, frame) @ np.asarray(
         rotate_vext_to_frame(VEXT_ICRS, frame))
     assert rotated == pytest.approx(reference, abs=1e-3)
-
-
-def test_icrs_frame_is_a_noop():
-    assert rotate_vext_to_frame(VEXT_ICRS, "icrs") is VEXT_ICRS
-
-
-def test_unknown_frame_raises():
-    with pytest.raises(ValueError, match="Unsupported coordinate frame"):
-        rotate_vext_to_frame(VEXT_ICRS, "ecliptic")

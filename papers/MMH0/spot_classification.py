@@ -1,17 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Position-velocity diagram of maser spots coloured by spectral class."""
 
 import matplotlib.pyplot as plt
@@ -61,7 +49,7 @@ def plot_spot_classification(galaxies, sort_by_count=True, style=("science",)):
     ----------
     galaxies : list of (str, dict)
         Display name and the spot-data dict from
-        ``candel.pvdata.megamaser_data.load_megamaser_spots``; needs keys
+        ``candel_maser.megamaser_data.load_megamaser_spots``; needs keys
         ``velocity``, ``x``, ``y`` (microarcsec), ``is_highvel``, ``is_blue``,
         and ``n_spots``.
     sort_by_count : bool

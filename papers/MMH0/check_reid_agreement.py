@@ -15,7 +15,6 @@ Usage:
 """
 import argparse
 import os
-import sys
 import tempfile
 
 # float64 so the comparison isolates model identity (Reid's fit_disk is f64);
@@ -28,17 +27,12 @@ import numpy as np  # noqa: E402
 import tomli_w  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-MEGA = os.path.join(ROOT, "scripts", "megamaser")
-for p in (MEGA, os.path.join(MEGA, "check_reid"),
-          os.path.join(MEGA, "check_reid", "reidlik_build")):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+from candel_maser.paths import CANDEL_ROOT as ROOT  # noqa: E402
 
-import run_maser as rm  # noqa: E402
+import candel_maser.run_maser as rm  # noqa: E402
 
-from candel.model.maser_blackjax import _initial_phi  # noqa: E402
-from maser_config import apply_dataset, check_chain_dataset  # noqa: E402
+from candel_maser.maser_blackjax import _initial_phi  # noqa: E402
+from candel_maser.maser_config import (apply_dataset, check_chain_dataset)  # noqa: E402
 
 DATASET = "original_published"
 RESULTS = os.path.join(ROOT, "results", "Megamaser", DATASET)

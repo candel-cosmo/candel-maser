@@ -3,7 +3,7 @@
 
 Run from the repository root with::
 
-    venv_candel/bin/python scripts/megamaser/reproduce_p20_h0.py
+    venv_candel/bin/python packages/candel-maser/scripts/reproduce_p20_h0.py
 """
 import os
 from pathlib import Path
@@ -12,7 +12,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import numpy as np  # noqa: E402
 
-import run_joint_H0 as joint  # noqa: E402
+import candel_maser.run_joint_H0 as joint  # noqa: E402
 
 
 C_KM_S = 299792.458

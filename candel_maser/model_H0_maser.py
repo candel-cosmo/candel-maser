@@ -1,17 +1,5 @@
 # Copyright (C) 2025 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Megamaser disk forward model for the BlackJAX megamaser samplers.
 
 Implements the warped Keplerian disk model from Pesce et al. (2020),
@@ -46,10 +34,10 @@ import numpy as _np
 from jax.scipy.special import logsumexp
 from numpyro.distributions import Delta, DoublyTruncatedPowerLaw, Uniform
 
-from ..util import fprint, fsection, get_nested
+from candel.util import fprint, fsection, get_nested
 from . import maser_physics as _maser_physics
-from .base_model import ModelBase
-from .integration import trapz_log_weights
+from candel.model.base_model import ModelBase
+from candel.model.integration import trapz_log_weights
 from .maser_physics import (LOG_2PI, PC_PER_MAS_MPC, R_EST_EPS, W_LOG_FLOOR,
                             centripetal_acceleration, gamma_minus_one,
                             gravitational_redshift_minus1, keplerian_speed,
@@ -58,7 +46,7 @@ from .maser_physics import (LOG_2PI, PC_PER_MAS_MPC, R_EST_EPS, W_LOG_FLOOR,
                             radius_from_los_velocity, velocity_rel_affine,
                             warp_geometry)
 from .optim1d import brent_1d
-from .utils import load_priors
+from candel.model.utils import load_priors
 
 
 def _compile_friendly_logsumexp(x, axis=-1):
@@ -2408,7 +2396,7 @@ class MaserDiskModel(ModelBase):
     def __call__(self):
         raise RuntimeError(
             "Megamaser NumPyro inference has been removed; use "
-            "scripts/megamaser/run_maser.py.")
+            "packages/candel-maser/candel_maser/run_maser.py.")
 
 
 # -----------------------------------------------------------------------

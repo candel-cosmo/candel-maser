@@ -12,19 +12,14 @@ spot data and the systemic Vmin/Vmax classification matter.
 """
 import argparse
 import os
-import sys
 
 import numpy as np
 import tomli
 
-from candel.pvdata.megamaser_data import load_megamaser_spots, maser_data_root
+from ..megamaser_data import load_megamaser_spots, maser_data_root
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.join(SCRIPT_DIR, "..", "config_maser.toml")
-
-if os.path.dirname(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, os.path.dirname(SCRIPT_DIR))
-from maser_config import add_dataset_arg, resolve_dataset  # noqa: E402
+from ..maser_config import add_dataset_arg, resolve_dataset
+from ..paths import CONFIG_PATH as CONFIG
 
 
 def systemic_window(velocity, is_highvel, is_blue):

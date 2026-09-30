@@ -38,8 +38,10 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
-CONFIG = ROOT / "scripts" / "megamaser" / "config_maser.toml"
+from candel_maser.paths import CANDEL_ROOT, CONFIG_PATH
+
+ROOT = Path(CANDEL_ROOT)
+CONFIG = Path(CONFIG_PATH)
 # Spot-table dataset whose results are analysed; the runners namespace
 # [io].root_output by this name.
 DATASET = "original_published"

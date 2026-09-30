@@ -29,21 +29,18 @@ CMB-frame systemic velocities.  The like-for-like target is therefore their
 
 Run from the repository root with::
 
-    venv_candel/bin/python scripts/megamaser/reproduce_boruah_h0.py
+    venv_candel/bin/python packages/candel-maser/scripts/reproduce_boruah_h0.py
 """
 import os
-import sys
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
 
 import numpy as np  # noqa: E402
-import run_joint_H0 as joint  # noqa: E402
-from joint_H0_helpers import DEFAULT_FIELD_CONFIG  # noqa: E402
-from joint_H0_helpers import _load_or_build_vlos_cache  # noqa: E402
+import candel_maser.run_joint_H0 as joint  # noqa: E402
+from candel_maser.joint_H0_helpers import DEFAULT_FIELD_CONFIG  # noqa: E402
+from candel_maser.joint_H0_helpers import (  # noqa: E402
+    _load_or_build_vlos_cache)
 
 from candel.cosmo.cosmography import Distance2Redshift  # noqa: E402
 from candel.util import SPEED_OF_LIGHT  # noqa: E402

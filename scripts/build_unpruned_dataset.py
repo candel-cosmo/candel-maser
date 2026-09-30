@@ -10,8 +10,7 @@ import csv
 import shutil
 from pathlib import Path
 
-from candel.pvdata.megamaser_data import (load_megamaser_spots,
-                                          maser_data_root)
+from candel_maser.megamaser_data import load_megamaser_spots, maser_data_root
 
 
 GALAXY_FILES = {

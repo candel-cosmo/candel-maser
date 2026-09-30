@@ -40,21 +40,21 @@ if jax.default_backend() != "gpu":
     # deserialisation.
     jax.config.update("jax_enable_compilation_cache", False)
 
+from ..paths import CANDEL_ROOT as _CANDEL_ROOT  # noqa: E402
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 MASER_DIR = SCRIPT_DIR.parent
-REPO_ROOT = MASER_DIR.parent.parent
-if str(MASER_DIR) not in sys.path:
-    sys.path.insert(0, str(MASER_DIR))
+CANDEL_ROOT = Path(_CANDEL_ROOT)
 
-import run_de_map as de  # noqa: E402
-from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
+from .. import run_de_map as de  # noqa: E402
+from ..maser_config import add_dataset_arg, apply_dataset  # noqa: E402
 
 try:  # noqa: E402
     from .convergence_utils import (cast_floats, cast_model_floats,
                                     dense_r_phi_reference_per_spot)
 except ImportError:  # direct script execution
-    from convergence_utils import (cast_floats, cast_model_floats,
-                                   dense_r_phi_reference_per_spot)
+    from .convergence_utils import (cast_floats, cast_model_floats,
+                                    dense_r_phi_reference_per_spot)
 
 
 SCHEMA_VERSION = 4
@@ -145,13 +145,13 @@ def _source_hash():
     ``REFERENCE_POLICY`` is bumped when the reference algorithm changes.
     """
     paths = (
-        REPO_ROOT / "candel/model/model_H0_maser.py",
+        MASER_DIR / "model_H0_maser.py",
         MASER_DIR / "run_de_map.py",
         SCRIPT_DIR / "convergence_utils.py",
     )
     digest = hashlib.sha256()
     for path in paths:
-        digest.update(str(path.relative_to(REPO_ROOT)).encode())
+        digest.update(str(path.relative_to(CANDEL_ROOT)).encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -525,7 +525,7 @@ def _git_metadata():
     def run(*args):
         try:
             result = subprocess.run(
-                args, cwd=MASER_DIR.parent.parent, capture_output=True,
+                args, cwd=CANDEL_ROOT, capture_output=True,
                 text=True, check=False)
         except OSError:
             return None

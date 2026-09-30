@@ -12,16 +12,12 @@ velocity (Vext included).
 """
 import argparse
 import os
-import sys
 import tempfile
 
 import numpy as np
 import tomli
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-CONFIG_PATH = os.path.join(_HERE, "config_maser.toml")
+from candel_maser.paths import CONFIG_PATH  # noqa: E402
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -31,11 +27,11 @@ _jax_config.update("jax_enable_x64", True)
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from h5py import File as H5File  # noqa: E402
-from joint_H0_helpers import (DEFAULT_FIELD_CONFIG,  # noqa: E402
-                              _interp_los_velocity,
-                              _load_or_build_vlos_cache,
-                              rotate_vext_to_frame)
-from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
+from candel_maser.joint_H0_helpers import (DEFAULT_FIELD_CONFIG,  # noqa: E402
+                                           _interp_los_velocity,
+                                           _load_or_build_vlos_cache,
+                                           rotate_vext_to_frame)
+from candel_maser.maser_config import (add_dataset_arg, apply_dataset)  # noqa: E402
 
 from candel.util import fprint, fsection, results_path  # noqa: E402
 

@@ -1,17 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Unified megamaser runner.
 
 The default sampler is the BlackJAX explicit-latent (r, phi) NUTS chain
@@ -34,10 +22,10 @@ import tomli_w
 from h5py import File as H5File
 from scipy.signal import correlate
 
-_LOCAL_CONFIG = os.path.join(
-    os.path.dirname(__file__), "../../local_config.toml")
+from candel_maser.paths import CONFIG_PATH, LOCAL_CONFIG_PATH  # noqa: E402
+
 try:
-    with open(_LOCAL_CONFIG, "rb") as f:
+    with open(LOCAL_CONFIG_PATH, "rb") as f:
         _lcfg = tomli.load(f)
 except OSError:
     _lcfg = {}
@@ -50,12 +38,7 @@ if needed:
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
-with open(_CONFIG_PATH, "rb") as f:
+with open(CONFIG_PATH, "rb") as f:
     master_cfg = tomli.load(f)
 
 
@@ -99,19 +82,18 @@ from jax import random  # noqa: E402
 if _F64_ENABLED_HERE:
     print(f"float64 enabled ({_F64_REASON})", flush=True)
 
-import candel.model.maser_physics as maser_physics  # noqa: E402
-from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
-from candel.model.maser_blackjax import init_from_prior_median  # noqa: E402
-from candel.model.maser_blackjax import (  # noqa: E402
-    _ngc5765b_reference_r_ang_bounds,
-    nudge_initial_params_inside_support, prepare_floor_init,
-    run_blackjax_mcmc)
-from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
-from candel.pvdata.megamaser_data import load_megamaser_spots  # noqa: E402
-from candel.pvdata.megamaser_data import maser_data_root  # noqa: E402
+import candel_maser.maser_physics as maser_physics  # noqa: E402
+from .maser_blackjax import MaserBlackJaxTarget  # noqa: E402
+from .maser_blackjax import init_from_prior_median  # noqa: E402
+from .maser_blackjax import (_ngc5765b_reference_r_ang_bounds,  # noqa: E402
+                             nudge_initial_params_inside_support,
+                             prepare_floor_init, run_blackjax_mcmc)
+from .model_H0_maser import MaserDiskModel  # noqa: E402
+from .megamaser_data import load_megamaser_spots  # noqa: E402
+from .megamaser_data import maser_data_root  # noqa: E402
 from candel.util import fprint, fsection, results_path  # noqa: E402
-from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
-                          check_init_block, variant_init_block)
+from .maser_config import (  # noqa: E402
+    add_dataset_arg, apply_dataset, check_init_block, variant_init_block)
 
 _REID_CLIGHT = 2.997925e5
 _LATENT_SUMMARY_SPOT_CHUNK = 8
@@ -266,11 +248,8 @@ def _clean_init(model, init_cfg):
 
 
 def _paper_init(target, galaxy, master):
-    helper_dir = os.path.join(os.path.dirname(__file__), "check_reid")
-    if helper_dir not in sys.path:
-        sys.path.insert(0, helper_dir)
-    from pesce_globals import candel_theta_from_point  # noqa: E402
-    from pesce_globals import paper_point
+    from .reid.pesce_globals import candel_theta_from_point  # noqa: E402
+    from .reid.pesce_globals import paper_point
 
     try:
         point, status = paper_point(galaxy, master)
@@ -812,7 +791,7 @@ def _D_A_from_point(model, point):
 
 def _required_inference(cfg, key):
     if key not in cfg:
-        raise KeyError(f"Missing [inference].{key} in {_CONFIG_PATH}")
+        raise KeyError(f"Missing [inference].{key} in {CONFIG_PATH}")
     return cfg[key]
 
 
@@ -834,14 +813,10 @@ def _reid_loglik_context(galaxy, n_spots, dataset=None, *, use_ecc=False,
     """
     if dataset is None:
         dataset = master_cfg["io"]["dataset"]
-    helper_dir = os.path.join(os.path.dirname(__file__), "check_reid")
-    for p in (helper_dir, os.path.join(helper_dir, "reidlik_build")):
-        if p not in sys.path:
-            sys.path.insert(0, p)
     try:
-        import prepare_reid_data
-        import reid_profile as rp
-        import run_reid_mcmc as rr
+        from .reid import prepare_reid_data
+        import candel_maser.reid.reid_profile as rp
+        import candel_maser.reid.run_reid_mcmc as rr
     except ImportError as exc:
         fprint(f"skipping Reid log-likelihood scatter: {exc}")
         return None
@@ -890,7 +865,7 @@ def _point_D_A(model, target, point):
 def _reid_neg_half_chi2(ctx, galaxy, point, r_ang, phi, D_A=None):
     """Reid fit_disk per-spot data-fit term -0.5*chi^2 at fixed (r_ang, phi).
 
-    CANDEL globals map to Reid's convention via check_reid/load_config_init
+    CANDEL globals map to Reid's convention via candel_maser/reid (load_config_init)
     (i0 -> 180 - i0, CMB velocity frame); phi is converted rad -> deg and
     r_ang stays in mas.  If ``D_A`` is supplied, Reid's ``H0`` is reset using
     the same integer ``Ez_int(n_v)`` lookup as ``calc_warped_model`` so Reid's
@@ -1033,10 +1008,7 @@ def main(argv=None):
     sampler, argv = _select_sampler(argv)
 
     if sampler == "de":
-        de_dir = os.path.dirname(os.path.abspath(__file__))
-        if de_dir not in sys.path:
-            sys.path.insert(0, de_dir)
-        import run_de_map
+        from . import run_de_map
         return run_de_map.main(_strip_sampler_arg(argv))
 
     argv = _strip_sampler_arg(argv)
@@ -1449,7 +1421,7 @@ def main(argv=None):
     corner_map = None
     if args.map_overlay:
         try:
-            from candel.model.maser_map import evaluate_at_globals
+            from .maser_map import evaluate_at_globals
             ip = (init_params[0] if isinstance(init_params, list)
                   else init_params)
             map_target = MaserBlackJaxTarget(

@@ -28,7 +28,7 @@
 # be used as a starting template.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 SOURCE="$ROOT/background_info/fit_disk_Reid_reflection/fit_disk_v24d_unblinded.f"
 
 CHAINS=1

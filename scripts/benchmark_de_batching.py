@@ -1,8 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Benchmark exact megamaser DE GPU tiling on fixed checkpoint candidates.
 
 The suite runs every configuration in a fresh child process so compiled JAX
@@ -46,8 +43,7 @@ def _spot_batch_label(value):
 
 
 def _parser():
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from maser_config import add_dataset_arg
+    from candel_maser.maser_config import add_dataset_arg
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("galaxy")
@@ -447,9 +443,8 @@ def _run_child(args):
     import jax.numpy as jnp
     import numpy as np
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import run_de_map as de
-    from maser_config import apply_dataset
+    import candel_maser.run_de_map as de
+    from candel_maser.maser_config import apply_dataset
 
     apply_dataset(de._MASTER_CFG, args.dataset)
 

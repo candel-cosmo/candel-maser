@@ -13,7 +13,7 @@
 # spot sets move the mean high-velocity radius by at most 4.3 per cent
 # (NGC6323), so the DE warp lever scales stay well calibrated.
 #
-# Merged into config_maser.toml by scripts/megamaser/maser_config.py.
+# Merged into config_maser.toml by packages/candel-maser/candel_maser/maser_config.py.
 # Keep r_ang arrays on a single line: submit.sh scrapes this file with awk.
 
 [model.galaxies.CGCG074-064]

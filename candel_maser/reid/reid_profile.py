@@ -26,7 +26,8 @@ from scipy.optimize import minimize
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "reidlik_build"))
 import reidlik  # noqa: E402
-import run_reid_mcmc as rr  # noqa: E402  (reuse data parsing + init loading)
+# Reuse run_reid_mcmc's data parsing and init loading.
+from candel_maser.reid import run_reid_mcmc as rr  # noqa: E402
 
 NUM_GLOBAL = 20
 MAXF = 401          # Reid max_masers
@@ -303,7 +304,7 @@ def result_dict(g, total, per_spot, params, r_ref):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--init", required=True,
-                    help="Reid [globals] or config-init TOML in check_reid/")
+                    help="Reid [globals] or config-init TOML in candel_maser/reid/")
     ap.add_argument("--variant", default="init", choices=["init", "init_qw"],
                     help="Init variant to select from --init when it is a "
                          "merged multi-galaxy TOML or a config fragment.")

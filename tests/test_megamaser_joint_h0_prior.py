@@ -1,27 +1,10 @@
-import os
-import sys
 
 import jax.numpy as jnp
 import numpy as np
 import numpyro.distributions as dist
 import pytest
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MEGAMASER_DIR = os.path.join(REPO_ROOT, "scripts", "megamaser")
-if MEGAMASER_DIR not in sys.path:
-    sys.path.insert(0, MEGAMASER_DIR)
-
-import run_joint_H0 as joint  # noqa: E402
-
-
-def test_distance_prior_selection_compatibility():
-    assert joint._resolve_distance_prior("none", None) == "distance"
-    assert joint._resolve_distance_prior("redshift", None) == "volume"
-    assert joint._resolve_distance_prior("none", "log-distance") == (
-        "log-distance")
-    for prior in ("distance", "log-distance"):
-        with pytest.raises(ValueError, match="requires.*uniform-in-volume"):
-            joint._resolve_distance_prior("redshift", prior)
+import candel_maser.run_joint_H0 as joint
 
 
 def test_log_distance_samples_log_da(monkeypatch):

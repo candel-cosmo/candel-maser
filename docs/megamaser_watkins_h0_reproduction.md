@@ -9,7 +9,7 @@ See "Version history" below; the two are not interchangeable.
 Watkins & Feldman (hereafter WF26) report `H0 = 68.8 +/- 2.6 km/s/Mpc` from the
 six P20 distances with Manticore (M25) peculiar velocities, against
 `71.5 +/- 2.6` with Carrick et al. (2015, C15), and conclude that the Hubble
-tension is a distance-ladder systematic. `scripts/megamaser/reproduce_watkins_h0.py`
+tension is a distance-ladder systematic. `packages/candel-maser/scripts/reproduce_watkins_h0.py`
 rebuilds their model and recovers every published value to `0.17 km/s/Mpc` or
 better.
 
@@ -144,7 +144,7 @@ of the sample, not of Manticore: the C15 six-galaxy fit at `sigma_v = 0` is
 
 ## Their Manticore velocities are correct; the point evaluation is not
 
-`scripts/megamaser/compare_watkins_velocities.py` evaluates both Manticore
+`packages/candel-maser/scripts/compare_watkins_velocities.py` evaluates both Manticore
 products of the `2MPP_MULTIBIN_N256_DES_V2` generation along the six maser
 lines of sight over all 80 realisations: the `forward_fields/PCS` BORG grid
 (`ManticoreLocalCOLA`) and the `SWIFT_velocity_fields` momentum products

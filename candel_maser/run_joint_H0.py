@@ -2,18 +2,14 @@
 """Toy joint megamaser H0 from saved single-galaxy D_A distance chains."""
 import argparse
 import os
-import sys
 import tempfile
 import time
 
 import numpy as np
 import tomli
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
+from candel_maser.paths import CANDEL_ROOT as ROOT  # noqa: E402
+from candel_maser.paths import CONFIG_PATH  # noqa: E402
 MCP_GALAXIES = ("CGCG074-064", "NGC5765b", "NGC6264",
                 "NGC6323", "UGC3789")
 PHI_INIT_JITTER_DEG = 5.0
@@ -39,24 +35,24 @@ import numpyro  # noqa: E402
 import numpyro.distributions as dist  # noqa: E402
 from h5py import File as H5File  # noqa: E402
 from jax import random  # noqa: E402
-from joint_H0_helpers import healpix_los_vectors  # noqa: E402
-from joint_H0_helpers import (DEFAULT_FIELD_CONFIG, _attach_icrs_rhat,  # noqa
-                              _attach_velocity_data, _interp_los_velocity,
-                              _load_or_build_vlos_cache,
-                              _load_volume_selection_data, _logmeanexp,
-                              _predict_cz_exact, _resolve_velocity_beta,
-                              _resolve_volume_subsample_fraction,
-                              _volume_log_Z_distance, _volume_log_Z_redshift,
-                              rotate_vext_to_frame)
-from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
-                          check_chain_dataset)
+from .joint_H0_helpers import healpix_los_vectors  # noqa: E402
+from .joint_H0_helpers import (DEFAULT_FIELD_CONFIG, _attach_icrs_rhat,  # noqa
+                               _attach_velocity_data, _interp_los_velocity,
+                               _load_or_build_vlos_cache,
+                               _load_volume_selection_data, _logmeanexp,
+                               _predict_cz_exact, _resolve_velocity_beta,
+                               _resolve_volume_subsample_fraction,
+                               _volume_log_Z_distance, _volume_log_Z_redshift,
+                               rotate_vext_to_frame)
+from .maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
+                           check_chain_dataset)
 from numpyro.diagnostics import print_summary  # noqa: E402
 from numpyro.infer import MCMC, NUTS, init_to_value  # noqa: E402
 
 from candel.cosmo.cosmography import (  # noqa: E402
     AngularDiameterDistance2Redshift, Distance2Redshift)
 from candel.model.integration import ln_simpson  # noqa: E402
-from candel.model.maser_blackjax import MaserBlackJaxResult  # noqa: E402
+from .maser_blackjax import MaserBlackJaxResult  # noqa: E402
 from candel.model.utils import Maxwell, log_prob_integrand_sel  # noqa: E402
 from candel.util import (fprint, fsection, radec_cartesian_to_galactic,  # noqa
                          results_path)
@@ -666,7 +662,7 @@ def _joint_vext_prior(reconstruction):
     """Informative Vext prior (Cartesian mean + cov, with a magnitude/direction
     summary) from [joint.priors.Vext_informative.<reconstruction>], or None to
     keep the uniform prior.  The numbers are produced offline by
-    scripts/megamaser/extract_vext_prior.py; no posterior files are read here.
+    packages/candel-maser/scripts/extract_vext_prior.py; no posterior files are read here.
     """
     cfg = (MASTER_CFG.get("joint", {}).get("priors", {})
            .get("Vext_informative", {}))

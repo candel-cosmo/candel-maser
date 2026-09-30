@@ -1,17 +1,5 @@
 # Copyright (C) 2025 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Megamaser spot data loading from AAS machine-readable tables."""
 import csv
 import re
@@ -20,9 +8,9 @@ from os.path import basename, dirname, isfile, join, normpath
 import numpy as np
 from scipy.cluster.vq import kmeans2
 
-from ..util import SPEED_OF_LIGHT, data_path, fprint
+from candel.util import SPEED_OF_LIGHT, data_path, fprint
 
-# Spot-table datasets. See docs/notes/megamaser_p20_clipping_audit.md for
+# Spot-table datasets. See packages/candel-maser/docs/megamaser_p20_clipping_audit.md for
 # provenance and the exact construction of the "unpruned" union.
 MASER_DATASETS = ("original_published", "fiducial", "unpruned", "clipped")
 DEFAULT_MASER_DATASET = "fiducial"

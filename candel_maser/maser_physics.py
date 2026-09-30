@@ -1,17 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Deterministic megamaser disk physics (Pesce et al. 2020).
 
 Pure JAX functions and unit-conversion constants only: no NumPyro, no
@@ -21,7 +9,7 @@ from model_H0_maser.py.
 import jax
 import jax.numpy as jnp
 
-from ..util import SPEED_OF_LIGHT
+from candel.util import SPEED_OF_LIGHT
 
 # -----------------------------------------------------------------------
 # Disk physics constants

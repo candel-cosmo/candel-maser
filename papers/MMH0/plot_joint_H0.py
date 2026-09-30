@@ -16,7 +16,7 @@ The fiducial run is the recession-velocity (redshift) selection, the
 Manticore-Local reconstruction, and a linear warp.
 
 Run from the repo root with venv_candel:
-    python notebooks/paper_MMH0/plot_joint_H0.py all
+    python packages/candel-maser/papers/MMH0/plot_joint_H0.py all
 """
 import argparse
 import os
@@ -26,7 +26,9 @@ import h5py
 import numpy as np
 from palette import PALETTE, PLANCK_C, RED, SELECTION, SHOES_C, TEAL
 
-ROOT = Path(__file__).resolve().parents[2]
+from candel_maser.paths import CANDEL_ROOT  # noqa: E402
+
+ROOT = Path(CANDEL_ROOT)
 DATASET = "clipped"
 RESULTS = ROOT / "results" / "Megamaser" / DATASET / "H0"
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"

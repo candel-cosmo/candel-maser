@@ -9,7 +9,7 @@ empirical testing and is not part of either the DE or MCMC model.
 Source material: MCP response PDF (`~/Downloads/response.pdf`, 2026-08-03) and
 `fiducial_tables.zip`, already unpacked into `data/Megamaser/fiducial/`.
 Dataset provenance is in `data/Megamaser/README`; the `--dataset` switch is
-documented in `scripts/megamaser/README.md`.
+documented in `packages/candel-maser/docs/README.md`.
 
 
 ## 1. What differs between the two datasets
@@ -49,7 +49,7 @@ Real, and **not mentioned in Dom's letter**:
 
 ### Unpruned table for clipping tests
 
-`scripts/megamaser/build_unpruned_dataset.py` constructs the `unpruned`
+`packages/candel-maser/scripts/build_unpruned_dataset.py` constructs the `unpruned`
 dataset as the spot-wise union of the two tables. For NGC5765b and NGC6264 it
 keeps every `original_published` row and its published astrometry, replaces
 acceleration fields from `fiducial` where the velocity matches, and retains
@@ -183,7 +183,7 @@ All four consumers build a per-spot array and then reduce it. One line each:
 | `_eval_phi_marginal` | 2033 | `result.at[idx].set(ps)` | set the mixed value |
 | `_eval_phi_fixed` | 2086 | `result.at[idx].set(ps)` | same |
 
-(all in `candel/model/model_H0_maser.py`)
+(all in `packages/candel-maser/candel_maser/model_H0_maser.py`)
 
 `logB` is a precomputed length-`n_spots` constant vector with two distinct
 values, 3-channel and 4-channel. Membership falls out free:
@@ -420,7 +420,7 @@ are what you get from clipping against an early poor fit and never re-testing.
 and used MCP code; `fit_disk` is that code, and DE optimises a marginal
 objective nobody had in 2019. (ii) Cost — Fortran, cheap enough to brute-force
 the grid; DE would be tens of GPU-hours. (iii) It is already wired up:
-`check_reid/prepare_reid_data.py` generates `*_loader_reid.inp` (generated,
+`candel_maser/reid/prepare_reid_data.py` generates `*_loader_reid.inp` (generated,
 untracked, dataset-namespaced), so the loop just rewrites the `.inp` with the
 active subset each round. `reid_chi2.loglik_context(galaxy, n_spots, dataset)`
 takes `n_spots`, so rebuild per round. Confirm a few endpoints with DE.
@@ -557,7 +557,7 @@ mixture likelihood was tested and removed; calibration of the clipping
 threshold and a reinstating variant remain proposals. The numbers above are reproducible from
 `load_megamaser_spots` on the datasets plus
 `candel.model.maser_map.evaluate_at_globals` at the DE MAP points in
-`scripts/megamaser/init_original_published.toml`.
+`packages/candel-maser/configs/init_original_published.toml`.
 
 Suggested order when picking this up:
 

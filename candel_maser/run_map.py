@@ -8,22 +8,18 @@ Fix the disk globals and optimise only the per-spot latents (r_ang, phi):
 Both cases run the same per-spot 2D optimisation, so chi^2 at the DE globals is
 directly comparable to chi^2 at Reid's globals.
 
-    python scripts/megamaser/run_map.py NGC6264
+    python -m candel_maser.run_map NGC6264
 """
 import argparse
 import json
 import os
-import sys
 import tempfile
 
 import tomli
 import tomli_w
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
+from candel_maser.paths import CONFIG_PATH as _CONFIG_PATH  # noqa: E402
 
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
 with open(_CONFIG_PATH, "rb") as f:
     _MASTER_CFG = tomli.load(f)
 
@@ -33,15 +29,14 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from candel.model.maser_blackjax import (  # noqa: E402
-    MaserBlackJaxTarget, prepare_floor_init)
-from candel.model.maser_map import evaluate_at_globals  # noqa: E402
-from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
-from candel.pvdata.megamaser_data import (  # noqa: E402
-    load_megamaser_spots, maser_data_root)
+from .maser_blackjax import (MaserBlackJaxTarget,  # noqa: E402
+                             prepare_floor_init)
+from .maser_map import evaluate_at_globals  # noqa: E402
+from .model_H0_maser import MaserDiskModel  # noqa: E402
+from .megamaser_data import load_megamaser_spots, maser_data_root  # noqa: E402
 from candel.util import get_nested, results_path  # noqa: E402
-from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
-                          check_init_block, variant_init_block)
+from .maser_config import (  # noqa: E402
+    add_dataset_arg, apply_dataset, check_init_block, variant_init_block)
 
 
 def _h_ref(model):
@@ -143,10 +138,7 @@ def _build_target(galaxy, gcfg, spot_batch, dataset,
 
 def _pesce_globals(target, galaxy):
     """Reid/Pesce published globals as a CANDEL theta dict (target.names)."""
-    helper = os.path.join(os.path.dirname(__file__), "check_reid")
-    if helper not in sys.path:
-        sys.path.insert(0, helper)
-    from pesce_globals import candel_theta_from_point, paper_point
+    from .reid.pesce_globals import candel_theta_from_point, paper_point
     point, status = paper_point(galaxy, _MASTER_CFG)
     if point is None:
         raise KeyError(f"no Pesce/Reid globals: {status}")
@@ -168,12 +160,9 @@ def _reid2013_globals(galaxy, target):
     """Reid+2013 published globals as a CANDEL theta dict (target.names)."""
     if galaxy not in _REID2013:
         raise KeyError(f"no Reid-2013 globals for {galaxy}")
-    helper = os.path.join(os.path.dirname(__file__), "check_reid")
-    if helper not in sys.path:
-        sys.path.insert(0, helper)
-    from pesce_globals import candel_theta_from_point, from_cmb
+    from .reid.pesce_globals import candel_theta_from_point, from_cmb
 
-    from candel.pvdata.megamaser_data import megamaser_velocity_frame
+    from .megamaser_data import megamaser_velocity_frame
     r = _REID2013[galaxy]
     r0 = r["r_ref"]
     gcfg = _MASTER_CFG["model"]["galaxies"][galaxy]
@@ -199,11 +188,8 @@ def _reid2013_globals(galaxy, target):
 def _reid_fortran_chi2(galaxy, model, results):
     """Add each result's chi^2 from the ORIGINAL Reid Fortran (reidlik), at the
     same globals + CANDEL-optimised latents.  Returns True if available."""
-    helper = os.path.join(os.path.dirname(__file__), "check_reid")
-    if helper not in sys.path:
-        sys.path.insert(0, helper)
     try:
-        from reid_chi2 import loglik_context, neg_half_chi2
+        from .reid.reid_chi2 import loglik_context, neg_half_chi2
     except Exception as exc:                           # noqa: BLE001
         print(f"Reid-Fortran cross-check unavailable: {exc}", flush=True)
         return False

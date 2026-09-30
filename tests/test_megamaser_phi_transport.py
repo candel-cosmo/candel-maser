@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import jax.numpy as jnp
 import numpy as np
 
-from candel.model.maser_blackjax import MaserBlackJaxTarget
+from candel_maser.maser_blackjax import MaserBlackJaxTarget
 
 
 def test_systemic_phi_transport_roundtrip_and_shift():
@@ -62,8 +62,8 @@ def test_systemic_phi_transport_coefficients_include_the_velocity_channel():
     for NGC4258 carries ~92 per cent of it) inflates kx, ky and loses the
     dv_sys leg entirely.
     """
-    from candel.model import maser_blackjax as mb
-    from candel.model import maser_physics
+    from candel_maser import maser_blackjax as mb
+    from candel_maser import maser_physics
 
     n = 3
     r_ang = jnp.array([3.9, 4.1, 5.0])

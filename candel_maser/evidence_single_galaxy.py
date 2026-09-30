@@ -1,8 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Single-galaxy megamaser marginal-objective diagnostic via ``harmonic``.
 
 The saved MCMC chain samples explicit per-spot ``(r_ang, phi)`` latents, while
@@ -38,10 +35,11 @@ import tomli
 import tomli_w
 from h5py import File as H5File
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_LOCAL_CONFIG = os.path.join(_HERE, "../../local_config.toml")
+from candel_maser.paths import CONFIG_PATH as _CONFIG_PATH  # noqa: E402
+from candel_maser.paths import LOCAL_CONFIG_PATH  # noqa: E402
+
 try:
-    with open(_LOCAL_CONFIG, "rb") as f:
+    with open(LOCAL_CONFIG_PATH, "rb") as f:
         _lcfg = tomli.load(f)
 except OSError:
     _lcfg = {}
@@ -62,24 +60,19 @@ _jax_config.update("jax_enable_x64", True)
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 
-_CONFIG_PATH = os.path.join(_HERE, "config_maser.toml")
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.join(_HERE, "convergence"))
-
-from convergence_utils import cast_model_floats  # noqa: E402
-from run_de_map import (_clean_init, _evaluate_one_at_a_time,  # noqa: E402
-                        _logp_2d_terms, _make_logp, _plan_de_batch)
+from .convergence.convergence_utils import cast_model_floats  # noqa: E402
+from .run_de_map import (  # noqa: E402
+    _clean_init, _evaluate_one_at_a_time, _logp_2d_terms, _make_logp,
+    _plan_de_batch)
 
 from candel.inference.evidence import harmonic_evidence  # noqa: E402
 from candel.inference.evidence import laplace_evidence  # noqa: E402
-from candel.model.maser_blackjax import MaserBlackJaxTarget  # noqa: E402
-from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
-from candel.pvdata.megamaser_data import (  # noqa: E402
-    load_megamaser_spots, maser_data_root)
+from .maser_blackjax import MaserBlackJaxTarget  # noqa: E402
+from .model_H0_maser import MaserDiskModel  # noqa: E402
+from .megamaser_data import load_megamaser_spots, maser_data_root  # noqa: E402
 from candel.util import fprint, fsection  # noqa: E402
-from maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
-                          check_chain_dataset)
+from .maser_config import (add_dataset_arg, apply_dataset,  # noqa: E402
+                           check_chain_dataset)
 
 # Quadrature grids scaled to build the float64 reference.
 _GRID_KEYS = (

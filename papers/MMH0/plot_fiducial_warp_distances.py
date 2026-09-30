@@ -6,7 +6,7 @@ MCP H0 galaxies and writes one five-panel PDF.
 
 Run from the repository root with::
 
-    venv_candel/bin/python scripts/megamaser/plot_fiducial_warp_distances.py
+    venv_candel/bin/python packages/candel-maser/papers/MMH0/plot_fiducial_warp_distances.py
 """
 import argparse
 from pathlib import Path
@@ -15,10 +15,12 @@ import h5py
 import numpy as np
 from scipy.stats import gaussian_kde
 
-from maser_config import check_chain_dataset
+from candel_maser.maser_config import check_chain_dataset
 
 
-ROOT = Path(__file__).resolve().parents[2]
+from candel_maser.paths import CANDEL_ROOT  # noqa: E402
+
+ROOT = Path(CANDEL_ROOT)
 DATASET = "fiducial"
 GALAXIES = (
     "CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789")

@@ -35,16 +35,16 @@ Run
     # optional: --sweep <dir>  --galaxies NGC6323 CGCG074-064
 """
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-from run_gibbs_comparison import load_variant_chains  # noqa: E402
+from ..paths import CANDEL_ROOT as _CANDEL_ROOT  # noqa: E402
 
-ROOT = HERE.parents[2]
+HERE = Path(__file__).resolve().parent
+from .run_gibbs_comparison import load_variant_chains  # noqa: E402
+
+ROOT = Path(_CANDEL_ROOT)
 SWEEP = ROOT / "results/Megamaser/reid_mcmc/gibbs_sweep_20260705_014726"
 
 # galaxies in paper order (sweep stem, display label)

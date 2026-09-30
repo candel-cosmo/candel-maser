@@ -2,9 +2,9 @@
 # Submit megamaser sampler or MAP jobs.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 ORIG_ARGS=("$@")
-# shellcheck source=../_submit_lib.sh
+# shellcheck source=../../../scripts/_submit_lib.sh
 source "$ROOT/scripts/_submit_lib.sh"
 
 QUEUE=""
@@ -308,7 +308,7 @@ config_value() {
             print line
             exit
         }
-    ' "$ROOT/scripts/megamaser/config_maser.toml" 2>/dev/null || true
+    ' "$ROOT/packages/candel-maser/configs/config_maser.toml" 2>/dev/null || true
 }
 
 queue_requests_gpu() {
@@ -516,7 +516,7 @@ if [[ ${#DATASETS[@]} -gt 1 ]]; then
             fi
         done
         echo "[submit] === dataset=$dataset ==="
-        "$ROOT/scripts/megamaser/submit.sh" "${child_args[@]}"
+        "$ROOT/packages/candel-maser/scripts/submit.sh" "${child_args[@]}"
     done
     exit 0
 fi
@@ -662,7 +662,7 @@ if [[ -n "$MAX_RETRIES" && -z "${CANDEL_WATCH_ACTIVE:-}" ]]; then
     [[ "$SAMPLER" != "mcmc" ]] && marker="MAP init"
     [[ "$ITERATIVE_CLIP" == true ]] && marker="iterative clipping complete"
     [[ "$JOINT_H0_MODE" == true ]] && marker="saved samples to"
-    watcher=("$ROOT/scripts/megamaser/watch_and_resubmit.sh"
+    watcher=("$ROOT/packages/candel-maser/scripts/watch_and_resubmit.sh"
              --marker "$marker" --max-retries "$MAX_RETRIES")
     [[ -n "$WATCH_POLL" ]] && watcher+=(--poll "$WATCH_POLL")
     if [[ "$JOINT_H0_MODE" == true || "$SAMPLER" == "mcmc" ]]; then
@@ -686,7 +686,7 @@ if [[ -n "$MAX_RETRIES" && -z "${CANDEL_WATCH_ACTIVE:-}" ]]; then
     echo "[submit] Watcher log: $logfile"
     launch_detached "$session" "$logfile" \
         env CANDEL_WATCH_ACTIVE=1 "${watcher[@]}" -- \
-        "$ROOT/scripts/megamaser/submit.sh" "${submit_args[@]}"
+        "$ROOT/packages/candel-maser/scripts/submit.sh" "${submit_args[@]}"
     exit $?
 fi
 
@@ -739,7 +739,7 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
     # One joint NUTS chain over all requested galaxies (shared H0).  The galaxy
     # list (comma-separated, or "all" = the five MCP H0 galaxies) is passed
     # straight to run_joint_H0.py, which is NOT expanded into per-galaxy jobs.
-    runner="$ROOT/scripts/megamaser/run_joint_H0.py"
+    runner="candel_maser.run_joint_H0"
     GALAXY="$(normalise_galaxy_csv "$GALAXY")"
     if [[ "$GALAXY" == *all,* || "$GALAXY" == *,all* ]]; then
         echo "[ERROR] --galaxy all cannot be combined with explicit galaxies"
@@ -760,7 +760,7 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
     [[ -n "$LOO_DROPPED" ]] && job_name="${job_name}_loo${LOO_DROPPED}"
     if [[ "$LOCAL" == true ]]; then
         echo "Running $joint_label ($GALAXY) locally"
-        cmd=("${RUNNER_ENV[@]}" JAX_PLATFORMS=cpu "$CANDEL_PYTHON" -u "$runner"
+        cmd=("${RUNNER_ENV[@]}" JAX_PLATFORMS=cpu "$CANDEL_PYTHON" -u -m "$runner"
              --galaxy "$GALAXY")
         [[ ${#RUN_ARGS[@]} -gt 0 ]] && cmd+=("${RUN_ARGS[@]}")
         if [[ "$DRY" == true ]]; then
@@ -783,9 +783,9 @@ if [[ "$JOINT_H0_MODE" == true ]]; then
         echo "Submitting $joint_label ($GALAXY) -> $CANDEL_CLUSTER:$QUEUE" \
              "($([[ "$joint_gpu" == true ]] && echo GPU || echo CPU))"
         if [[ "$joint_gpu" == true ]]; then
-            pycmd="$RUNNER_ENV_STR $CANDEL_PYTHON -u $runner --galaxy $GALAXY"
+            pycmd="$RUNNER_ENV_STR $CANDEL_PYTHON -u -m $runner --galaxy $GALAXY"
         else
-            pycmd="$RUNNER_ENV_STR JAX_PLATFORMS=cpu $CANDEL_PYTHON -u $runner --galaxy $GALAXY"
+            pycmd="$RUNNER_ENV_STR JAX_PLATFORMS=cpu $CANDEL_PYTHON -u -m $runner --galaxy $GALAXY"
         fi
         [[ ${#RUN_ARGS[@]} -gt 0 ]] && pycmd+=" ${RUN_ARGS[*]}"
         # Keep stage-2 outputs and scheduler logs below the dataset's H0 folder.
@@ -823,7 +823,7 @@ for gal in $GALAXY; do
 done
 GALAXY="${expanded_galaxies[*]}"
 
-RUNNER="$ROOT/scripts/megamaser/run_maser.py"
+RUNNER="candel_maser.run_maser"
 # Short tag so the same galaxy can run on both datasets concurrently without
 # colliding on job name or scheduler-log destination.
 ds_tag="${DATASET%%_*}"
@@ -846,7 +846,7 @@ maser_root_output="$(
         s == "[io]" && /^[[:space:]]*root_output[[:space:]]*=/ {
             gsub(/[" ]/, "", $2); print $2; exit
         }
-    ' "$ROOT/scripts/megamaser/config_maser.toml" 2>/dev/null || true
+    ' "$ROOT/packages/candel-maser/configs/config_maser.toml" 2>/dev/null || true
 )"
 [[ -z "$maser_root_output" ]] && maser_root_output="results/Megamaser"
 [[ "$TEMP_OUTPUT" == true ]] && maser_root_output="$TEMP_ROOT_OUTPUT"
@@ -856,7 +856,7 @@ MASER_OUT="$ROOT/$maser_root_output/$DATASET"
 stamp="$(date '+%Y%m%d_%H%M%S')"
 
 if [[ "$EVIDENCE" == true ]]; then
-    EVIDENCE_RUNNER="$ROOT/scripts/megamaser/evidence_single_galaxy.py"
+    EVIDENCE_RUNNER="candel_maser.evidence_single_galaxy"
     init_strategy="$(chain_init_strategy)"
     for gal in $GALAXY; do
         suffix="blackjax_mcmc_rphi$(chain_variant_suffix \
@@ -877,7 +877,7 @@ if [[ "$EVIDENCE" == true ]]; then
         [[ -n "$SPOT_BATCH" ]] && evidence_args+=(--spot-batch "$SPOT_BATCH")
         [[ ${#PASSTHRU_ARGS[@]} -gt 0 ]] && evidence_args+=("${PASSTHRU_ARGS[@]}")
         if [[ "$LOCAL" == true ]]; then
-            cmd=("${RUNNER_ENV[@]}" "$CANDEL_PYTHON" -u "$EVIDENCE_RUNNER" "$gal")
+            cmd=("${RUNNER_ENV[@]}" "$CANDEL_PYTHON" -u -m "$EVIDENCE_RUNNER" "$gal")
             cmd+=("${evidence_args[@]}")
             if [[ "$DRY" == true ]]; then
                 printf '[dry]'; printf ' %q' "${cmd[@]}"; printf '\n'
@@ -887,7 +887,7 @@ if [[ "$EVIDENCE" == true ]]; then
             continue
         fi
         echo "Submitting $gal evidence -> $CANDEL_CLUSTER:$QUEUE"
-        pycmd="$RUNNER_ENV_STR $CANDEL_PYTHON -u $EVIDENCE_RUNNER $gal"
+        pycmd="$RUNNER_ENV_STR $CANDEL_PYTHON -u -m $EVIDENCE_RUNNER $gal"
         pycmd+=" ${evidence_args[*]}"
         submit_args=(--gpu --queue "$QUEUE" --mem "$MEM"
                      --name "maser_evidence_${gal}" --logdir "$logdir")
@@ -929,10 +929,10 @@ for gal in $GALAXY; do
     if [[ "$LOCAL" == true ]]; then
         echo "Running $gal ($SAMPLER) locally"
         if [[ "$SAMPLER" == "mcmc" ]]; then
-            cmd=("${RUNNER_ENV[@]}" JAX_PLATFORMS=cpu "$CANDEL_PYTHON" -u "$RUNNER"
+            cmd=("${RUNNER_ENV[@]}" JAX_PLATFORMS=cpu "$CANDEL_PYTHON" -u -m "$RUNNER"
                  "$gal" --sampler "$SAMPLER")
         else
-            cmd=("${RUNNER_ENV[@]}" "$CANDEL_PYTHON" -u "$RUNNER"
+            cmd=("${RUNNER_ENV[@]}" "$CANDEL_PYTHON" -u -m "$RUNNER"
                  "$gal" --sampler "$SAMPLER")
         fi
         if [[ ${#RUN_ARGS[@]} -gt 0 ]]; then
@@ -960,9 +960,9 @@ for gal in $GALAXY; do
 
     echo "Submitting $gal ($SAMPLER) -> $CANDEL_CLUSTER:$QUEUE"
     if [[ "$SAMPLER" == "mcmc" ]]; then
-        pycmd="$RUNNER_ENV_STR JAX_PLATFORMS=cpu $CANDEL_PYTHON -u $RUNNER $gal --sampler $SAMPLER"
+        pycmd="$RUNNER_ENV_STR JAX_PLATFORMS=cpu $CANDEL_PYTHON -u -m $RUNNER $gal --sampler $SAMPLER"
     else
-        pycmd="$RUNNER_ENV_STR $CANDEL_PYTHON -u $RUNNER $gal --sampler $SAMPLER"
+        pycmd="$RUNNER_ENV_STR $CANDEL_PYTHON -u -m $RUNNER $gal --sampler $SAMPLER"
     fi
     if [[ ${#RUN_ARGS[@]} -gt 0 ]]; then
         pycmd+=" ${RUN_ARGS[*]}"

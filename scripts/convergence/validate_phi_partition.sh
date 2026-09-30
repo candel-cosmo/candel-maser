@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
             echo "Pass --clean-cache to delete cached references and exit."
             echo "Repeat --scheme-setting METHOD.KEY=VALUE for numerical"
             echo "experiments, e.g. peak-partition.n_phi_partition_sys=257."
-            echo "See scripts/megamaser/README.md for the full whitelist."
+            echo "See packages/candel-maser/docs/README.md for the full whitelist."
             exit 0
             ;;
         --local) LOCAL_RUN=true; shift ;;
@@ -40,14 +40,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-# shellcheck source=../../_submit_lib.sh
+ROOT_DIR="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+# shellcheck source=../../../../scripts/_submit_lib.sh
 source "$ROOT_DIR/scripts/_submit_lib.sh"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 if [[ "$CLEAN_CACHE" == true ]]; then
     exec "$CANDEL_PYTHON" -u \
-        "$ROOT_DIR/scripts/megamaser/convergence/validate_phi_partition.py" \
+        -m candel_maser.convergence.validate_phi_partition \
         "${PASS_ARGS[@]}"
 fi
 
@@ -59,7 +59,7 @@ if [[ "$LOCAL_RUN" == true ]]; then
     echo "Running phi-integration validation locally (production settings)"
     echo "Args: ${PASS_ARGS[*]:-(defaults)}"
     exec "$CANDEL_PYTHON" -u \
-        "$ROOT_DIR/scripts/megamaser/convergence/validate_phi_partition.py" \
+        -m candel_maser.convergence.validate_phi_partition \
         --allow-cpu "${PASS_ARGS[@]}"
 fi
 
@@ -74,5 +74,5 @@ echo "Submitting phi-integration validation -> $QUEUE ($GPUS GPU)"
 echo "Args: ${PASS_ARGS[*]:-(defaults)}"
 addqueue -q "$QUEUE" -s -m "$MEMORY" --gpus "$GPUS" \
     "$CANDEL_PYTHON" -u \
-    "$ROOT_DIR/scripts/megamaser/convergence/validate_phi_partition.py" \
+    -m candel_maser.convergence.validate_phi_partition \
     --n-devices "$GPUS" "${PASS_ARGS[@]}"

@@ -7,19 +7,12 @@ here (CANDEL and the original Reid Fortran, with the per-spot latents optimised
 at the fixed median / P20 globals).  Prints a table and writes
 chi2_evidence_table.json.
 
-    python scripts/megamaser/chi2_evidence_table.py
+    python packages/candel-maser/papers/MMH0/chi2_evidence_table.py
 """
 import json
 import os
-import sys
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-_HERE = os.path.dirname(__file__)
-_PAPER = os.path.abspath(os.path.join(_HERE, "..", "..", "notebooks",
-                                      "paper_MMH0"))
-for p in (_HERE, os.path.join(_HERE, "check_reid"),
-          os.path.join(_HERE, "check_reid", "reidlik_build"), _PAPER):
-    sys.path.insert(0, p)
 
 import jax  # noqa: E402
 
@@ -27,11 +20,11 @@ jax.config.update("jax_enable_x64", True)
 import analyse_sweep as asw  # noqa: E402
 import h5py  # noqa: E402
 import numpy as np  # noqa: E402
-import reid_chi2  # noqa: E402
-import run_map as rm  # noqa: E402
-from maser_config import apply_dataset  # noqa: E402
+from candel_maser.reid import reid_chi2  # noqa: E402
+import candel_maser.run_map as rm  # noqa: E402
+from candel_maser.maser_config import apply_dataset  # noqa: E402
 
-from candel.model.maser_map import evaluate_at_globals  # noqa: E402
+from candel_maser.maser_map import evaluate_at_globals  # noqa: E402
 
 GALAXIES = ["CGCG074-064", "NGC5765b", "UGC3789", "NGC6264", "NGC6323"]
 

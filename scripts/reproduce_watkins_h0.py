@@ -43,7 +43,7 @@ treat section 9 as a bound on the width, not as a reproduction.
 
 Run from the repository root with::
 
-    venv_candel/bin/python scripts/megamaser/reproduce_watkins_h0.py
+    venv_candel/bin/python packages/candel-maser/scripts/reproduce_watkins_h0.py
 """
 import numpy as np
 from scipy.stats import norm

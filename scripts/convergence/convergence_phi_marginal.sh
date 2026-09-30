@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --grad-rtol-r X         pass tolerance on rel. ∇r_ang diff"
             echo ""
             echo "Remaining args are passed to convergence_phi_marginal.py. For Python help:"
-            echo "  python scripts/megamaser/convergence/convergence_phi_marginal.py --help"
+            echo "  python -m candel_maser.convergence.convergence_phi_marginal --help"
             exit 0
             ;;
         -q) QUEUE="$2"; shift 2 ;;
@@ -47,8 +47,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-# shellcheck source=../../_submit_lib.sh
+ROOT_DIR="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+# shellcheck source=../../../../scripts/_submit_lib.sh
 source "$ROOT_DIR/scripts/_submit_lib.sh"
 if [[ "$CANDEL_CLUSTER" != "glamdring" ]]; then
     echo "[ERROR] This script is glamdring-only (machine=$CANDEL_CLUSTER)" >&2
@@ -70,5 +70,5 @@ echo "Submitting convergence_phi_marginal -> $QUEUE"
 echo "Galaxies/args: ${SCRIPT_ARGS[*]}"
 
 addqueue -q "$QUEUE" -s -m 16 --gpus 1 \
-    $PYTHON -u "$ROOT_DIR/scripts/megamaser/convergence/convergence_phi_marginal.py" \
+    $PYTHON -u -m candel_maser.convergence.convergence_phi_marginal \
     "${SCRIPT_ARGS[@]}"

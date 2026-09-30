@@ -29,21 +29,22 @@ from pathlib import Path
 import numpy as np
 from scipy.stats import ks_2samp
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-import prepare_reid_data  # noqa: E402
-from compare_reid_candel import (DEFAULT_CONFIG, SHARED,  # noqa: E402
-                                 candel_to_reid, overlay_distance_histogram,
-                                 overlay_three, per_chain_distance_histogram)
-from run_reid_mcmc import (GLOBAL_NAMES, add_dataset_arg,  # noqa: E402
-                           compute_reid_r_ref, load_chain, load_galaxy_config,
-                           load_toml, numpyro_summary_text, parse_data_rows,
-                           reid_D_A, reid_H0, reid_control_dataset,
-                           reid_control_path, reid_data_path, resolve_dataset,
-                           set_control_numbers)
+from ..paths import CANDEL_ROOT as _CANDEL_ROOT  # noqa: E402
+from ..paths import PACKAGE_ROOT  # noqa: E402
 
-ROOT = HERE.parents[2]
-RUN_SCRIPT = HERE / "run_gibbs_chains.sh"
+HERE = Path(__file__).resolve().parent
+from . import prepare_reid_data  # noqa: E402
+from .compare_reid_candel import (  # noqa: E402
+    DEFAULT_CONFIG, SHARED, candel_to_reid, overlay_distance_histogram,
+    overlay_three, per_chain_distance_histogram)
+from .run_reid_mcmc import (  # noqa: E402
+    GLOBAL_NAMES, add_dataset_arg, compute_reid_r_ref, load_chain,
+    load_galaxy_config, load_toml, numpyro_summary_text, parse_data_rows,
+    reid_D_A, reid_H0, reid_control_dataset, reid_control_path, reid_data_path,
+    resolve_dataset, set_control_numbers)
+
+ROOT = Path(_CANDEL_ROOT)
+RUN_SCRIPT = Path(PACKAGE_ROOT) / "scripts" / "reid" / "run_gibbs_chains.sh"
 
 # (label, use_gibbs, p_reflect, use_gcov, eta, plot color).  eta None
 # follows --eta/--no-eta; "F" pins the variant to Reid's true original
@@ -184,7 +185,8 @@ def pesce_reid_globals(galaxy, config, data, dataset):
     flip; PA carries over) and shifts the r=0 intercepts to reid_r_ref."""
     import math
 
-    import pesce_globals  # local: pulls jax/astropy, only for --init pesce
+    from . import (  # local: pulls jax/astropy, only for --init pesce
+        pesce_globals)
     master = {"model": {"galaxies": {galaxy: load_galaxy_config(
         config, galaxy, dataset=dataset)}}}
     point, missing = pesce_globals.paper_point(galaxy, master)

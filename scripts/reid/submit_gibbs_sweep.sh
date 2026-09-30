@@ -12,8 +12,8 @@
 #   submit_gibbs_sweep.sh -q berg --chains 12
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SUBMIT="$ROOT/scripts/megamaser/check_reid/submit_gibbs_comparison.sh"
+ROOT="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+SUBMIT="$ROOT/packages/candel-maser/scripts/reid/submit_gibbs_comparison.sh"
 BASE_OUTPUT="$ROOT/results/Megamaser/reid_mcmc"
 
 QUEUE=""
@@ -125,7 +125,7 @@ echo
 echo "Once all collect jobs finish, consolidate every combo's distance into"
 echo "one sweep-level table (median, asymmetric 1sigma, R-hat) with:"
 echo "  $ROOT/venv_candel/bin/python \\"
-echo "    $ROOT/scripts/megamaser/check_reid/aggregate_sweep_distances.py \\"
+echo "    -m candel_maser.reid.aggregate_sweep_distances \\"
 echo "    $sweep_dir"
 
 if [[ ${#failures[@]} -gt 0 ]]; then

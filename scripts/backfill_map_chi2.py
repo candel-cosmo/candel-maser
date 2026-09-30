@@ -4,27 +4,22 @@ globals for the MMH0 galaxies -- no MCMC needed.
 Same computation as run_maser's --map-overlay, run standalone so existing runs
 don't have to be resampled.  Prints a table and writes map_chi2_table.json.
 
-    python scripts/megamaser/backfill_map_chi2.py
+    python packages/candel-maser/scripts/backfill_map_chi2.py
 """
 import json
 import os
-import sys
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-_HERE = os.path.dirname(__file__)
-sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.join(_HERE, "check_reid"))
-sys.path.insert(0, os.path.join(_HERE, "check_reid", "reidlik_build"))
 
 import jax  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 import numpy as np  # noqa: E402
-import reid_chi2  # noqa: E402
-import run_map as rm  # noqa: E402
-from maser_config import apply_dataset  # noqa: E402
+from candel_maser.reid import reid_chi2  # noqa: E402
+import candel_maser.run_map as rm  # noqa: E402
+from candel_maser.maser_config import apply_dataset  # noqa: E402
 
-from candel.model.maser_map import evaluate_at_globals  # noqa: E402
+from candel_maser.maser_map import evaluate_at_globals  # noqa: E402
 
 GALAXIES = ["CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789"]
 

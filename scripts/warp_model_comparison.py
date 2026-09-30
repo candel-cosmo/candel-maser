@@ -17,25 +17,22 @@ Two things, per galaxy, printed as one table:
     Normal(0, 90 deg/mas^2) prior density.  The priors are independent across
     parameters, so the Savage--Dickey separability condition holds.
 
-    python scripts/megamaser/warp_model_comparison.py
+    python packages/candel-maser/scripts/warp_model_comparison.py
 """
 import os
-import sys
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-_HERE = os.path.dirname(__file__)
-sys.path.insert(0, _HERE)
 
 import jax  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 import h5py  # noqa: E402
 import numpy as np  # noqa: E402
-import run_map as rm  # noqa: E402
-from maser_config import apply_dataset  # noqa: E402
+import candel_maser.run_map as rm  # noqa: E402
+from candel_maser.maser_config import apply_dataset  # noqa: E402
 from scipy.stats import gaussian_kde, multivariate_normal, norm  # noqa: E402
 
-from candel.model.maser_map import evaluate_at_globals  # noqa: E402
+from candel_maser.maser_map import evaluate_at_globals  # noqa: E402
 
 GALAXIES = ["CGCG074-064", "NGC5765b", "UGC3789", "NGC6264", "NGC6323"]
 DATASET = "original_published"

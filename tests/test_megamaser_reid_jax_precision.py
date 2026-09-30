@@ -6,11 +6,11 @@ position, velocity, and acceleration in both circular and eccentric branches.
 Production CANDEL intentionally uses its own constants and the true eccentric
 orbital speed in the SR gamma.
 
-Run:  venv_candel/bin/python -m pytest tests/test_megamaser_reid_jax_precision.py
+Run:  venv_candel/bin/python -m pytest \
+    packages/candel-maser/tests/test_megamaser_reid_jax_precision.py
 """
 import math
 import os
-import sys
 import tempfile
 
 os.environ.setdefault(
@@ -24,13 +24,8 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REID_DIR = os.path.join(REPO_ROOT, "scripts", "megamaser", "check_reid")
-if REID_DIR not in sys.path:
-    sys.path.insert(0, REID_DIR)
-
 try:
-    import reid_profile as rp  # noqa: E402
+    from candel_maser.reid import reid_profile as rp
 except ModuleNotFoundError as exc:  # private f2py module is gitignored
     if exc.name == "reidlik":
         pytest.skip(
@@ -38,8 +33,8 @@ except ModuleNotFoundError as exc:  # private f2py module is gitignored
             allow_module_level=True)
     raise
 
-import candel.model.maser_physics as phys  # noqa: E402
-from run_reid_mcmc import reid_D_A, reid_H0  # noqa: E402
+import candel_maser.maser_physics as phys  # noqa: E402
+from candel_maser.reid.run_reid_mcmc import reid_D_A, reid_H0  # noqa: E402
 
 
 CLIGHT_REID = 2.997925e5

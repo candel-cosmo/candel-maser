@@ -1,17 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Spot accounting of our clipping against the MCP cut, both relative to the
 unpruned table, under the linear warp.
 
@@ -25,12 +13,12 @@ from collections import Counter, defaultdict
 
 import numpy as np
 
-from candel.pvdata.megamaser_data import (clipped_mask_path,
-                                          load_megamaser_spots,
-                                          maser_data_root)
+from candel_maser.megamaser_data import (clipped_mask_path,
+                                         load_megamaser_spots,
+                                         maser_data_root)
 from candel.util import data_path
 
-# Observed systemic velocities, from scripts/megamaser/config_maser.toml.
+# Observed systemic velocities, from configs/config_maser.toml.
 V_SYS_OBS = {"CGCG074-064": 7175, "NGC5765b": 8465, "UGC3789": 3245,
              "NGC6264": 10145, "NGC6323": 7662}
 

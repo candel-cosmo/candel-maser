@@ -20,7 +20,7 @@ occupies one COLUMN and its two sampler variants are stacked vertically:
 The two panels in a column share their distance axis, so the change in
 inter-chain agreement is read directly.  Each galaxy's twelve chains share ONE
 starting point and differ only in their random seed, so any inter-chain spread
-is the sampler alone (see ``docs/notes/reid_fit_disk_modifications.md``).
+is the sampler alone (see ``packages/candel-maser/docs/reid_fit_disk_modifications.md``).
 
 Curves in every panel
 ---------------------
@@ -53,7 +53,6 @@ Run
     # optional: --sweep <dir>  --dataset <name>  --candel-root <dir>
 """
 import argparse
-import sys
 from pathlib import Path
 
 import h5py
@@ -61,13 +60,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scienceplots  # noqa: F401
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-from run_gibbs_comparison import load_variant_chains  # noqa: E402
-from run_reid_mcmc import (DEFAULT_CONFIG, add_dataset_arg,  # noqa: E402
-                           load_toml, resolve_dataset)
+from ..paths import CANDEL_ROOT as _CANDEL_ROOT  # noqa: E402
 
-ROOT = HERE.parents[2]
+HERE = Path(__file__).resolve().parent
+from .run_gibbs_comparison import load_variant_chains  # noqa: E402
+from .run_reid_mcmc import (  # noqa: E402
+    DEFAULT_CONFIG, add_dataset_arg, load_toml, resolve_dataset)
+
+ROOT = Path(_CANDEL_ROOT)
 SWEEP = ROOT / "results/Megamaser/reid_mcmc/gibbs_sweep_20260705_014726"
 CANDEL_ROOT = ROOT / "results/Megamaser"
 

@@ -19,19 +19,19 @@ on the full-2π reference, split into:
     cross-spot coupling is zero, one reverse-mode pass).
 
 Usage:
-    python scripts/megamaser/convergence_phi_marginal.py [--galaxies ...]
+    python -m candel_maser.convergence.convergence_phi_marginal [--galaxies ...]
 """
 import argparse
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from convergence_utils import (add_dataset_arg, bruteforce_ll_fixed_r,
-                               build_model, cast_floats, ensure_grad_sample,
-                               extend_grad_params, grad_diff_report,
-                               grad_fixed_r_production, grad_fixed_r_reference,
-                               load_master_config, resolve_grid_for_galaxy,
-                               vector_diff_report)
+from .convergence_utils import (add_dataset_arg, bruteforce_ll_fixed_r,
+                                build_model, cast_floats, ensure_grad_sample,
+                                extend_grad_params, grad_diff_report,
+                                grad_fixed_r_production,
+                                grad_fixed_r_reference, load_master_config,
+                                resolve_grid_for_galaxy, vector_diff_report)
 
 
 def _phys_from_init(model, galaxies_cfg, galaxy):
@@ -42,7 +42,7 @@ def _phys_from_init(model, galaxies_cfg, galaxy):
     return model.phys_from_sample(sample)
 
 
-CONFIG_PATH = "scripts/megamaser/config_maser.toml"
+from ..paths import CONFIG_PATH  # noqa: E402
 ALL_GALAXIES = ["CGCG074-064", "NGC5765b", "NGC6264", "NGC6323",
                 "UGC3789", "NGC4258"]
 

@@ -12,12 +12,11 @@ Two modes:
   final (--spots i j k): clean three-panel figure (PNG + PDF) for the paper.
 
 Run from the CANDEL repo root with the project venv:
-    venv_candel/bin/python scripts/megamaser/plot_rphi_bimodality.py \
+    venv_candel/bin/python packages/candel-maser/papers/MMH0/plot_rphi_bimodality.py \
         [--spots ...]
 """
 import argparse
 import os
-import sys
 import tempfile
 
 os.environ.setdefault(
@@ -32,12 +31,10 @@ import scienceplots  # noqa: E402,F401  (registers the "science" style)
 import tomli  # noqa: E402
 from matplotlib.colors import PowerNorm  # noqa: E402
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "convergence"))
-from convergence_utils import build_model  # noqa: E402
-from maser_config import apply_dataset, check_chain_dataset  # noqa: E402
+from candel_maser.convergence.convergence_utils import (build_model)  # noqa: E402
+from candel_maser.maser_config import (apply_dataset, check_chain_dataset)  # noqa: E402
 
-CONFIG_PATH = "scripts/megamaser/config_maser.toml"
+from candel_maser.paths import CONFIG_PATH  # noqa: E402
 GALAXY = "NGC5765b"
 DATASET = "original_published"
 HDF5 = (f"results/Megamaser/{DATASET}/{GALAXY}/"

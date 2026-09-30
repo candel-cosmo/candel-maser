@@ -30,7 +30,7 @@ pointing at the directory of `mcmc_*.hdf5` momentum products, with `ngrid` and
 
 Run from the repository root with::
 
-    venv_candel/bin/python scripts/megamaser/compare_watkins_velocities.py
+    venv_candel/bin/python packages/candel-maser/scripts/compare_watkins_velocities.py
 """
 import os
 import sys
@@ -38,13 +38,11 @@ import tempfile
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
 
 import numpy as np  # noqa: E402
-from joint_H0_helpers import DEFAULT_FIELD_CONFIG  # noqa: E402
-from joint_H0_helpers import interpolate_los_velocity  # noqa: E402
+from candel_maser.joint_H0_helpers import DEFAULT_FIELD_CONFIG  # noqa: E402
+from candel_maser.joint_H0_helpers import (  # noqa: E402
+    interpolate_los_velocity)
 
 from candel.field import name2field_loader  # noqa: E402
 from candel.field.loader import available_mcmc_field_indices  # noqa: E402

@@ -1,17 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Brute-force reference kernels for maser disk quadrature diagnostics.
 
 The retained convergence checks compare the production fixed-``r_ang`` phi
@@ -20,8 +8,6 @@ axis so the intermediate fits on a 12 GB GPU.
 """
 
 from functools import partial
-import os
-import sys
 
 import jax
 import jax.numpy as jnp
@@ -32,12 +18,8 @@ from jax.scipy.special import logsumexp
 from candel.model.integration import trapz_log_weights
 from candel.util import get_nested
 
-MASER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if MASER_DIR not in sys.path:
-    sys.path.insert(0, MASER_DIR)
-
-from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
-from candel.model.maser_blackjax import prepare_floor_init  # noqa: E402
+from ..maser_config import add_dataset_arg, apply_dataset  # noqa: E402,F401
+from ..maser_blackjax import prepare_floor_init  # noqa: E402
 
 
 def load_master_config(path, dataset=None):
@@ -266,7 +248,7 @@ def bruteforce_ll_fixed_r(model, phys_args, phys_kw, r_ang, ref_cfg):
 
 
 # -----------------------------------------------------------------------
-# Test-harness helpers (used by the sweep scripts in scripts/megamaser/).
+# Test-harness helpers (used by the convergence sweep scripts).
 # They build a MaserDiskModel with per-call grid overrides so the sweep
 # can vary phi/r grid sizes while holding all other config constant.
 # -----------------------------------------------------------------------
@@ -287,8 +269,7 @@ def build_model(galaxy, master_cfg, dtype=None, **overrides):
 
     import tomli_w
 
-    from candel.pvdata.megamaser_data import (load_megamaser_spots,
-                                              maser_data_root)
+    from ..megamaser_data import load_megamaser_spots, maser_data_root
 
     cfg = {k: (v.copy() if isinstance(v, dict) else v)
            for k, v in master_cfg.items()}
@@ -322,7 +303,7 @@ def build_model(galaxy, master_cfg, dtype=None, **overrides):
         mode="wb", suffix=".toml", delete=False)
     tomli_w.dump(cfg, tmp)
     tmp.close()
-    from candel.model.model_H0_maser import MaserDiskModel
+    from ..model_H0_maser import MaserDiskModel
     model = MaserDiskModel(tmp.name, data)
     os.unlink(tmp.name)
     if dtype is not None:

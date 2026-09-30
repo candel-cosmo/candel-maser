@@ -6,21 +6,21 @@ of the five MCP H0 galaxies and writes one five-panel PDF.
 
 Run from the repository root with::
 
-    venv_candel/bin/python scripts/megamaser/plot_dataset_distances.py
+    venv_candel/bin/python packages/candel-maser/papers/MMH0/plot_dataset_distances.py
 """
 import argparse
-import sys
 from pathlib import Path
 
 import h5py
 import numpy as np
 from scipy.stats import gaussian_kde
 
-from maser_config import check_chain_dataset
+from candel_maser.maser_config import check_chain_dataset
 
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "notebooks" / "paper_MMH0"))
+from candel_maser.paths import CANDEL_ROOT  # noqa: E402
+
+ROOT = Path(CANDEL_ROOT)
 from palette import BROWN, GOLD, RED, TEAL  # noqa: E402
 GALAXIES = (
     "CGCG074-064", "NGC5765b", "NGC6264", "NGC6323", "UGC3789")

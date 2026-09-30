@@ -4,9 +4,9 @@ Status as of 2026-08-13. This note summarises the outputs pulled locally after
 running the CANDEL- and P20-distance sweeps on Glamdring:
 
 ```bash
-./scripts/megamaser/submit_sweep_H0.sh -q cmbgpu \
+./packages/candel-maser/scripts/submit_sweep_H0.sh -q cmbgpu \
     --dataset fiducial,unpruned,clipped,original_published --cpus 2
-./scripts/megamaser/submit_sweep_H0.sh -q cmbgpu \
+./packages/candel-maser/scripts/submit_sweep_H0.sh -q cmbgpu \
     --dataset fiducial --distance-source p20 --cpus 2
 ```
 
@@ -258,8 +258,8 @@ not apply to this sweep.
 
 ## Source files and diagnostic convention
 
-- Runner: `scripts/megamaser/run_joint_H0.py`.
-- Sweep wrapper: `scripts/megamaser/submit_sweep_H0.sh`.
+- Runner: `packages/candel-maser/candel_maser/run_joint_H0.py`.
+- Sweep wrapper: `packages/candel-maser/scripts/submit_sweep_H0.sh`.
 - CANDEL stage-1 inputs:
   `results/Megamaser/<dataset>/<galaxy>/*_blackjax_mcmc_rphi_initconfig.hdf5`.
 - P20 stage-1 inputs: `data/Megamaser/external/Dom_data/D_archivedP20_*.txt`.

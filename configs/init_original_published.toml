@@ -4,7 +4,7 @@
 # init carries a per-spot r_ang array whose length is that dataset's spot
 # count, and each pivot is the mean high-velocity-spot radius of those spots.
 #
-# Merged into config_maser.toml by scripts/megamaser/maser_config.py.
+# Merged into config_maser.toml by packages/candel-maser/candel_maser/maser_config.py.
 # Keep r_ang arrays on a single line: submit.sh scrapes this file with awk.
 
 [model.galaxies.CGCG074-064]

@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
             echo "  bash $0                              # all MCP galaxies"
             echo ""
             echo "For full Python help:"
-            echo "  python scripts/megamaser/convergence/check_conditional_r_delta.py --help"
+            echo "  python -m candel_maser.convergence.check_conditional_r_delta --help"
             exit 0
             ;;
         -q) QUEUE="$2"; shift 2 ;;
@@ -41,8 +41,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-# shellcheck source=../../_submit_lib.sh
+ROOT_DIR="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+# shellcheck source=../../../../scripts/_submit_lib.sh
 source "$ROOT_DIR/scripts/_submit_lib.sh"
 if [[ "$CANDEL_CLUSTER" != "glamdring" ]]; then
     echo "[ERROR] This script is glamdring-only (machine=$CANDEL_CLUSTER)" >&2
@@ -58,5 +58,5 @@ echo "JAX: XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda"
 echo "Args: ${PASS_ARGS[*]:-(defaults)}"
 
 addqueue -q "$QUEUE" -s -m 16 --gpus 1 \
-    $PYTHON -u "$ROOT_DIR/scripts/megamaser/convergence/check_conditional_r_delta.py" \
+    $PYTHON -u -m candel_maser.convergence.check_conditional_r_delta \
     "${PASS_ARGS[@]}"

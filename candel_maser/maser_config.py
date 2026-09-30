@@ -1,17 +1,5 @@
 # Copyright (C) 2025 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Spot-table dataset selection for the megamaser runners.
 
 One switch, applied once per process: `apply_dataset` merges the dataset's
@@ -19,14 +7,14 @@ One switch, applied once per process: `apply_dataset` merges the dataset's
 by dataset, so every downstream path follows without further edits.
 """
 from os import environ
-from os.path import basename, dirname, join, normpath
+from os.path import basename, join, normpath
 
 import tomli
 
-from candel.pvdata.megamaser_data import MASER_DATASETS
+from .megamaser_data import MASER_DATASETS
+from .paths import CONFIG_DIR
 from candel.util import fprint
 
-_HERE = dirname(__file__)
 ROOT_OUTPUT_ENV = "CANDEL_MEGAMASER_ROOT_OUTPUT"
 
 # Keys a dataset file may set. Everything else must stay in config_maser.toml:
@@ -38,7 +26,7 @@ _ALLOWED_PREFIXES = ("init", "r_ang_ref_")
 
 def dataset_init_path(dataset):
     """Path to `dataset`'s per-galaxy init file."""
-    return join(_HERE, f"init_{dataset}.toml")
+    return join(CONFIG_DIR, f"init_{dataset}.toml")
 
 
 def add_dataset_arg(parser):
@@ -122,8 +110,9 @@ def check_init_block(init_cfg, model):
         raise SystemExit(
             f"No init block for galaxy '{galaxy}' in dataset '{dataset}'. "
             f"Add [model.galaxies.{galaxy}.init] to "
-            f"scripts/megamaser/init_{dataset}.toml (run run_maser.py "
-            f"{galaxy} --sampler de --dataset {dataset} to produce it). Fresh "
+            f"packages/candel-maser/configs/init_{dataset}.toml (run "
+            f"`python -m candel_maser.run_maser {galaxy} --sampler de "
+            f"--dataset {dataset}` to produce it). Fresh "
             f"linear and eccentric-only DE searches bootstrap without this "
             f"block; quadratic-warp DE searches require the linear [init].")
 
@@ -135,7 +124,7 @@ def check_init_block(init_cfg, model):
             f"but dataset '{dataset}' has {n_spots} spots. This block belongs "
             f"to a different dataset — rerun DE for '{galaxy}' on "
             f"'{dataset}' and paste the result into "
-            f"scripts/megamaser/init_{dataset}.toml.")
+            f"packages/candel-maser/configs/init_{dataset}.toml.")
     return init_cfg
 
 

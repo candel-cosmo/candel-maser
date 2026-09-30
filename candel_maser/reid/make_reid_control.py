@@ -22,10 +22,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from run_reid_mcmc import (DEFAULT_CONFIG, SCRIPT_DIR, add_dataset_arg,
-                           compute_reid_r_ref, load_toml, load_toml_init,
-                           parse_data_rows, reid_control_path, reid_data_path,
-                           resolve_dataset, shift_warp_pivots, write_control)
+from .run_reid_mcmc import (DEFAULT_CONFIG, SCRIPT_DIR, add_dataset_arg,
+                            compute_reid_r_ref, load_toml, load_toml_init,
+                            parse_data_rows, reid_control_path,
+                            reid_data_path, resolve_dataset,
+                            shift_warp_pivots, write_control)
 
 FIXED_PARAMS = {
     "ecc", "peri_az_deg", "dperi_dr_deg_mas",  # --fix-circular default

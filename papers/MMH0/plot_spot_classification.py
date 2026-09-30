@@ -3,7 +3,7 @@ spectral class) for the MMH0 paper. Plotting code lives in
 candel.plotting.spot_classification; this script only loads data and saves.
 
 Run with venv_candel from the CANDEL repo root:
-    venv_candel/bin/python notebooks/paper_MMH0/plot_spot_classification.py
+    venv_candel/bin/python packages/candel-maser/papers/MMH0/plot_spot_classification.py
 """
 import os
 import sys
@@ -12,13 +12,12 @@ from os.path import abspath, dirname, join
 
 import numpy as np
 
-from candel.pvdata.megamaser_data import load_megamaser_spots, maser_data_root
+from candel_maser.megamaser_data import load_megamaser_spots, maser_data_root
 
 sys.path.insert(0, dirname(abspath(__file__)))
 from spot_classification import plot_spot_classification  # noqa: E402
 
-REPO = abspath(join(dirname(__file__), "..", ".."))
-CONFIG = join(REPO, "scripts", "megamaser", "config_maser.toml")
+from candel_maser.paths import CONFIG_PATH as CONFIG  # noqa: E402
 OUTDIR = "/Users/rstiskalek/Papers/MMH0/figs"
 # The paper caption reads this figure as the updated-MCP tables.
 DATASET = "fiducial"

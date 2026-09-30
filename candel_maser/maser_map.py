@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize
 
-from candel.model.maser_blackjax import _initial_phi, _phi_support_arrays
+from .maser_blackjax import _initial_phi, _phi_support_arrays
 
 
 def _perspot_neg_half_chi2(model, theta_complete, r_ang, phi, h):

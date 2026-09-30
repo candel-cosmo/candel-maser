@@ -21,8 +21,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from run_gibbs_comparison import (VARIANTS, gelman_rubin, load_variant_chains,
-                                  thin_chains)
+from .run_gibbs_comparison import (VARIANTS, gelman_rubin,
+                                   load_variant_chains, thin_chains)
 
 
 def variant_distance(vdir):

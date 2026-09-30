@@ -1,17 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-# Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """BlackJAX explicit-latent (r, phi) sampler for megamasers.
 
 The sampler targets the megamaser disk likelihood:
@@ -52,7 +40,7 @@ import numpy as np
 from numpyro.distributions import Delta, Uniform
 from numpyro.distributions.transforms import biject_to
 
-from ..util import fprint, get_nested
+from candel.util import fprint, get_nested
 from . import maser_physics
 
 # phys_args positional indices.
@@ -75,7 +63,7 @@ def _require_blackjax():
             raise RuntimeError(
                 "BlackJAX is required for the megamaser sampler. "
                 "Install it in the active environment before running "
-                "scripts/megamaser/run_maser.py."
+                "packages/candel-maser/candel_maser/run_maser.py."
             ) from exc
         raise
     return blackjax, window_adaptation

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "candel-maser"
+version = "0.1.0"
+description = "Megamaser disk model and H0 pipeline for CANDEL"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Richard Stiskalek"}]
+dependencies = ["candel"]
+
+[tool.setuptools.packages.find]
+include = ["candel_maser*"]
+
+[project.urls]
+Repository = "https://github.com/candel-cosmo/CANDEL"

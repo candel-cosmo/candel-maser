@@ -1,8 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
+# Licensed under the MIT License; see LICENSE in the repository root.
 """Run 2D-marginal MAP optimisation for one megamaser disk.
 
 For each global proposal the per-spot latents ``(r_ang, phi)`` are
@@ -30,10 +27,10 @@ import warnings
 
 import tomli
 
-_LOCAL_CONFIG = os.path.join(
-    os.path.dirname(__file__), "../../local_config.toml")
+from candel_maser.paths import CONFIG_PATH, LOCAL_CONFIG_PATH  # noqa: E402
+
 try:
-    with open(_LOCAL_CONFIG, "rb") as f:
+    with open(LOCAL_CONFIG_PATH, "rb") as f:
         _lcfg = tomli.load(f)
 except OSError:
     _lcfg = {}
@@ -45,12 +42,7 @@ if needed:
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_maser.toml")
-with open(_CONFIG_PATH, "rb") as f:
+with open(CONFIG_PATH, "rb") as f:
     _MASTER_CFG = tomli.load(f)
 
 _CLIP_CHILD_ENV = "CANDEL_DE_CLIP_CHILD"
@@ -62,7 +54,7 @@ _CLIP_COMPLETE_MARKER = "iterative clipping complete"
 
 def _required_inference(cfg, key):
     if key not in cfg:
-        raise KeyError(f"Missing [inference].{key} in {_CONFIG_PATH}")
+        raise KeyError(f"Missing [inference].{key} in {CONFIG_PATH}")
     return cfg[key]
 
 
@@ -99,19 +91,19 @@ import tomli_w  # noqa: E402
 from scipy.stats.qmc import Sobol  # noqa: E402
 from tqdm import trange  # noqa: E402
 
-from candel.inference.optimise import _prior_bounds  # noqa: E402
-from candel.inference.optimise import _select_distinct  # noqa: E402
-from candel.model import maser_physics  # noqa: E402
-from candel.model.maser_blackjax import (  # noqa: E402
+from .optimise import _prior_bounds  # noqa: E402
+from .optimise import _select_distinct  # noqa: E402
+from . import maser_physics  # noqa: E402
+from .maser_blackjax import (  # noqa: E402
     MaserBlackJaxTarget, init_from_prior_median, prepare_floor_init)
-from candel.model.model_H0_maser import MaserDiskModel  # noqa: E402
-from candel.pvdata.megamaser_data import (  # noqa: E402
+from .model_H0_maser import MaserDiskModel  # noqa: E402
+from .megamaser_data import (  # noqa: E402
     clipped_mask_path, load_megamaser_spots, maser_data_root)
 from candel.util import (fprint, fsection, get_nested,  # noqa: E402
                          results_path)
-from maser_config import (ROOT_OUTPUT_ENV, add_dataset_arg,  # noqa: E402
-                          apply_dataset, check_init_block,
-                          variant_init_block)
+from .maser_config import (  # noqa: E402
+    ROOT_OUTPUT_ENV, add_dataset_arg, apply_dataset, check_init_block,
+    variant_init_block)
 
 if _F64_ENABLED_HERE:
     print(f"float64 enabled ({_F64_REASON})", flush=True)
@@ -2513,11 +2505,8 @@ def _run_fixed_globals(target, init_params, data_only=False):
 
 
 def _pesce_init(target, galaxy, master):
-    helper_dir = os.path.join(os.path.dirname(__file__), "check_reid")
-    if helper_dir not in sys.path:
-        sys.path.insert(0, helper_dir)
-    from pesce_globals import candel_theta_from_point  # noqa: E402
-    from pesce_globals import paper_point
+    from .reid.pesce_globals import candel_theta_from_point  # noqa: E402
+    from .reid.pesce_globals import paper_point
 
     try:
         point, status = paper_point(galaxy, master)

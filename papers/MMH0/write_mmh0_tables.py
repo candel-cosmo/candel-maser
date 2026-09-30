@@ -9,11 +9,13 @@ import h5py
 import numpy as np
 from astropy.cosmology import FlatLambdaCDM
 
-ROOT = Path(__file__).resolve().parents[2]
+from candel_maser.paths import CANDEL_ROOT  # noqa: E402
+from candel_maser.reid.pesce_globals import PESCE_DISK_PARAMS  # noqa: E402
+
+ROOT = Path(CANDEL_ROOT)
 DATASET = "original_published"
 DEFAULT_RESULTS = ROOT / "results" / "Megamaser" / DATASET
-PESCE_PARAMS = ROOT / "scripts" / "megamaser" / "check_reid" / (
-    "pesce_disk_params.toml")
+PESCE_PARAMS = Path(PESCE_DISK_PARAMS)
 
 GALAXIES = ["CGCG074-064", "NGC5765b", "UGC3789", "NGC6264", "NGC6323"]
 GAL_LABELS = {

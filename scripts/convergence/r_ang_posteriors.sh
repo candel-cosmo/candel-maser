@@ -24,7 +24,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --f-grid F    scale phi grid sizes (default 1.0); 2 needs more GPU mem"
             echo "  --r-batch N   r-axis chunk size (default 64); lower on OOM (try 8 or 4)"
             echo "For Python help:"
-            echo "  python scripts/megamaser/convergence/r_ang_posteriors.py --help"
+            echo "  python -m candel_maser.convergence.r_ang_posteriors --help"
             exit 0
             ;;
         -q) QUEUE="$2"; shift 2 ;;
@@ -32,8 +32,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-# shellcheck source=../../_submit_lib.sh
+ROOT_DIR="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+# shellcheck source=../../../../scripts/_submit_lib.sh
 source "$ROOT_DIR/scripts/_submit_lib.sh"
 if [[ "$CANDEL_CLUSTER" != "glamdring" ]]; then
     echo "[ERROR] This script is glamdring-only (machine=$CANDEL_CLUSTER)" >&2
@@ -49,5 +49,5 @@ echo "JAX: XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda"
 echo "Args: ${PASS_ARGS[*]:-(defaults)}"
 
 addqueue -q "$QUEUE" -s -m 16 --gpus 1 \
-    $PYTHON -u "$ROOT_DIR/scripts/megamaser/convergence/r_ang_posteriors.py" \
+    $PYTHON -u -m candel_maser.convergence.r_ang_posteriors \
     "${PASS_ARGS[@]}"

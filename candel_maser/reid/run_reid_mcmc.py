@@ -32,24 +32,22 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 fallback
     import tomli as tomllib
 
 
-ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR.parent) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR.parent))
 
-from candel.pvdata.megamaser_data import (MASER_DATASETS,  # noqa: E402
-                                          maser_data_root)
-from maser_config import (add_dataset_arg, dataset_init_path,  # noqa: E402
-                          resolve_dataset)
+from ..megamaser_data import MASER_DATASETS, maser_data_root  # noqa: E402
+from ..paths import CANDEL_ROOT, CONFIG_PATH  # noqa: E402
+from ..maser_config import (add_dataset_arg, dataset_init_path,  # noqa: E402
+                            resolve_dataset)
 
+ROOT = Path(CANDEL_ROOT)
 REID_DIR = ROOT / "background_info/fit_disk_Reid"
 REID_SOURCE = REID_DIR / "fit_disk_v24d_unblinded.f"
 REID_CONTROL_TEMPLATE = REID_DIR / "fit_disk_control.inp"
-DEFAULT_CONFIG = ROOT / "scripts/megamaser/config_maser.toml"
+DEFAULT_CONFIG = Path(CONFIG_PATH)
 DEFAULT_DATA_NAME = "N4258_disk_data_MarkReid.final"
 # Dataset-agnostic: one Reid run directory tree for every dataset.
 DEFAULT_RESULTS = ROOT / "results/Megamaser/reid_mcmc"
-DEFAULT_REID_INIT = ROOT / "scripts/megamaser/check_reid/reid_ngc4258_init.toml"  # noqa: E501
+DEFAULT_REID_INIT = SCRIPT_DIR / "reid_ngc4258_init.toml"
 MAX_CORNER_SAMPLES = 20000
 FORT7_WIDTHS = [
     10, 6, 10, 10, 9, 9, 9, 8, 8, 8, 8, 8, 8, 6,
@@ -273,7 +271,7 @@ def resolve_init_toml(name: str) -> Path:
     path = Path(name)
     if path.name != name or path.is_absolute():
         raise ValueError(
-            "--init must be a TOML filename in scripts/megamaser/check_reid")
+            "--init must be a TOML filename in candel_maser/reid")
     if path.suffix != ".toml":
         raise ValueError("--init must end with .toml")
     path = SCRIPT_DIR / path.name
@@ -340,7 +338,7 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float,
     cfg = load_toml(config_path)
     gcfg = load_galaxy_config(config_path, galaxy, dataset=dataset)
     if variant not in gcfg:
-        where = (f"scripts/megamaser/init_{dataset}.toml"
+        where = (f"packages/candel-maser/configs/init_{dataset}.toml"
                  if dataset is not None else "a dataset init file (no dataset "
                  "was selected)")
         raise KeyError(
@@ -1156,7 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
         "--init",
         default=DEFAULT_REID_INIT.name,
         help=(
-            "Init TOML filename in scripts/megamaser/check_reid. "
+            "Init TOML filename in candel_maser/reid. "
             "The file may be Reid-style [globals] (flat or "
             "[globals.<GALAXY>.<variant>] merged) or a "
             "[model.galaxies.<NAME>.<variant>] config fragment."

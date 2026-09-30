@@ -10,7 +10,6 @@ spot order (both read the same data file), so summing gives a globals-order-
 independent total chi^2 directly comparable to CANDEL's.
 """
 import os
-import sys
 import tempfile
 
 import numpy as np
@@ -32,14 +31,10 @@ def loglik_context(galaxy, n_spots, dataset):
     Returns ``(rp, rr, d, dataset)`` or None if reidlik is not built in this
     environment or the spot count differs from CANDEL.
     """
-    helper_dir = os.path.dirname(__file__)
-    for p in (helper_dir, os.path.join(helper_dir, "reidlik_build")):
-        if p not in sys.path:
-            sys.path.insert(0, p)
     try:
-        import prepare_reid_data
-        import reid_profile as rp
-        import run_reid_mcmc as rr
+        from . import prepare_reid_data
+        import candel_maser.reid.reid_profile as rp
+        import candel_maser.reid.run_reid_mcmc as rr
     except ImportError as exc:
         print(f"reid_chi2: reidlik unavailable ({exc})")
         return None

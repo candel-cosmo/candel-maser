@@ -1,8 +1,5 @@
 # Copyright (C) 2026 Richard Stiskalek
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
+# Licensed under the MIT License; see LICENSE in the repository root.
 #
 # This program is distributed in the hope that it will be useful, but
 # WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -30,7 +27,7 @@ except ModuleNotFoundError:
 import astropy.units as u
 from astropy.coordinates import SkyCoord
 
-from candel.pvdata.megamaser_data import megamaser_velocity_frame
+from ..megamaser_data import megamaser_velocity_frame
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PESCE_DISK_PARAMS = SCRIPT_DIR / "pesce_disk_params.toml"
@@ -76,7 +73,7 @@ PESCE2020 = load_pesce_disk_params()
 
 
 def reid_ngc4258_point(master, path=REID_NGC4258_BEST):
-    from run_reid_mcmc import reid_D_A
+    from .run_reid_mcmc import reid_D_A
 
     with path.open("rb") as f:
         row = tomllib.load(f)["globals"]

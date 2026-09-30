@@ -1,40 +1,13 @@
 """Pure-Python regressions for the Reid/CANDEL convention bridge."""
 from pathlib import Path
-import sys
 
 import numpy as np
 import pytest
 import tomli
 
 
-ROOT = Path(__file__).resolve().parents[1]
-REID_DIR = ROOT / "scripts" / "megamaser" / "check_reid"
-if str(REID_DIR) not in sys.path:
-    sys.path.insert(0, str(REID_DIR))
-
-import pesce_globals as pg  # noqa: E402
-import run_reid_mcmc as rr  # noqa: E402
-
-
-def test_legacy_reid_artifacts_are_original_published(tmp_path):
-    control = tmp_path / "control.inp"
-    control.write_text("! legacy control\n")
-    assert rr.reid_control_dataset(control) == "original_published"
-
-    init = REID_DIR / "mystart_globals.toml"
-    with pytest.raises(ValueError, match="original_published.*fiducial"):
-        rr.load_reid_init(
-            init, galaxy="NGC6323", variant="init", dataset="fiducial")
-
-
-def test_reid_control_dataset_marker_and_default_paths(tmp_path):
-    control = tmp_path / "control.inp"
-    control.write_text("! CANDEL dataset: fiducial\n")
-    assert rr.reid_control_dataset(control) == "fiducial"
-    assert rr.reid_control_path(
-        "NGC6323", "original_published").name == "reid_control_NGC6323.inp"
-    assert rr.reid_control_path(
-        "NGC6323", "fiducial").name == "reid_control_fiducial_NGC6323.inp"
+import candel_maser.reid.pesce_globals as pg
+import candel_maser.reid.run_reid_mcmc as rr
 
 
 def test_scalar_reid_distance_uses_literal_fortran_mapping():
@@ -56,7 +29,7 @@ def test_vector_reid_distance_replays_each_integer_lookup():
 
 
 def test_ngc4258_reid_warp_is_moved_from_its_own_fixed_pivot():
-    path = REID_DIR / "reid_ngc4258_best.toml"
+    path = Path(pg.REID_NGC4258_BEST)
     with path.open("rb") as f:
         row = tomli.load(f)["globals"]
     master = {

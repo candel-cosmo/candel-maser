@@ -36,15 +36,15 @@ from jax.scipy.special import logsumexp  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
-from convergence_utils import (build_model, ensure_grad_sample,  # noqa: E402
-                               extend_grad_params, jax_phys_from_sample,
-                               resolve_grid_for_galaxy)
+from .convergence_utils import (build_model, ensure_grad_sample,  # noqa: E402
+                                extend_grad_params, jax_phys_from_sample,
+                                resolve_grid_for_galaxy)
 
-from candel.pvdata.megamaser_data import (  # noqa: E402
-    load_megamaser_spots, maser_data_root)
-from maser_config import add_dataset_arg, apply_dataset  # noqa: E402
+from ..megamaser_data import (load_megamaser_spots,  # noqa: E402
+                              maser_data_root)
+from ..maser_config import add_dataset_arg, apply_dataset  # noqa: E402
 
-CONFIG_PATH = "scripts/megamaser/config_maser.toml"
+from ..paths import CONFIG_PATH  # noqa: E402
 
 _N_CHECKB_SPOTS = 10
 
@@ -88,7 +88,7 @@ def build_model_from_data(galaxy, master_cfg, data, **overrides):
 
     import tomli_w
 
-    from candel.model.model_H0_maser import MaserDiskModel
+    from ..model_H0_maser import MaserDiskModel
 
     cfg = {k: (v.copy() if isinstance(v, dict) else v)
            for k, v in master_cfg.items()}
