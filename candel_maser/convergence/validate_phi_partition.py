@@ -40,11 +40,11 @@ if jax.default_backend() != "gpu":
     # deserialisation.
     jax.config.update("jax_enable_compilation_cache", False)
 
-from ..paths import CANDEL_ROOT as _CANDEL_ROOT  # noqa: E402
+from ..paths import PACKAGE_ROOT as _PACKAGE_ROOT  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MASER_DIR = SCRIPT_DIR.parent
-CANDEL_ROOT = Path(_CANDEL_ROOT)
+PACKAGE_ROOT = Path(_PACKAGE_ROOT)
 
 from .. import run_de_map as de  # noqa: E402
 from ..maser_config import add_dataset_arg, apply_dataset  # noqa: E402
@@ -151,7 +151,7 @@ def _source_hash():
     )
     digest = hashlib.sha256()
     for path in paths:
-        digest.update(str(path.relative_to(CANDEL_ROOT)).encode())
+        digest.update(str(path.relative_to(PACKAGE_ROOT)).encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -525,7 +525,7 @@ def _git_metadata():
     def run(*args):
         try:
             result = subprocess.run(
-                args, cwd=CANDEL_ROOT, capture_output=True,
+                args, cwd=PACKAGE_ROOT, capture_output=True,
                 text=True, check=False)
         except OSError:
             return None
