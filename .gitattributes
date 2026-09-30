@@ -1,0 +1,2 @@
+# Keep notebooks out of the GitHub language statistics.
+*.ipynb linguist-vendored
