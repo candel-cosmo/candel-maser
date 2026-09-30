@@ -190,12 +190,12 @@ galaxy D box.
 
 ## Tooling entry points
 
-- `packages/candel-maser/scripts/reid/run_gibbs_chains.sh` — compile once,
+- `scripts/reid/run_gibbs_chains.sh` — compile once,
   launch N independent one-strand chains; owns the control-line
   rewrite (`--gibbs --reflect --n-inner --global-cov --eta
   --track-latents --match-priors --write-thin`); eta defaults ON,
   write-thin defaults to 10.
-- `packages/candel-maser/candel_maser/reid/run_gibbs_comparison.py` — variants
+- `candel_maser/reid/run_gibbs_comparison.py` — variants
   reid_original / eta_reparam / eta_gibbs / eta_gibbs_reflection,
   multi-chain R-hat, numpyro summaries, CANDEL overlay corner
   (`--eta/--no-eta`, default on; corner H0 axis fixed to [5, 200] via
@@ -205,6 +205,6 @@ galaxy D box.
   four-variant run always carries the untouched-baseline reference;
   `eta_reparam` is the joint sampler in the coordinates selected by
   `--eta`. `--reweight-da2` is applied only to eta-off variants.
-- `packages/candel-maser/scripts/reid/submit_gibbs_comparison.sh` — one
+- `scripts/reid/submit_gibbs_comparison.sh` — one
   cluster job per variant + dependent collect job (`--eta/--no-eta`,
   default on).

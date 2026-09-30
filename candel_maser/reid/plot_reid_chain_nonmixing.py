@@ -20,7 +20,7 @@ occupies one COLUMN and its two sampler variants are stacked vertically:
 The two panels in a column share their distance axis, so the change in
 inter-chain agreement is read directly.  Each galaxy's twelve chains share ONE
 starting point and differ only in their random seed, so any inter-chain spread
-is the sampler alone (see ``packages/candel-maser/docs/reid_fit_disk_modifications.md``).
+is the sampler alone (see ``docs/reid_fit_disk_modifications.md``).
 
 Curves in every panel
 ---------------------

@@ -63,7 +63,7 @@ def _require_blackjax():
             raise RuntimeError(
                 "BlackJAX is required for the megamaser sampler. "
                 "Install it in the active environment before running "
-                "packages/candel-maser/candel_maser/run_maser.py."
+                "candel_maser/run_maser.py."
             ) from exc
         raise
     return blackjax, window_adaptation

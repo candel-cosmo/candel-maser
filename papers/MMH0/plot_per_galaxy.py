@@ -20,7 +20,7 @@
                       -> figs/corner_NGC5765b.pdf
 
 Run from the repo root with venv_candel:
-    python packages/candel-maser/papers/MMH0/plot_per_galaxy.py both
+    python papers/MMH0/plot_per_galaxy.py both
 """
 import argparse
 import os

@@ -30,7 +30,7 @@ pointing at the directory of `mcmc_*.hdf5` momentum products, with `ngrid` and
 
 Run from the repository root with::
 
-    venv_candel/bin/python packages/candel-maser/scripts/compare_watkins_velocities.py
+    venv_candel/bin/python scripts/compare_watkins_velocities.py
 """
 import os
 import sys

@@ -110,7 +110,7 @@ def check_init_block(init_cfg, model):
         raise SystemExit(
             f"No init block for galaxy '{galaxy}' in dataset '{dataset}'. "
             f"Add [model.galaxies.{galaxy}.init] to "
-            f"packages/candel-maser/configs/init_{dataset}.toml (run "
+            f"configs/init_{dataset}.toml (run "
             f"`python -m candel_maser.run_maser {galaxy} --sampler de "
             f"--dataset {dataset}` to produce it). Fresh "
             f"linear and eccentric-only DE searches bootstrap without this "
@@ -124,7 +124,7 @@ def check_init_block(init_cfg, model):
             f"but dataset '{dataset}' has {n_spots} spots. This block belongs "
             f"to a different dataset — rerun DE for '{galaxy}' on "
             f"'{dataset}' and paste the result into "
-            f"packages/candel-maser/configs/init_{dataset}.toml.")
+            f"configs/init_{dataset}.toml.")
     return init_cfg
 
 

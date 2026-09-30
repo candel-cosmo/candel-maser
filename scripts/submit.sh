@@ -2,7 +2,12 @@
 # Submit megamaser sampler or MAP jobs.
 set -euo pipefail
 
-ROOT="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Core CANDEL checkout (data/, results/, local_config.toml); defaults
+# to a sibling clone of candel-cosmo/CANDEL.
+ROOT="${CANDEL_ROOT:-$(cd "$PKG_ROOT/../CANDEL" 2>/dev/null && pwd)}"
+[[ -f "$ROOT/scripts/_submit_lib.sh" ]] || {
+    echo "[ERROR] Set CANDEL_ROOT to the CANDEL core checkout." >&2; exit 1; }
 ORIG_ARGS=("$@")
 # shellcheck source=../../../scripts/_submit_lib.sh
 source "$ROOT/scripts/_submit_lib.sh"
@@ -308,7 +313,7 @@ config_value() {
             print line
             exit
         }
-    ' "$ROOT/packages/candel-maser/configs/config_maser.toml" 2>/dev/null || true
+    ' "$PKG_ROOT/configs/config_maser.toml" 2>/dev/null || true
 }
 
 queue_requests_gpu() {
@@ -516,7 +521,7 @@ if [[ ${#DATASETS[@]} -gt 1 ]]; then
             fi
         done
         echo "[submit] === dataset=$dataset ==="
-        "$ROOT/packages/candel-maser/scripts/submit.sh" "${child_args[@]}"
+        "$PKG_ROOT/scripts/submit.sh" "${child_args[@]}"
     done
     exit 0
 fi
@@ -662,7 +667,7 @@ if [[ -n "$MAX_RETRIES" && -z "${CANDEL_WATCH_ACTIVE:-}" ]]; then
     [[ "$SAMPLER" != "mcmc" ]] && marker="MAP init"
     [[ "$ITERATIVE_CLIP" == true ]] && marker="iterative clipping complete"
     [[ "$JOINT_H0_MODE" == true ]] && marker="saved samples to"
-    watcher=("$ROOT/packages/candel-maser/scripts/watch_and_resubmit.sh"
+    watcher=("$PKG_ROOT/scripts/watch_and_resubmit.sh"
              --marker "$marker" --max-retries "$MAX_RETRIES")
     [[ -n "$WATCH_POLL" ]] && watcher+=(--poll "$WATCH_POLL")
     if [[ "$JOINT_H0_MODE" == true || "$SAMPLER" == "mcmc" ]]; then
@@ -686,7 +691,7 @@ if [[ -n "$MAX_RETRIES" && -z "${CANDEL_WATCH_ACTIVE:-}" ]]; then
     echo "[submit] Watcher log: $logfile"
     launch_detached "$session" "$logfile" \
         env CANDEL_WATCH_ACTIVE=1 "${watcher[@]}" -- \
-        "$ROOT/packages/candel-maser/scripts/submit.sh" "${submit_args[@]}"
+        "$PKG_ROOT/scripts/submit.sh" "${submit_args[@]}"
     exit $?
 fi
 
@@ -846,7 +851,7 @@ maser_root_output="$(
         s == "[io]" && /^[[:space:]]*root_output[[:space:]]*=/ {
             gsub(/[" ]/, "", $2); print $2; exit
         }
-    ' "$ROOT/packages/candel-maser/configs/config_maser.toml" 2>/dev/null || true
+    ' "$PKG_ROOT/configs/config_maser.toml" 2>/dev/null || true
 )"
 [[ -z "$maser_root_output" ]] && maser_root_output="results/Megamaser"
 [[ "$TEMP_OUTPUT" == true ]] && maser_root_output="$TEMP_ROOT_OUTPUT"

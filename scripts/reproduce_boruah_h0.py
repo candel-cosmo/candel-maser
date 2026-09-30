@@ -29,7 +29,7 @@ CMB-frame systemic velocities.  The like-for-like target is therefore their
 
 Run from the repository root with::
 
-    venv_candel/bin/python packages/candel-maser/scripts/reproduce_boruah_h0.py
+    venv_candel/bin/python scripts/reproduce_boruah_h0.py
 """
 import os
 

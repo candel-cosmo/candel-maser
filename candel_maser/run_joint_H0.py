@@ -662,7 +662,7 @@ def _joint_vext_prior(reconstruction):
     """Informative Vext prior (Cartesian mean + cov, with a magnitude/direction
     summary) from [joint.priors.Vext_informative.<reconstruction>], or None to
     keep the uniform prior.  The numbers are produced offline by
-    packages/candel-maser/scripts/extract_vext_prior.py; no posterior files are read here.
+    scripts/extract_vext_prior.py; no posterior files are read here.
     """
     cfg = (MASTER_CFG.get("joint", {}).get("priors", {})
            .get("Vext_informative", {}))

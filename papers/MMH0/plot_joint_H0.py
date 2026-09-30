@@ -16,7 +16,7 @@ The fiducial run is the recession-velocity (redshift) selection, the
 Manticore-Local reconstruction, and a linear warp.
 
 Run from the repo root with venv_candel:
-    python packages/candel-maser/papers/MMH0/plot_joint_H0.py all
+    python papers/MMH0/plot_joint_H0.py all
 """
 import argparse
 import os

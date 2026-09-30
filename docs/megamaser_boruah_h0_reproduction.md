@@ -72,13 +72,13 @@ and no real-space convention comes within `1 km/s/Mpc` of either.
 ## Reproduction
 
 ```bash
-venv_candel/bin/python packages/candel-maser/scripts/reproduce_boruah_h0.py
+venv_candel/bin/python scripts/reproduce_boruah_h0.py
 ```
 
 The script is a deterministic quadrature over the comoving distance, one
 integral per galaxy per `H0` node, sharing the KDE distance likelihood, the
 `Distance2Redshift` interpolator, and the `Carrick2015` LOS velocity cache with
-`packages/candel-maser/candel_maser/run_joint_H0.py`. It needs no sampler because the per-galaxy
+`candel_maser/run_joint_H0.py`. It needs no sampler because the per-galaxy
 likelihoods factorise once `sigma_v` is fixed.
 
 ## Refereed table 3, 2M++ block
@@ -101,7 +101,7 @@ correction` row, where the reproduction is `0.72 km/s/Mpc` (`0.25 sigma`) high.
 Three checks that are not the headline number:
 
 1. **P20 method (1)** reproduces to `0.02 km/s/Mpc`, as in
-   `packages/candel-maser/docs/megamaser_p20_h0_reproduction.md`.
+   `docs/megamaser_p20_h0_reproduction.md`.
 2. **The 2M++ LOS velocity curves** match B21 figure 11 panel by panel: the
    `cz_pred(r)` crossings, plateaux and endpoint values agree, and the maser
    distance markers confirm B21 place galaxies at `r = D_A * 0.72` in
@@ -184,5 +184,5 @@ would not have applied this; it is reported as a variant, not a fix.
 - P20 source: <https://arxiv.org/abs/2001.09213>, tables 1, 3 and 4.
 - Distance inputs: `data/Megamaser/external/Dom_data/D_archivedP20_*.txt`.
 - Velocity field: `data/fields/carrick2015_twompp_{density,velocity}.npy`.
-- Script: `packages/candel-maser/scripts/reproduce_boruah_h0.py`.
-- Companion note: `packages/candel-maser/docs/megamaser_p20_h0_reproduction.md`.
+- Script: `scripts/reproduce_boruah_h0.py`.
+- Companion note: `docs/megamaser_p20_h0_reproduction.md`.

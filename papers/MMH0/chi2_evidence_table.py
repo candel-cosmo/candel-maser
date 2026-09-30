@@ -7,7 +7,7 @@ here (CANDEL and the original Reid Fortran, with the per-spot latents optimised
 at the fixed median / P20 globals).  Prints a table and writes
 chi2_evidence_table.json.
 
-    python packages/candel-maser/papers/MMH0/chi2_evidence_table.py
+    python papers/MMH0/chi2_evidence_table.py
 """
 import json
 import os

@@ -15,4 +15,5 @@ dependencies = ["candel"]
 include = ["candel_maser*"]
 
 [project.urls]
-Repository = "https://github.com/candel-cosmo/CANDEL"
+Repository = "https://github.com/candel-cosmo/candel-maser"
+Core = "https://github.com/candel-cosmo/CANDEL"

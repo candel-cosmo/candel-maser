@@ -2396,7 +2396,7 @@ class MaserDiskModel(ModelBase):
     def __call__(self):
         raise RuntimeError(
             "Megamaser NumPyro inference has been removed; use "
-            "packages/candel-maser/candel_maser/run_maser.py.")
+            "candel_maser/run_maser.py.")
 
 
 # -----------------------------------------------------------------------

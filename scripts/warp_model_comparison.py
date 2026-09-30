@@ -17,7 +17,7 @@ Two things, per galaxy, printed as one table:
     Normal(0, 90 deg/mas^2) prior density.  The priors are independent across
     parameters, so the Savage--Dickey separability condition holds.
 
-    python packages/candel-maser/scripts/warp_model_comparison.py
+    python scripts/warp_model_comparison.py
 """
 import os
 

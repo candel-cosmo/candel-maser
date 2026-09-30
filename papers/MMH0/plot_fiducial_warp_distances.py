@@ -6,7 +6,7 @@ MCP H0 galaxies and writes one five-panel PDF.
 
 Run from the repository root with::
 
-    venv_candel/bin/python packages/candel-maser/papers/MMH0/plot_fiducial_warp_distances.py
+    venv_candel/bin/python papers/MMH0/plot_fiducial_warp_distances.py
 """
 import argparse
 from pathlib import Path

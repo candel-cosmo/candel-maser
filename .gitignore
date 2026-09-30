@@ -1,0 +1,24 @@
+__pycache__/
+*.egg-info/
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+logs_*/
+slurm-*
+*.out
+*.png
+*.pdf
+
+# Generated outputs and caches.
+scripts/logs/
+candel_maser/reid/reidlik_build/
+
+# Plot output directories.
+**/*plot*/*.png
+**/*plot*/*.pdf
+**/*plot*/*.csv
+**/*plot*/*.txt
+**/*plot*/**/*.png
+**/*plot*/**/*.pdf
+**/*plot*/**/*.csv
+**/*plot*/**/*.txt

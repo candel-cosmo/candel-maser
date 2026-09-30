@@ -4,7 +4,7 @@ globals for the MMH0 galaxies -- no MCMC needed.
 Same computation as run_maser's --map-overlay, run standalone so existing runs
 don't have to be resampled.  Prints a table and writes map_chi2_table.json.
 
-    python packages/candel-maser/scripts/backfill_map_chi2.py
+    python scripts/backfill_map_chi2.py
 """
 import json
 import os

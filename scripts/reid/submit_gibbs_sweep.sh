@@ -12,8 +12,13 @@
 #   submit_gibbs_sweep.sh -q berg --chains 12
 set -euo pipefail
 
-ROOT="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-SUBMIT="$ROOT/packages/candel-maser/scripts/reid/submit_gibbs_comparison.sh"
+PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Core CANDEL checkout (data/, results/, local_config.toml); defaults
+# to a sibling clone of candel-cosmo/CANDEL.
+ROOT="${CANDEL_ROOT:-$(cd "$PKG_ROOT/../CANDEL" 2>/dev/null && pwd)}"
+[[ -f "$ROOT/scripts/_submit_lib.sh" ]] || {
+    echo "[ERROR] Set CANDEL_ROOT to the CANDEL core checkout." >&2; exit 1; }
+SUBMIT="$PKG_ROOT/scripts/reid/submit_gibbs_comparison.sh"
 BASE_OUTPUT="$ROOT/results/Megamaser/reid_mcmc"
 
 QUEUE=""

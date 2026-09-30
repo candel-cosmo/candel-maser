@@ -7,7 +7,7 @@ Production CANDEL intentionally uses its own constants and the true eccentric
 orbital speed in the SR gamma.
 
 Run:  venv_candel/bin/python -m pytest \
-    packages/candel-maser/tests/test_megamaser_reid_jax_precision.py
+    tests/test_megamaser_reid_jax_precision.py
 """
 import math
 import os

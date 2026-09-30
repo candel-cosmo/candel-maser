@@ -12,7 +12,7 @@ Two modes:
   final (--spots i j k): clean three-panel figure (PNG + PDF) for the paper.
 
 Run from the CANDEL repo root with the project venv:
-    venv_candel/bin/python packages/candel-maser/papers/MMH0/plot_rphi_bimodality.py \
+    venv_candel/bin/python papers/MMH0/plot_rphi_bimodality.py \
         [--spots ...]
 """
 import argparse

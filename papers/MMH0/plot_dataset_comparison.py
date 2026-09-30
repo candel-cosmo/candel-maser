@@ -14,7 +14,7 @@ The Pesce+2020 curve is a two-piece Gaussian built from the median and the
 asymmetric 1-sigma interval of their table 1, which is all they report.
 
 Run from the repo root with venv_candel:
-    python packages/candel-maser/papers/MMH0/plot_dataset_comparison.py
+    python papers/MMH0/plot_dataset_comparison.py
 """
 import argparse
 import os

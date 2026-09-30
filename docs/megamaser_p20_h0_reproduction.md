@@ -36,11 +36,11 @@ in direct agreement with P20's `73.9 +/- 3.0 km/s/Mpc`.
 Run the lightweight deterministic quadrature from the repository root:
 
 ```bash
-venv_candel/bin/python packages/candel-maser/scripts/reproduce_p20_h0.py
+venv_candel/bin/python scripts/reproduce_p20_h0.py
 ```
 
 It uses the same KDE implementation and support convention as
-`packages/candel-maser/candel_maser/run_joint_H0.py`, then evaluates P20 Equations 1--4 with
+`candel_maser/run_joint_H0.py`, then evaluates P20 Equations 1--4 with
 `sigma_pec = 250 km/s`. The five archived files reproduce the medians and
 central intervals in P20 Table 1. NGC4258 is represented by the Gaussian
 distance likelihood quoted in that table, including its statistical and
@@ -98,7 +98,7 @@ above. Calling the P20 prior simply "flat in distance" loses this distinction.
 
 ## What the CANDEL joint-H0 runner fits
 
-For the no-reconstruction path, `packages/candel-maser/candel_maser/run_joint_H0.py` instead
+For the no-reconstruction path, `candel_maser/run_joint_H0.py` instead
 samples `H0`, a shared `sigma_pec`, and one distance coordinate per galaxy. It
 predicts the cosmological redshift from the comoving distance and evaluates
 
@@ -184,11 +184,11 @@ above.
 - Archived distance inputs:
   `data/Megamaser/external/Dom_data/D_archivedP20_*.txt`.
 - Current runner and KDE implementation:
-  `packages/candel-maser/candel_maser/run_joint_H0.py`.
+  `candel_maser/run_joint_H0.py`.
 - Reproduction diagnostic:
-  `packages/candel-maser/scripts/reproduce_p20_h0.py`.
+  `scripts/reproduce_p20_h0.py`.
 - Current sweep values and convergence caveats:
-  `packages/candel-maser/docs/megamaser_joint_h0_sweep_summary.md`.
+  `docs/megamaser_joint_h0_sweep_summary.md`.
 - Saved comparison chains:
   `results/Megamaser/fiducial/H0/joint_H0_toy_all_none_none_*_p20.hdf5`.
 

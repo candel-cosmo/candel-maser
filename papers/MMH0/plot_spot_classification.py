@@ -3,7 +3,7 @@ spectral class) for the MMH0 paper. Plotting code lives in
 candel.plotting.spot_classification; this script only loads data and saves.
 
 Run with venv_candel from the CANDEL repo root:
-    venv_candel/bin/python packages/candel-maser/papers/MMH0/plot_spot_classification.py
+    venv_candel/bin/python papers/MMH0/plot_spot_classification.py
 """
 import os
 import sys

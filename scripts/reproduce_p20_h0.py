@@ -3,7 +3,7 @@
 
 Run from the repository root with::
 
-    venv_candel/bin/python packages/candel-maser/scripts/reproduce_p20_h0.py
+    venv_candel/bin/python scripts/reproduce_p20_h0.py
 """
 import os
 from pathlib import Path

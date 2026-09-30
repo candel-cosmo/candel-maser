@@ -24,7 +24,7 @@ results/Megamaser.
               shift.  -> figs/evidence_vs_distance.pdf
 
 Run from the repo root with venv_candel:
-    python packages/candel-maser/papers/MMH0/plot_validation_figs.py both
+    python papers/MMH0/plot_validation_figs.py both
 """
 import argparse
 import os
@@ -283,7 +283,7 @@ def collect_chi2_vs_evidence():
     """Per-galaxy (Delta chi^2, Delta lnP_2D) = ours - P20.
 
     Read from chi2_evidence_table.json (written by
-    packages/candel-maser/papers/MMH0/chi2_evidence_table.py):
+    papers/MMH0/chi2_evidence_table.py):
     the total chi^2 is computed at the median / P20 globals with the latents
     optimised, and lnP_2D is the value already stored in the legacy comparison
     logs, i.e. the same quantity as evidence_vs_distance.pdf.

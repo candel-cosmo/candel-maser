@@ -28,7 +28,12 @@
 # be used as a starting template.
 set -euo pipefail
 
-ROOT="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Core CANDEL checkout (data/, results/, local_config.toml); defaults
+# to a sibling clone of candel-cosmo/CANDEL.
+ROOT="${CANDEL_ROOT:-$(cd "$PKG_ROOT/../CANDEL" 2>/dev/null && pwd)}"
+[[ -f "$ROOT/scripts/_submit_lib.sh" ]] || {
+    echo "[ERROR] Set CANDEL_ROOT to the CANDEL core checkout." >&2; exit 1; }
 SOURCE="$ROOT/background_info/fit_disk_Reid_reflection/fit_disk_v24d_unblinded.f"
 
 CHAINS=1

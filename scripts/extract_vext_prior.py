@@ -7,7 +7,7 @@ covariance), runs a frame check, and prints a config block to paste under
 model reads those static numbers from the config and never runs this
 script; the frame already matches the model's, so no rotation is applied.
 
-    python packages/candel-maser/scripts/extract_vext_prior.py --name ManticoreLocalCOLA \\
+    python scripts/extract_vext_prior.py --name ManticoreLocalCOLA \\
         --files 'results/VFO/single_fields/...field*_single.hdf5'
 """
 import argparse

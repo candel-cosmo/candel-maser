@@ -16,7 +16,7 @@ the *true* −½χ² in float64; the production kernels are checked in float64
 which was cancellation-bound at the ~v_sys scale).
 
 Run:  venv_candel/bin/python -m pytest \
-    packages/candel-maser/tests/test_megamaser_phi_kernels_precision.py
+    tests/test_megamaser_phi_kernels_precision.py
 """
 import jax
 

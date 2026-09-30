@@ -6,7 +6,7 @@ combinations e_x, e_y -> (ecc*cos w, ecc*sin w, ecc^2); the old polar route via
 sqrt/arctan2 produced NaN gradients at the origin (e=0), froze the global NUTS
 step (every trajectory divergent), and is the bug this guards against.
 
-Run:  venv_candel/bin/python -m pytest packages/candel-maser/tests/test_megamaser_ecc_smoothness.py
+Run:  venv_candel/bin/python -m pytest tests/test_megamaser_ecc_smoothness.py
 """
 import jax
 import jax.numpy as jnp

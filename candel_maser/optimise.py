@@ -3,7 +3,7 @@
 """Shared bound/selection helpers for global parameter searches.
 
 Pure NumPy utilities used by the megamaser differential-evolution MAP
-driver (``packages/candel-maser/candel_maser/run_de_map.py``).
+driver (``candel_maser/run_de_map.py``).
 """
 import numpy as np
 

@@ -13,7 +13,7 @@ the deltas (this work minus P20), and checks
 
     Delta(-2 ln L) - Delta chi^2 = Delta[ sum ln(2 pi sigma^2_tot) ].
 
-    python packages/candel-maser/scripts/dm2lnL_pesce.py
+    python scripts/dm2lnL_pesce.py
 """
 import os
 

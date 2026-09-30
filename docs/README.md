@@ -60,19 +60,19 @@ without promoting it into `data/Megamaser/clipped/`.
 
 ```bash
 # Inspect a DE submission, then submit it on a GPU queue.
-bash packages/candel-maser/scripts/submit.sh -q cmbgpu --galaxy NGC6323 \
+bash scripts/submit.sh -q cmbgpu --galaxy NGC6323 \
     --sampler de --dry
-bash packages/candel-maser/scripts/submit.sh -q cmbgpu --galaxy NGC6323 --sampler de
+bash scripts/submit.sh -q cmbgpu --galaxy NGC6323 --sampler de
 
 # Single-galaxy MCMC is CPU-only on the cluster.
-bash packages/candel-maser/scripts/submit.sh -q cmb --galaxy NGC6323 --sampler mcmc
+bash scripts/submit.sh -q cmb --galaxy NGC6323 --sampler mcmc
 
 # Joint H0 can use a CPU or GPU queue; this example uses a GPU.
-bash packages/candel-maser/scripts/submit.sh -q cmbgpu --galaxy all --infer-H0 \
+bash scripts/submit.sh -q cmbgpu --galaxy all --infer-H0 \
     --selection redshift --distance-prior volume
 
 # Short local development run.
-bash packages/candel-maser/scripts/submit.sh --local --galaxy NGC6323 --sampler mcmc \
+bash scripts/submit.sh --local --galaxy NGC6323 --sampler mcmc \
     --num-warmup 100 --num-samples 100
 ```
 
@@ -82,12 +82,12 @@ NGC4258. Put runner-only options after `--` when useful. See `submit.sh --help`
 for all flags. The standard sweep wrappers can also be inspected safely:
 
 ```bash
-bash packages/candel-maser/scripts/submit_sweep.sh -q cmb --dry
-bash packages/candel-maser/scripts/submit_sweep_H0.sh --local \
+bash scripts/submit_sweep.sh -q cmb --dry
+bash scripts/submit_sweep_H0.sh --local \
     --dataset original_published,fiducial,unpruned,clipped --dry
-bash packages/candel-maser/scripts/submit_sweep_H0.sh --local \
+bash scripts/submit_sweep_H0.sh --local \
     --dataset fiducial --distance-source p20 --dry
-bash packages/candel-maser/scripts/submit_loo_H0.sh -q cmbgpu --dry
+bash scripts/submit_loo_H0.sh -q cmbgpu --dry
 ```
 
 `--distance-source p20` replaces the CANDEL stage-1 chains with Dom's archived
@@ -124,9 +124,9 @@ venv_candel/bin/python -m candel_maser.run_maser NGC6264 --sampler mcmc \
 Submit production MCMC jobs:
 
 ```bash
-bash packages/candel-maser/scripts/submit.sh -q cmb --galaxy NGC5765b --sampler mcmc
-bash packages/candel-maser/scripts/submit.sh -q cmb --galaxy NGC5765b,NGC6264 --sampler mcmc
-bash packages/candel-maser/scripts/submit.sh -q cmb --galaxy all --sampler mcmc
+bash scripts/submit.sh -q cmb --galaxy NGC5765b --sampler mcmc
+bash scripts/submit.sh -q cmb --galaxy NGC5765b,NGC6264 --sampler mcmc
+bash scripts/submit.sh -q cmb --galaxy all --sampler mcmc
 ```
 
 `--galaxy all` expands to `CGCG074-064,NGC5765b,NGC6264,NGC6323,UGC3789`.
@@ -136,7 +136,7 @@ single-galaxy MCMC/DE, not joint H0.
 Submit DE MAP jobs (the global search to seed MCMC):
 
 ```bash
-bash packages/candel-maser/scripts/submit.sh -q cmbgpu --galaxy NGC5765b --sampler de
+bash scripts/submit.sh -q cmbgpu --galaxy NGC5765b --sampler de
 ```
 
 DE now always uses L-SHADE: current-to-pbest/1 mutation, success-history
@@ -196,7 +196,7 @@ balance, update, and checkpoint timings. Pass budget overrides after `--` when
 using `submit.sh`, for example:
 
 ```bash
-bash packages/candel-maser/scripts/submit.sh -q cmbgpu --galaxy NGC6264 \
+bash scripts/submit.sh -q cmbgpu --galaxy NGC6264 \
     --sampler de --gpu-count 4 --cpus 2 -- \
     --population-reduction-evaluations 5000000 \
     --max-generations 5000 --patience 500
@@ -209,7 +209,7 @@ For a development-only batching benchmark inside an existing two-GPU
 allocation, run:
 
 ```bash
-venv_candel/bin/python packages/candel-maser/scripts/benchmark_de_batching.py UGC3789 --suite \
+venv_candel/bin/python scripts/benchmark_de_batching.py UGC3789 --suite \
     --candidates 512 --n-devices 2
 ```
 
@@ -219,7 +219,7 @@ fixed/config score and DE evaluator at 50 ms resolution, while isolating
 allocator state in one fresh process per setting, use for example:
 
 ```bash
-venv_candel/bin/python packages/candel-maser/scripts/benchmark_de_batching.py UGC3789 --suite \
+venv_candel/bin/python scripts/benchmark_de_batching.py UGC3789 --suite \
     --phi-integration peak-partition --candidate-wave 8 \
     --spot-batches 8,16,34,68,all,68 \
     --candidates 128 --warmups 3 --repeats 1 --n-devices 2 \
@@ -258,8 +258,8 @@ fitting one node. `--mem` remains GB per CPU.
 Submit one joint H0 chain over several galaxies:
 
 ```bash
-bash packages/candel-maser/scripts/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --infer-H0 --selection redshift
-bash packages/candel-maser/scripts/submit.sh -q cmbgpu --galaxy all --infer-H0 --selection redshift --distance-prior volume
+bash scripts/submit.sh -q cmbgpu --galaxy NGC5765b,NGC6264 --infer-H0 --selection redshift
+bash scripts/submit.sh -q cmbgpu --galaxy all --infer-H0 --selection redshift --distance-prior volume
 ```
 
 Common forwarded options are `--seed`, `--spot-batch`, `--f64`, `--add-ecc`, and `--add-quadratic-warp`. Single-galaxy MCMC also accepts `--da2-prior`, which replaces the default flat `D_A` prior with `p(D_A) ∝ D_A^2` on the same bounds. `--init-strategy` controls MCMC/evidence initial points; real DE searches ignore both that option and `[inference].init_strategy` and use the seed policy described above. Only `--fix-globals`, which skips DE, uses `median|config`. MCMC also accepts `reid`, which uses reported Pesce/Reid globals (NGC4258 reads `reid_ngc4258_best.toml`). MCMC quick overrides are `--num-warmup` and `--num-samples`; MCMC also accepts opt-in `--save-latents`. DE operational options are `--resume`, `--fix-globals`, and `--fix-globals-pesce`; pass DE budget overrides after the `submit.sh` `--` separator. Submit the single-galaxy finite-support marginal-objective diagnostic with `submit.sh --evidence` after the chain exists; it is not a rigorous absolute evidence because the saved explicit-latent chain and finite-radius marginal objective do not define exactly the same posterior measure. Joint H0 accepts `--distance-prior distance|volume|log-distance`; `log-distance` samples uniformly in `log(D_A)`, while selection runs require the volume prior. The joint H0 run (`--infer-H0`) uses either matching saved per-galaxy `samples/D_A` chains with a recorded `uniform_D_A` stage-1 prior or `--distance-source p20`, which removes the archived chains' uniform-in-`log(D_A)` prior. It then builds KDE distance likelihoods and prints source/support-edge diagnostics. Sampler, optimiser, and model defaults live in `config_maser.toml`.
@@ -269,13 +269,13 @@ launches the watcher in a detached `screen`/`tmux` session and prints the
 reattach command and log path.
 
 ```bash
-bash packages/candel-maser/scripts/submit.sh -q cmbgpu --galaxy all --sampler de --max-retries 4
+bash scripts/submit.sh -q cmbgpu --galaxy all --sampler de --max-retries 4
 
-bash packages/candel-maser/scripts/watch_and_resubmit.sh --marker "MAP init" -- \
-    bash packages/candel-maser/scripts/submit.sh -q cmbgpu --galaxy all --sampler de
+bash scripts/watch_and_resubmit.sh --marker "MAP init" -- \
+    bash scripts/submit.sh -q cmbgpu --galaxy all --sampler de
 
-bash packages/candel-maser/scripts/watch_and_resubmit.sh --marker "saved samples to" -- \
-    bash packages/candel-maser/scripts/submit.sh -q cmb --galaxy all --sampler mcmc
+bash scripts/watch_and_resubmit.sh --marker "saved samples to" -- \
+    bash scripts/submit.sh -q cmb --galaxy all --sampler mcmc
 ```
 
 Short galaxy aliases are accepted by `submit.sh`: `5765b`, `6264`, `6323`, `3789`, and `4258`.
@@ -345,10 +345,10 @@ Other galaxies are unchanged.
 They differ for NGC5765b, NGC6264, NGC6323 and UGC3789 (spots removed in MCP
 vetting, NGC6323 augmented, NGC6264 acceleration uncertainties replaced).
 CGCG074-064 and NGC4258 are byte-identical in all three source datasets. Full provenance is in
-`packages/candel-maser/docs/megamaser_p20_clipping_audit.md`.
+`docs/megamaser_p20_clipping_audit.md`.
 
 Build the clipping-test input with
-`venv_candel/bin/python packages/candel-maser/scripts/build_unpruned_dataset.py`. The unpruned
+`venv_candel/bin/python scripts/build_unpruned_dataset.py`. The unpruned
 tables with restored spots need dataset-specific MAP blocks and `r_ang` arrays.
 NGC6323 can instead reuse its fiducial initialisation because its unpruned table
 has the same values and row order.
@@ -390,7 +390,7 @@ The all-galaxy validated DE default is `phi_integration = "peak-partition"`.
 The legacy dense fixed grid remains available for controlled comparisons:
 
 ```bash
-./packages/candel-maser/scripts/submit.sh -q short --sampler de --galaxy NGC4258 \
+./scripts/submit.sh -q short --sampler de --galaxy NGC4258 \
     --gpu-mem 32 --gpu-count 2 --spot-batch 47 \
     --phi-integration fixed-grid
 ```
@@ -472,13 +472,13 @@ float64.
 Submit the default circular validation for every configured galaxy:
 
 ```bash
-bash packages/candel-maser/scripts/convergence/validate_phi_partition.sh -q cmbgpu
+bash scripts/convergence/validate_phi_partition.sh -q cmbgpu
 ```
 
 Restrict the run to one galaxy with `--galaxies`:
 
 ```bash
-bash packages/candel-maser/scripts/convergence/validate_phi_partition.sh -q cmbgpu \
+bash scripts/convergence/validate_phi_partition.sh -q cmbgpu \
     --galaxies NGC6323
 ```
 
@@ -486,7 +486,7 @@ On a laptop, use explicit local mode. This permits the CPU backend; restricting
 the run to one galaxy is recommended for the first check:
 
 ```bash
-bash packages/candel-maser/scripts/convergence/validate_phi_partition.sh --local \
+bash scripts/convergence/validate_phi_partition.sh --local \
     --galaxies NGC6323
 ```
 
@@ -511,7 +511,7 @@ archived NGC4258 reconnaissance below predates v6, so its coordinate is an
 explicit cross-policy experiment:
 
 ```bash
-bash packages/candel-maser/scripts/convergence/validate_phi_partition.sh -q cmbgpu \
+bash scripts/convergence/validate_phi_partition.sh -q cmbgpu \
     --galaxies NGC4258 --sobol-candidates 0 --no-config-point \
     --no-pesce-point \
     --checkpoint-candidate \
@@ -562,7 +562,7 @@ Submit a lightweight NGC6323 GPU smoke test with only the config point and
 reduced reference grids:
 
 ```bash
-bash packages/candel-maser/scripts/convergence/validate_phi_partition.sh -q cmbgpu -- \
+bash scripts/convergence/validate_phi_partition.sh -q cmbgpu -- \
     --galaxies NGC6323 --variants circular \
     --sobol-candidates 0 --no-pesce-point \
     --reference-r-levels 501,1001,2001 \
@@ -574,7 +574,7 @@ Then exercise the forced-float64 eccentric NGC4258 path with a reduced
 candidate set:
 
 ```bash
-bash packages/candel-maser/scripts/convergence/validate_phi_partition.sh -q cmbgpu \
+bash scripts/convergence/validate_phi_partition.sh -q cmbgpu \
     --mem 32 -- \
     --galaxies NGC4258 --variants eccentric --sobol-candidates 0 \
     --spot-batch 4 --reference-spot-batch 1 \
@@ -585,7 +585,7 @@ For a quick laptop orchestration check, keep one config point and use small
 grids; these are not acceptance-quality references:
 
 ```bash
-bash packages/candel-maser/scripts/convergence/validate_phi_partition.sh --local \
+bash scripts/convergence/validate_phi_partition.sh --local \
     --galaxies NGC6323 --sobol-candidates 0 --no-pesce-point \
     --reference-r-levels 51,101,201 \
     --reference-phi-levels 51,101,201 --timing-repeats 1
@@ -608,7 +608,7 @@ Entries expire after 48 hours; `--no-cache` disables reuse, while
 `--clean-cache` deletes the cache and exits without running validation.
 
 ```bash
-bash packages/candel-maser/scripts/convergence/validate_phi_partition.sh --clean-cache
+bash scripts/convergence/validate_phi_partition.sh --clean-cache
 ```
 
 ### Numerical-setting experiments
@@ -618,7 +618,7 @@ editing `config_maser.toml`. For example, test a cheaper peak scan for NGC6264
 against the same candidates and cached references with:
 
 ```bash
-bash packages/candel-maser/scripts/convergence/validate_phi_partition.sh --local \
+bash scripts/convergence/validate_phi_partition.sh --local \
     --galaxies NGC6264 \
     --scheme-setting peak-partition.n_phi_partition_sys=257 \
     --scheme-setting peak-partition.n_phi_partition_hv=129

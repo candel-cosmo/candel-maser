@@ -4,7 +4,7 @@
 # up in each output filename. Thin wrapper around submit_sweep_H0.sh so it stays
 # in sync with the sweep.
 #
-#   ./packages/candel-maser/scripts/submit_loo_H0.sh -q gpulong --cpus 2
+#   ./scripts/submit_loo_H0.sh -q gpulong --cpus 2
 #
 # All args (queue, --cpus, --dry, -y, --num-samples, -- extra ...) are forwarded.
 set -euo pipefail

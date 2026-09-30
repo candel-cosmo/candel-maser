@@ -10,7 +10,7 @@ from scipy.cluster.vq import kmeans2
 
 from candel.util import SPEED_OF_LIGHT, data_path, fprint
 
-# Spot-table datasets. See packages/candel-maser/docs/megamaser_p20_clipping_audit.md for
+# Spot-table datasets. See docs/megamaser_p20_clipping_audit.md for
 # provenance and the exact construction of the "unpruned" union.
 MASER_DATASETS = ("original_published", "fiducial", "unpruned", "clipped")
 DEFAULT_MASER_DATASET = "fiducial"

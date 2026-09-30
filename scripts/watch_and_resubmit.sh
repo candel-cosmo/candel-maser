@@ -10,13 +10,18 @@
 #
 # Examples:
 #   bash watch_and_resubmit.sh --marker "MAP init" -- \
-#       bash packages/candel-maser/scripts/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b
+#       bash scripts/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b
 #
 #   bash watch_and_resubmit.sh --marker "saved samples to" --no-resume -- \
-#       bash packages/candel-maser/scripts/submit.sh --sampler mcmc -q cmbgpu --galaxy NGC5765b
+#       bash scripts/submit.sh --sampler mcmc -q cmbgpu --galaxy NGC5765b
 set -euo pipefail
 
-ROOT="${CANDEL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Core CANDEL checkout (data/, results/, local_config.toml); defaults
+# to a sibling clone of candel-cosmo/CANDEL.
+ROOT="${CANDEL_ROOT:-$(cd "$PKG_ROOT/../CANDEL" 2>/dev/null && pwd)}"
+[[ -f "$ROOT/scripts/_submit_lib.sh" ]] || {
+    echo "[ERROR] Set CANDEL_ROOT to the CANDEL core checkout." >&2; exit 1; }
 # shellcheck source=../../../scripts/_submit_lib.sh
 source "$ROOT/scripts/_submit_lib.sh"
 
@@ -48,23 +53,23 @@ resubmit only the galaxies whose latest jobs missed the marker.
 Examples:
   # DE MAP (one galaxy, auto-resume on timeout)
   bash watch_and_resubmit.sh --marker "MAP init" -- \
-      bash packages/candel-maser/scripts/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b
+      bash scripts/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b
 
   # DE MAP (multiple galaxies)
   bash watch_and_resubmit.sh --marker "MAP init" -- \
-      bash packages/candel-maser/scripts/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b,NGC6264
+      bash scripts/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b,NGC6264
 
   # DE MAP (all MCP H0 galaxies; excludes NGC4258)
   bash watch_and_resubmit.sh --marker "MAP init" -- \
-      bash packages/candel-maser/scripts/submit.sh --sampler de -q cmbgpu --galaxy all
+      bash scripts/submit.sh --sampler de -q cmbgpu --galaxy all
 
   # MCMC sampler (one galaxy; no resume flag exists)
   bash watch_and_resubmit.sh --marker "saved samples to" --no-resume -- \
-      bash packages/candel-maser/scripts/submit.sh --sampler mcmc -q cmbgpu --galaxy NGC5765b
+      bash scripts/submit.sh --sampler mcmc -q cmbgpu --galaxy NGC5765b
 
   # Custom poll and retries
   bash watch_and_resubmit.sh --marker "MAP init" --max-retries 10 --poll 60 -- \
-      bash packages/candel-maser/scripts/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b
+      bash scripts/submit.sh --sampler de -q cmbgpu --galaxy NGC5765b
 EOF
 }
 

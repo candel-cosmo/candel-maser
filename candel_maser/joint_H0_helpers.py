@@ -443,7 +443,7 @@ def _volume_log_Z_redshift(volume_data, H0, sigma_pec, velocity_beta, Vext,
 def main():
     raise SystemExit(
         "joint_H0_helpers.py is helper-only; use "
-        "packages/candel-maser/candel_maser/run_joint_H0.py or submit.sh --infer-H0."
+        "candel_maser/run_joint_H0.py or submit.sh --infer-H0."
     )
 
 

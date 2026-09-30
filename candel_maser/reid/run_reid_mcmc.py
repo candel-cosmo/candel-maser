@@ -338,7 +338,7 @@ def load_config_init(config_path: Path, galaxy: str, vcor: float,
     cfg = load_toml(config_path)
     gcfg = load_galaxy_config(config_path, galaxy, dataset=dataset)
     if variant not in gcfg:
-        where = (f"packages/candel-maser/configs/init_{dataset}.toml"
+        where = (f"configs/init_{dataset}.toml"
                  if dataset is not None else "a dataset init file (no dataset "
                  "was selected)")
         raise KeyError(
